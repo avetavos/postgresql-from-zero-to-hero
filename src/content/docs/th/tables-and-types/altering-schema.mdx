@@ -1,0 +1,218 @@
+---
+title: การแก้ไข schema
+description: พัฒนาตารางที่ใช้งานอยู่ด้วย ALTER TABLE — เพิ่มและ drop column, เปลี่ยนชนิด, เพิ่มและ drop constraint, เปลี่ยนชื่อ และรัน migration อย่างปลอดภัยโดยไม่สูญเสียข้อมูล
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+schema ไม่มีวันเสร็จสมบูรณ์ ฟีเจอร์ใหม่ต้องการ column ใหม่ ฟีเจอร์เก่าล้าสมัย และกฎเข้มงวดขึ้นเมื่อคุณเรียนรู้ว่าข้อมูลมีหน้าตาอย่างไรจริง ๆ คำสั่ง `ALTER TABLE` เปลี่ยนรูปทรงของตารางที่มีอยู่ในที่ตั้งของมัน โดยเก็บแถวที่คุณมีอยู่แล้วไว้ เช่นเดียวกับ `CREATE TABLE` มันเป็น DDL และมักถูกนำมาใช้ผ่านขั้นตอน migration เพื่อให้การเปลี่ยนแปลงนั้นมีเวอร์ชันกำกับและทำซ้ำได้
+
+เราจะพัฒนาตาราง `products` ต่อจากช่วงต้นของโมดูล
+
+## เพิ่มและ drop column
+
+`ADD COLUMN` ผนวก column ใหม่เข้ากับทุกแถวที่มีอยู่ หากคุณไม่ให้ default แถวที่มีอยู่จะได้ null ใน column ใหม่นั้น ส่วน `DROP COLUMN` ลบ column และข้อมูลของมันไปอย่างถาวร
+
+```sql
+ALTER TABLE products ADD COLUMN description text;
+
+ALTER TABLE products DROP COLUMN description;
+```
+
+คุณสามารถรวมการเปลี่ยนแปลงหลายอย่างไว้ในคำสั่งเดียวได้โดยคั่นด้วยจุลภาค ซึ่งทำให้การแก้ไขที่เกี่ยวข้องกันอยู่ในขั้นตอนเดียวที่เป็น atomic
+
+```sql
+ALTER TABLE products
+  ADD COLUMN sku text,
+  ADD COLUMN in_stock boolean NOT NULL DEFAULT true;
+```
+
+**ใน pgAdmin:** หลังจากแก้ไขตาราง ให้ refresh โหนด Columns ของมันในแผนผัง browser เพื่อดูการเปลี่ยนแปลง หรือใช้ dialog Properties ของตารางเพื่อเพิ่มและลบ column ผ่านฟอร์ม
+
+## เปลี่ยนชนิดของ column
+
+`ALTER COLUMN ... TYPE` แปลง column ไปเป็นชนิดใหม่ PostgreSQL สามารถทำการแปลงได้หลายอย่างโดยอัตโนมัติ แต่เมื่อการเปลี่ยนแปลงไม่ชัดเจน คุณจะจัดหานิพจน์ `USING` ที่บอกมันว่าจะแปลงค่าเดิมแต่ละค่าอย่างไร
+
+```sql
+ALTER TABLE products
+  ALTER COLUMN sku TYPE varchar(32);
+
+ALTER TABLE products
+  ALTER COLUMN price TYPE numeric(12, 2) USING price::numeric(12, 2);
+```
+
+การแปลงจะรันผ่านทุกแถว ดังนั้นบนตารางขนาดใหญ่สิ่งนี้อาจใช้เวลาสักพักและถือ lock ไว้ ส่วนบทเรียนสุดท้ายครอบคลุมวิธีทำให้ปลอดภัย
+
+## เพิ่มและ drop constraint
+
+คุณสามารถติดตั้ง constraint ลงในตารางหลังจากที่มันมีอยู่แล้ว หรือ drop มันด้วยชื่อ การตั้งชื่อ constraint ตอนที่คุณสร้างมัน อย่างที่บทเรียนก่อนแนะนำ คือสิ่งที่ทำให้การ drop มันสะอาด
+
+```sql
+ALTER TABLE products
+  ADD CONSTRAINT products_price_positive CHECK (price > 0);
+
+ALTER TABLE products
+  DROP CONSTRAINT products_price_positive;
+```
+
+การเพิ่ม constraint จะสแกนแถวที่มีอยู่เพื่อยืนยันว่าทั้งหมดเป็นไปตามมัน หากมีแถวใดล้มเหลว ทั้งคำสั่งจะถูกปฏิเสธและไม่มีอะไรเปลี่ยนแปลง
+
+## การเปลี่ยนชื่อ
+
+`RENAME` เปลี่ยนชื่อของตารางหรือ column ตัวเดียวโดยไม่แตะต้องข้อมูล มันเกิดขึ้นทันที แต่สิ่งใดก็ตามที่อ้างถึงชื่อเดิม — view, query ของแอปพลิเคชัน, รายงานที่บันทึกไว้ — ต้องถูกอัปเดตด้วย
+
+```sql
+ALTER TABLE products RENAME COLUMN sku TO product_code;
+
+ALTER TABLE products RENAME TO catalog_items;
+```
+
+## migration ที่ปลอดภัย: กับดักของ NOT NULL
+
+อุบัติเหตุ migration ที่พบบ่อยที่สุดคือการเพิ่ม column แบบ `NOT NULL` ลงในตารางที่มีแถวอยู่แล้ว แถวที่มีอยู่เหล่านั้นไม่มีค่าสำหรับ column ใหม่ ดังนั้น constraint จึงถูกละเมิดทันทีและคำสั่งล้มเหลว มีเส้นทางที่ปลอดภัยสองทาง: ให้ `DEFAULT` กับ column เพื่อให้ทุกแถวที่มีอยู่ถูกเติมในคราวเดียว หรือเพิ่ม column แบบ nullable, backfill ค่า แล้วจึงทำให้เข้มงวดขึ้นเป็น `NOT NULL`
+
+```sql
+-- Path 1: a default fills every existing row in one step
+ALTER TABLE products
+  ADD COLUMN currency text NOT NULL DEFAULT 'USD';
+
+-- Path 2: add nullable, backfill, then enforce
+ALTER TABLE products ADD COLUMN region text;
+UPDATE products SET region = 'global' WHERE region IS NULL;
+ALTER TABLE products ALTER COLUMN region SET NOT NULL;
+```
+
+เส้นทางที่สองเป็นตัวเลือกมาตรฐานเมื่อไม่มี default เดียวที่สมเหตุสมผล เพราะมันให้คุณคำนวณค่าของแต่ละแถวก่อนล็อก column นั้นไว้
+
+## รัน migration ใน transaction
+
+คำสั่ง `ALTER TABLE` ส่วนใหญ่ใน PostgreSQL เป็น transactional ดังนั้นคุณสามารถห่อ migration หลายขั้นตอนไว้ใน transaction และให้มันทำงานแบบทั้งหมดหรือไม่ทำเลย หากขั้นตอนใดล้มเหลว `ROLLBACK` จะทิ้งตารางไว้เหมือนเดิมทุกประการ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    ALTER TABLE products ADD COLUMN region text;
+    UPDATE products SET region = 'global' WHERE region IS NULL;
+    ALTER TABLE products ALTER COLUMN region SET NOT NULL;
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('ALTER TABLE products ADD COLUMN region text');
+      await client.query("UPDATE products SET region = 'global' WHERE region IS NULL");
+      await client.query('ALTER TABLE products ALTER COLUMN region SET NOT NULL');
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("ALTER TABLE products ADD COLUMN region text")
+        cur.execute("UPDATE products SET region = 'global' WHERE region IS NULL")
+        cur.execute("ALTER TABLE products ALTER COLUMN region SET NOT NULL")
+    # commits if the block succeeds, rolls back on exception
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    steps := []string{
+        "ALTER TABLE products ADD COLUMN region text",
+        "UPDATE products SET region = 'global' WHERE region IS NULL",
+        "ALTER TABLE products ALTER COLUMN region SET NOT NULL",
+    }
+    for _, s := range steps {
+        if _, err := tx.Exec(ctx, s); err != nil {
+            tx.Rollback(ctx)
+            return err
+        }
+    }
+    err = tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE products ADD COLUMN region text")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE products SET region = 'global' WHERE region IS NULL")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE products ALTER COLUMN region SET NOT NULL")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เนื่องจากสามขั้นตอนนี้รันภายใน transaction เดียว ตารางจึงไม่เคยถูกมองเห็นโดย session อื่นในสถานะที่ migrate ไปได้ครึ่งทาง
+
+## เคล็ดลับ / ข้อควรระวัง
+
+- `ALTER TABLE` ถือ lock บนตาราง หลายรูปแบบถือ lock ที่แข็งแกร่งซึ่งปิดกั้นการอ่านและการเขียนชั่วครู่ ดังนั้นบนตาราง production ที่มีการใช้งานหนาแน่น ให้เลือกคำสั่งที่สั้นและตรงเป้า แล้วรันมันในช่วงเวลาที่เงียบ
+- การเพิ่ม column แบบ `NOT NULL` ที่มี `DEFAULT` เป็นค่าคงที่นั้นเร็วใน PostgreSQL สมัยใหม่ เพราะมันไม่ได้เขียนทุกแถวใหม่ แต่การเปลี่ยนชนิดของ column ยังคงสแกนและเขียนตารางใหม่
+- ห่อ migration หลายขั้นตอนไว้ใน transaction เพื่อให้ความล้มเหลวกลางคันถูก roll back อย่างสะอาดและไม่ทิ้ง schema ไว้ในสภาพเปลี่ยนไปบางส่วน
+- การเพิ่ม constraint จะตรวจสอบทุกแถวที่มีอยู่ บนตารางขนาดใหญ่การสแกนนี้อาจช้า ลองพิจารณาเพิ่ม constraint แบบ `NOT VALID` ก่อน แล้วค่อย validate มันแยกต่างหากเมื่อคุณต้องการลดเวลา lock ให้น้อยที่สุด
+- `DROP COLUMN` และ `DROP CONSTRAINT` ย้อนกลับไม่ได้เมื่อ commit แล้ว ยืนยันว่าไม่มีอะไรขึ้นต่อสิ่งที่คุณกำลังจะลบ และพึ่งพา transaction ที่คุณ roll back ได้ในขณะที่คุณตรวจสอบ
+
+<Callout title="migrate ไปข้างหน้า แต่อย่ามืดบอด">
+ปฏิบัติกับทุกการเปลี่ยนแปลง schema เหมือนเป็น migration: ขั้นตอนเล็ก ๆ ที่มีชื่อกำกับและย้อนกลับได้ซึ่งคุณทดสอบได้ก่อนที่มันจะแตะต้อง production เพิ่ม column ด้วย default หรือ backfill มัน ทำให้ constraint เข้มงวดขึ้นหลังจากข้อมูลสะอาดแล้วเท่านั้น และรันการเปลี่ยนแปลงหลายขั้นตอนใน transaction migration ที่ระมัดระวังจะมองไม่เห็นจากผู้ใช้ ส่วน migration ที่สะเพร่าคือเหตุระบบล่ม
+</Callout>
+
+export const quizAltering = [
+  {
+    q: 'เหตุใดการเพิ่ม column แบบ NOT NULL โดยไม่มี default จึงล้มเหลวบนตารางที่มีแถวอยู่แล้ว?',
+    options: [
+      'column แบบ NOT NULL ไม่ได้รับอนุญาตหลังการสร้าง',
+      'แถวที่มีอยู่จะไม่มีค่า จึงละเมิด constraint',
+      'ALTER TABLE เพิ่ม column ไม่ได้',
+      'มันล็อกตารางไว้ตลอดไป',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'อะไรคือรูปแบบที่ปลอดภัยเมื่อไม่มี default เดียวที่สมเหตุสมผลสำหรับ column แบบ NOT NULL ใหม่?',
+    options: [
+      'drop และสร้างตารางใหม่',
+      'เพิ่มมันแบบ nullable, backfill ค่า แล้วตั้ง NOT NULL',
+      'ปิดใช้งาน constraints ชั่วคราว',
+      'ใช้ CHECK แทน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เหตุใดจึงห่อ migration ของ ALTER TABLE หลายขั้นตอนไว้ใน transaction?',
+    options: [
+      'เพื่อให้มันรันเร็วขึ้น',
+      'เพื่อให้ความล้มเหลวถูก roll back อย่างสะอาดและ schema ไม่ถูกทิ้งไว้ในสภาพเปลี่ยนไปครึ่งทาง',
+      'เพื่อหลีกเลี่ยงการถือ lock ใด ๆ',
+      'เพื่อข้ามการ validate แถวที่มีอยู่',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tables-and-types/altering-schema" questions={quizAltering} />
+
+<ProgressTracker client:visible id="tables-and-types/altering-schema" />

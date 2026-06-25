@@ -1,0 +1,319 @@
+---
+title: Selecting and filtering
+description: Read rows with SELECT — choose columns, narrow with WHERE, sort with ORDER BY, and page through results using LIMIT and OFFSET.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Reading is the most common thing you do with a database, and `SELECT` is how you do it. A `SELECT` describes which columns you want, which rows qualify, in what order, and how many. The server returns a result set — zero or more rows — without changing anything on disk.
+
+These examples assume the `authors` table is populated with a handful of rows from the insert lesson.
+
+## Choosing columns
+
+List the columns you want after `SELECT`. Use `*` only for quick exploration; in real code, name the columns so the result stays stable even if someone adds a column later.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT id, name, born FROM authors;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query('SELECT id, name, born FROM authors');
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("SELECT id, name, born FROM authors")
+    for row in cur.fetchall():
+        print(row)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, "SELECT id, name, born FROM authors")
+    defer rows.Close()
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("SELECT id, name, born FROM authors")
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ id |      name       | born
+----+-----------------+------
+  1 | Mira Castellan  | 1971
+  2 | Devon Reyes     | 1985
+  3 | Priya Anand     | 1990
+  4 | Tomas Holt      | 1962
+(4 rows)
+```
+
+## Narrowing with WHERE
+
+`WHERE` keeps only the rows whose condition is true. You can compare with `=`, `<`, `>`, `<=`, `>=`, and combine conditions with `AND` and `OR`.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name, born
+    FROM authors
+    WHERE born >= 1980 AND born < 1995;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT name, born FROM authors WHERE born >= $1 AND born < $2',
+      [1980, 1995],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT name, born FROM authors WHERE born >= %s AND born < %s",
+        (1980, 1995),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "SELECT name, born FROM authors WHERE born >= $1 AND born < $2",
+        1980, 1995)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("SELECT name, born FROM authors WHERE born >= $1 AND born < $2")
+        .bind(1980_i32)
+        .bind(1995_i32)
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    name     | born
+-------------+------
+ Devon Reyes | 1985
+ Priya Anand | 1990
+(2 rows)
+```
+
+## IN, BETWEEN, and pattern matching
+
+`IN` checks membership in a list, `BETWEEN` is an inclusive range, and `LIKE` matches text patterns. `LIKE` is case-sensitive; PostgreSQL also offers `ILIKE` for a case-insensitive match. In patterns, `%` matches any run of characters and `_` matches exactly one.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name, born
+    FROM authors
+    WHERE born BETWEEN 1960 AND 1980
+      AND name ILIKE '%a%';
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT name, born FROM authors WHERE born BETWEEN $1 AND $2 AND name ILIKE $3',
+      [1960, 1980, '%a%'],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT name, born FROM authors WHERE born BETWEEN %s AND %s AND name ILIKE %s",
+        (1960, 1980, "%a%"),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "SELECT name, born FROM authors WHERE born BETWEEN $1 AND $2 AND name ILIKE $3",
+        1960, 1980, "%a%")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT name, born FROM authors WHERE born BETWEEN $1 AND $2 AND name ILIKE $3",
+    )
+    .bind(1960_i32)
+    .bind(1980_i32)
+    .bind("%a%")
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+      name      | born
+----------------+------
+ Mira Castellan | 1971
+ Tomas Holt     | 1962
+(2 rows)
+```
+
+## Handling NULL
+
+`NULL` means "unknown", so it does not behave like an ordinary value. You cannot test it with `=`; use `IS NULL` and `IS NOT NULL` instead. Suppose one author has no recorded birth year.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name FROM authors WHERE born IS NULL;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query('SELECT name FROM authors WHERE born IS NULL');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("SELECT name FROM authors WHERE born IS NULL")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, "SELECT name FROM authors WHERE born IS NULL")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("SELECT name FROM authors WHERE born IS NULL")
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## Sorting and paging
+
+`ORDER BY` sorts the result; add `DESC` for descending. `LIMIT` caps the number of rows, and `OFFSET` skips rows from the top — together they let you page through a large table.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name, born
+    FROM authors
+    ORDER BY born DESC
+    LIMIT 2 OFFSET 1;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT name, born FROM authors ORDER BY born DESC LIMIT $1 OFFSET $2',
+      [2, 1],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT name, born FROM authors ORDER BY born DESC LIMIT %s OFFSET %s",
+        (2, 1),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "SELECT name, born FROM authors ORDER BY born DESC LIMIT $1 OFFSET $2",
+        2, 1)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("SELECT name, born FROM authors ORDER BY born DESC LIMIT $1 OFFSET $2")
+        .bind(2_i64)
+        .bind(1_i64)
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    name     | born
+-------------+------
+ Devon Reyes | 1985
+ Mira Castellan | 1971
+(2 rows)
+```
+
+**In pgAdmin:** run any of these in the Query Tool; results appear in the Data Output grid below, where you can also sort columns by clicking their headers.
+
+## Tips / gotchas
+
+- `NULL` uses three-valued logic: a comparison against `NULL` is neither true nor false but unknown, so such rows are excluded by `WHERE`. Always use `IS NULL` rather than `= NULL`.
+- `LIMIT` without an `ORDER BY` returns an arbitrary subset — the server may return rows in any order, and that order can change between runs. Always pair `LIMIT` with a deterministic `ORDER BY`.
+- `ILIKE` is convenient but cannot use a plain index efficiently; for heavy text search, look into trigram indexes or full-text search later in the course.
+- Selecting only the columns you need keeps result sets small and your code resilient to schema changes.
+
+<Callout title="Order before you page">
+Pagination only makes sense on a stable sort. If two rows tie on your sort column, add a tiebreaker such as `ORDER BY born DESC, id` so the same row never appears on two pages.
+</Callout>
+
+export const quizSelect = [
+  {
+    q: 'How do you correctly find rows where the born column is unknown?',
+    options: [
+      'WHERE born = NULL',
+      'WHERE born IS NULL',
+      'WHERE born == NULL',
+      'WHERE born <> 0',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is true about LIMIT without an ORDER BY?',
+    options: [
+      'It always returns the oldest rows',
+      'It returns an arbitrary, possibly changing subset',
+      'It raises an error',
+      'It sorts by primary key automatically',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which operator does a case-insensitive pattern match in PostgreSQL?',
+    options: ['LIKE', 'ILIKE', 'BETWEEN', 'IN'],
+    answer: 1,
+  },
+  {
+    q: 'What does OFFSET 1 do in a SELECT?',
+    options: [
+      'Returns only the first row',
+      'Skips the first row of the ordered result',
+      'Limits the result to one row',
+      'Offsets the column positions',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/select-and-filtering" questions={quizSelect} />
+
+<ProgressTracker client:visible id="crud-and-sql/select-and-filtering" />

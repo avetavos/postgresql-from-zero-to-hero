@@ -1,0 +1,96 @@
+---
+title: Advanced PostgreSQL
+description: PostgreSQL is more than tables — JSONB documents, full-text search, views, and stored logic turn it into an application platform. An overview of what this module covers.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+By now you can create tables, write CRUD statements, join related rows, and reason about indexes. That is the relational core, and for many applications it is enough. But PostgreSQL quietly ships with a second layer of features that let one database do work people often reach for extra services to handle: storing flexible documents, searching natural-language text, caching expensive query results, and running logic inside the server itself.
+
+This module is a tour of that second layer. None of it replaces what you already know — instead it sits on top of ordinary tables, columns, and queries. The goal is to recognize when a built-in PostgreSQL feature can save you from bolting on another moving part.
+
+## Postgres is more than tables
+
+A plain table stores fixed columns with fixed types. The features in this module extend that picture in four directions, all without leaving the database.
+
+export const platformDiagram = `flowchart TD
+  T[(Ordinary tables)] --> J[JSONB columns: flexible documents]
+  T --> F[Full-text search: rank natural language]
+  T --> V[Views and materialized views: reusable and cached queries]
+  T --> L[Functions and triggers: logic inside the server]
+  J --> P[One database, many jobs]
+  F --> P
+  V --> P
+  L --> P`;
+
+<Mermaid code={platformDiagram} title="Four ways Postgres extends the plain table" />
+
+Each branch answers a different real-world need. A `jsonb` column lets a single row hold a nested document whose shape can vary between rows. Full-text search turns a block of prose into something you can query by meaning rather than exact substring. Views give a complicated query a name, and materialized views remember its result. Functions and triggers move small pieces of logic next to the data so they run consistently no matter which application touches the table.
+
+## A quick comparison
+
+It helps to see at a glance what problem each feature solves and what it costs you.
+
+| Feature                 | Solves                                  | Main trade-off                          |
+|-------------------------|-----------------------------------------|-----------------------------------------|
+| `jsonb` columns         | Flexible, nested, schema-light data     | Weaker type guarantees than columns     |
+| Full-text search        | Ranked search over natural language     | Needs the right language configuration  |
+| Views                   | Naming and reusing a complex query      | Recomputed on every read                |
+| Materialized views      | Caching an expensive query result       | Results are stale until refreshed       |
+| Functions and triggers  | Server-side logic that always runs      | Hidden behavior that must be documented |
+
+## What this module covers
+
+- **JSONB** — store flexible documents in a column, reach inside them with operators like `->` and `->>`, update them with `jsonb_set`, and speed up containment queries with a GIN index.
+- **Full-text search** — turn text into a `tsvector`, match it against a `tsquery` with the `@@` operator, rank results with `ts_rank`, and index it for speed.
+- **Views and materialized views** — give a query a name with `CREATE VIEW`, or cache its result with `CREATE MATERIALIZED VIEW` and refresh it on demand.
+- **Functions and triggers** — write a small PL/pgSQL function that returns a value, and wire a trigger so it runs automatically on `INSERT` or `UPDATE`.
+
+## Tips / gotchas
+
+- Reach for these features when they fit, not because they exist. A plain column beats a `jsonb` field whenever the shape is known and stable.
+- Most of this layer is still just SQL. You will keep writing `SELECT`, `INSERT`, and `WHERE` — the new pieces slot into statements you already understand.
+- Every advanced feature has an indexing story. Knowing when to add a GIN index is often the difference between a feature that scales and one that crawls.
+- Logic that lives in the database is powerful but easy to forget. Document any view, function, or trigger so the next person knows it is there.
+
+<Callout title="Mental model">
+Picture PostgreSQL as a relational core with optional bolt-ons that ship in the box. You are not learning a different database in this module — you are learning which built-in tool to grab so you can avoid adding a separate search engine, document store, or cache to your stack.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'Which PostgreSQL feature is best suited to storing a flexible, nested document whose shape can vary between rows?',
+    options: ['A view', 'A jsonb column', 'A trigger', 'A tsvector'],
+    answer: 1,
+  },
+  {
+    q: 'What is the main trade-off of a materialized view compared with a plain view?',
+    options: [
+      'It cannot be indexed',
+      'Its stored result is stale until you refresh it',
+      'It can only hold one row',
+      'It recomputes on every read',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the shared theme of every feature in this module?',
+    options: [
+      'They each require an external service',
+      'They replace ordinary tables entirely',
+      'They extend the plain table without leaving the database',
+      'They only work in psql',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="advanced-postgres/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="advanced-postgres/index" />

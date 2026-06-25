@@ -1,0 +1,336 @@
+---
+title: Aggregates and GROUP BY
+description: Collapse many rows into summary numbers with count, sum, avg, min, and max, group them with GROUP BY, filter groups with HAVING, and understand count(*) versus count(col).
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+So far every query returned rows that already existed. Aggregate functions are different: they read many rows and produce a single summary value. How many books are there? What are the total copies sold? The average publication year? Each of those is one number squeezed out of a whole column. Add `GROUP BY` and you get one summary number per group instead of one for the whole table.
+
+We continue with the `authors`, `books`, and `sales` tables.
+
+## Aggregate functions over the whole table
+
+With no `GROUP BY`, an aggregate function folds the entire result down to a single row. The most common are `count`, `sum`, `avg`, `min`, and `max`.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT
+      count(*)    AS sale_rows,
+      sum(copies) AS total_copies,
+      avg(copies) AS avg_per_sale,
+      max(copies) AS biggest_sale
+    FROM sales;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
+             avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+      FROM sales
+    `);
+    console.log(res.rows[0]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
+               avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+        FROM sales
+    """)
+    summary = cur.fetchone()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    row := conn.QueryRow(ctx, `
+      SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
+             avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+      FROM sales`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let row = sqlx::query(
+        "SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
+                avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+         FROM sales",
+    )
+    .fetch_one(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ sale_rows | total_copies |     avg_per_sale     | biggest_sale
+-----------+--------------+----------------------+--------------
+         6 |         1850 | 308.3333333333333333 |          900
+(1 row)
+```
+
+Note that `avg` returns a high-precision number; wrap it in `round(avg(copies), 2)` when you want a tidy two-decimal figure.
+
+## GROUP BY: one summary per group
+
+`GROUP BY` splits the rows into buckets that share the same value in the listed column, then runs the aggregate once per bucket. Here we total the copies sold per region.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT region, sum(copies) AS copies_in_region
+    FROM sales
+    GROUP BY region
+    ORDER BY copies_in_region DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT region, sum(copies) AS copies_in_region
+      FROM sales
+      GROUP BY region
+      ORDER BY copies_in_region DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT region, sum(copies) AS copies_in_region
+        FROM sales
+        GROUP BY region
+        ORDER BY copies_in_region DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT region, sum(copies) AS copies_in_region
+      FROM sales
+      GROUP BY region
+      ORDER BY copies_in_region DESC`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT region, sum(copies) AS copies_in_region
+         FROM sales
+         GROUP BY region
+         ORDER BY copies_in_region DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ region | copies_in_region
+--------+------------------
+ East   |             1100
+ West   |              750
+(2 rows)
+```
+
+Each region becomes one output row. The `region` column is allowed in the `SELECT` because it is the thing we grouped by; everything else must be inside an aggregate.
+
+## Filtering groups with HAVING
+
+`WHERE` filters individual rows *before* they are grouped. To filter on the result of an aggregate you need `HAVING`, which runs *after* grouping. Here we keep only regions that sold more than eight hundred copies.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT region, sum(copies) AS copies_in_region
+    FROM sales
+    GROUP BY region
+    HAVING sum(copies) > 800
+    ORDER BY copies_in_region DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT region, sum(copies) AS copies_in_region
+      FROM sales
+      GROUP BY region
+      HAVING sum(copies) > 800
+      ORDER BY copies_in_region DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT region, sum(copies) AS copies_in_region
+        FROM sales
+        GROUP BY region
+        HAVING sum(copies) > 800
+        ORDER BY copies_in_region DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT region, sum(copies) AS copies_in_region
+      FROM sales
+      GROUP BY region
+      HAVING sum(copies) > 800
+      ORDER BY copies_in_region DESC`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT region, sum(copies) AS copies_in_region
+         FROM sales
+         GROUP BY region
+         HAVING sum(copies) > 800
+         ORDER BY copies_in_region DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ region | copies_in_region
+--------+------------------
+ East   |             1100
+(1 row)
+```
+
+Use `WHERE` to discard rows you never want counted, and `HAVING` to discard whole groups based on their totals. They often appear in the same query.
+
+## count(*) versus count(column)
+
+`count(*)` counts rows. `count(column)` counts rows where that column is not `NULL`. The difference matters whenever a column can be missing. Joining `authors` to `books` with a `LEFT JOIN` shows it clearly.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT a.name,
+           count(*)      AS row_count,
+           count(b.id)   AS book_count
+    FROM authors AS a
+    LEFT JOIN books AS b ON b.author_id = a.id
+    GROUP BY a.name
+    ORDER BY a.name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT a.name, count(*) AS row_count, count(b.id) AS book_count
+      FROM authors AS a
+      LEFT JOIN books AS b ON b.author_id = a.id
+      GROUP BY a.name
+      ORDER BY a.name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT a.name, count(*) AS row_count, count(b.id) AS book_count
+        FROM authors AS a
+        LEFT JOIN books AS b ON b.author_id = a.id
+        GROUP BY a.name
+        ORDER BY a.name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT a.name, count(*) AS row_count, count(b.id) AS book_count
+      FROM authors AS a
+      LEFT JOIN books AS b ON b.author_id = a.id
+      GROUP BY a.name
+      ORDER BY a.name`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT a.name, count(*) AS row_count, count(b.id) AS book_count
+         FROM authors AS a
+         LEFT JOIN books AS b ON b.author_id = a.id
+         GROUP BY a.name
+         ORDER BY a.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    name     | row_count | book_count
+-------------+-----------+------------
+ Mara Linde  |         2 |          2
+ Owen Pryce  |         1 |          1
+ Sela Vance  |         1 |          0
+(3 rows)
+```
+
+Sela Vance shows `row_count` of one because the `LEFT JOIN` still produces a row for her, but `book_count` is zero because `b.id` is `NULL` there and `count(b.id)` skips `NULL` values.
+
+## Tips / gotchas
+
+- Every column in the `SELECT` list that is not wrapped in an aggregate must appear in the `GROUP BY`. Otherwise PostgreSQL cannot tell which row's value to show and raises an error.
+- Reach for `count(*)` to count rows and `count(col)` to count non-`NULL` values; use `count(DISTINCT col)` to count distinct non-`NULL` values.
+- `WHERE` filters rows before grouping; `HAVING` filters groups after. You cannot put an aggregate in `WHERE`.
+- Aggregates ignore `NULL` for `sum`, `avg`, `min`, and `max` too, so an average is over the non-`NULL` values only.
+
+<Callout title="GROUP BY collapses, and that is the point">
+After a `GROUP BY` you no longer have the original rows — you have one row per group. If you find yourself wanting both the group total and the individual rows in the same result, that is the signal to reach for a window function, covered in the last lesson of this module.
+</Callout>
+
+export const quizAggregates = [
+  {
+    q: 'What is the difference between count(*) and count(some_column)?',
+    options: [
+      'They are identical',
+      'count(*) counts all rows; count(some_column) counts only rows where that column is not NULL',
+      'count(*) is faster but less accurate',
+      'count(some_column) counts distinct values automatically',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which clause filters groups based on an aggregate result?',
+    options: ['WHERE', 'HAVING', 'GROUP BY', 'ORDER BY'],
+    answer: 1,
+  },
+  {
+    q: 'A non-aggregated column appears in your SELECT but not in GROUP BY. What happens?',
+    options: [
+      'PostgreSQL guesses a value',
+      'PostgreSQL raises an error',
+      'The column is silently dropped',
+      'It is treated as count(*)',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/aggregates-group-by" questions={quizAggregates} />
+
+<ProgressTracker client:visible id="joins-and-relationships/aggregates-group-by" />

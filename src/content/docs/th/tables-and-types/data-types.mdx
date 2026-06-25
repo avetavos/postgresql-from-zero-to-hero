@@ -1,0 +1,213 @@
+---
+title: ชนิดข้อมูล
+description: ทัวร์ชนิดข้อมูลหลักของ PostgreSQL — ตัวเลข, text, boolean, วันที่และเวลา, UUID, JSON, array และ enum — และเรียนรู้ว่าควรเลือกแบบใดสำหรับ column ทั่วไป
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+data type คือการตัดสินใจที่สำคัญที่สุดเพียงอย่างเดียวที่คุณทำเกี่ยวกับ column มันควบคุมว่าค่าใดเข้าได้ ใช้พื้นที่เท่าใด เรียงลำดับและเปรียบเทียบกันอย่างไร และ operator ใดทำงานกับมันได้ PostgreSQL มาพร้อมชุดชนิดข้อมูลในตัวที่หลากหลาย และยังให้คุณนิยามชนิดของตัวเองได้ด้วย บทเรียนนี้จะพาทัวร์ชนิดที่คุณจะหยิบมาใช้บ่อยที่สุด พร้อมตัวอย่างสั้น ๆ ที่คุณรันได้
+
+## ตัวเลข
+
+สำหรับจำนวนเต็ม `integer` (สี่ไบต์ ได้ถึงราว ๆ สองพันล้าน) ครอบคลุมตัวนับและ id ส่วนใหญ่ ขณะที่ `bigint` (แปดไบต์) จัดการกับช่วงที่ใหญ่กว่าได้ สำหรับค่าที่ความแม่นยำสำคัญ — เงินเป็นอันดับแรก — ให้ใช้ `numeric` ซึ่งเก็บทศนิยมได้อย่างแม่นยำ ชนิดทศนิยมแบบ floating-point อย่าง `real` นั้นเร็วแต่เป็นค่าโดยประมาณ ดังนั้นเก็บไว้ใช้กับข้อมูลทางวิทยาศาสตร์หรือการวัดที่ยอมรับการปัดเศษเล็กน้อยได้
+
+```sql
+CREATE TABLE measurements (
+  count_int  integer,
+  count_big  bigint,
+  price      numeric(10, 2),
+  reading    real
+);
+
+INSERT INTO measurements VALUES (42, 9000000000, 19.99, 3.14);
+SELECT * FROM measurements;
+```
+
+```text
+ count_int | count_big  | price | reading
+-----------+------------+-------+---------
+        42 | 9000000000 | 19.99 |    3.14
+(1 row)
+```
+
+## Text
+
+PostgreSQL มีชนิด string ที่ใช้ในชีวิตประจำวันสองแบบ `text` เก็บ string ความยาวเท่าใดก็ได้ และ `varchar(n)` เก็บ string ได้ถึง `n` ตัวอักษร ไม่มีบทลงโทษด้านประสิทธิภาพสำหรับ `text` ขีดจำกัดความยาวบน `varchar` คือความแตกต่างที่แท้จริงเพียงอย่างเดียว และคุณสามารถบังคับความยาวด้วย constraint แบบ `CHECK` แทนได้เสมอ
+
+```sql
+CREATE TABLE notes (
+  title  varchar(120),
+  body   text
+);
+
+INSERT INTO notes VALUES ('Release plan', 'Ship the new dashboard on Friday.');
+SELECT title, body FROM notes;
+```
+
+```text
+    title     |               body
+--------------+-----------------------------------
+ Release plan | Ship the new dashboard on Friday.
+(1 row)
+```
+
+## Boolean
+
+column แบบ `boolean` เก็บ true, false หรือ null PostgreSQL ยอมรับการเขียนได้หลายแบบตอน input — `true`, `'t'`, `'yes'`, `1` และค่า false ที่เทียบเท่ากัน — แต่จะแสดงค่าเป็น `t` หรือ `f` เสมอ
+
+```sql
+SELECT true AS yes, false AS no, null::boolean AS unknown;
+```
+
+```text
+ yes | no | unknown
+-----+----+---------
+ t   | f  |
+(1 row)
+```
+
+## วันที่และเวลา
+
+สำหรับวันตามปฏิทินที่ไม่มีเวลา ให้ใช้ `date` สำหรับช่วงเวลาขณะหนึ่ง ให้ใช้ `timestamptz` — ย่อมาจาก timestamp with time zone — ซึ่งเก็บช่วงเวลานั้นเป็น UTC และแปลงไปและกลับจาก time zone ของ session ของคุณโดยอัตโนมัติ ชนิด `timestamp` ธรรมดาที่ไม่มี zone นั้นดูคล้ายกันแต่สูญเสียบริบทนั้นไป และเป็นแหล่งของบั๊กที่พบได้บ่อย
+
+```sql
+SELECT
+  current_date                   AS today,
+  now()                          AS moment,
+  date '2026-01-31'              AS a_day;
+```
+
+```text
+   today    |             moment              |   a_day
+------------+-------------------------------+------------
+ 2026-06-25 | 2026-06-25 09:14:22.51+00      | 2026-01-31
+(1 row)
+```
+
+## UUID
+
+`uuid` เก็บตัวระบุที่ไม่ซ้ำกันในระดับสากลขนาด 128 บิต UUID เป็น primary key ที่ดีเมื่อ id ต้องถูกสร้างโดย client หรือต้องคาดเดาไม่ได้ เพราะมันไม่เปิดเผยจำนวนแถวอย่างที่ sequence ทำ
+
+```sql
+SELECT gen_random_uuid() AS id;
+```
+
+```text
+                  id
+--------------------------------------
+ 6f3a1b2c-9d4e-4f70-8a1b-2c3d4e5f6a7b
+(1 row)
+```
+
+## JSON ด้วย jsonb
+
+ชนิด `jsonb` เก็บ JSON ในรูปแบบ binary ที่ถูกแยกองค์ประกอบไว้แล้ว ซึ่ง query และทำ index ได้เร็ว เลือกมันมากกว่าชนิด `json` ธรรมดาที่เก็บข้อความดิบและ re-parse ทุกครั้งที่เข้าถึง คุณสามารถดึงค่าออกมาได้ด้วย arrow operator
+
+```sql
+CREATE TABLE events (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  payload jsonb
+);
+
+INSERT INTO events (payload)
+VALUES ('{"kind": "signup", "plan": "pro"}');
+
+SELECT payload ->> 'plan' AS plan FROM events;
+```
+
+```text
+ plan
+------
+ pro
+(1 row)
+```
+
+## Array
+
+ชนิดใดก็ตามสามารถกลายเป็น array ได้ด้วยการเติมวงเล็บเหลี่ยม ดังนั้น `int[]` จึงเป็น column ของ array ของจำนวนเต็ม array เหมาะกับ list ขนาดเล็กที่มีลำดับซึ่งเป็นของแถวเดียว เช่น tag ค่าคงที่ของ array เขียนด้วยปีกกาภายใน string ที่อยู่ในเครื่องหมายคำพูด
+
+```sql
+CREATE TABLE articles (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tags text[]
+);
+
+INSERT INTO articles (tags) VALUES ('{"sql", "postgres", "intro"}');
+SELECT tags, tags[1] AS first_tag FROM articles;
+```
+
+```text
+          tags          | first_tag
+------------------------+-----------
+ {sql,postgres,intro}   | sql
+(1 row)
+```
+
+## ชนิดแบบ enumerated
+
+เมื่อ column อาจเก็บได้เฉพาะชุดป้ายชื่อที่ตายตัว `enum` จะทำให้ค่าที่อนุญาตเป็นส่วนหนึ่งของชนิด คุณนิยามมันครั้งเดียวด้วย `CREATE TYPE` แล้วใช้มันเหมือนชนิดในตัวใด ๆ ค่าต่าง ๆ จะเรียงลำดับตามที่คุณไล่รายการไว้
+
+```sql
+CREATE TYPE order_status AS ENUM ('pending', 'paid', 'shipped', 'cancelled');
+
+CREATE TABLE orders (
+  id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  status order_status NOT NULL DEFAULT 'pending'
+);
+
+INSERT INTO orders (status) VALUES ('paid');
+SELECT id, status FROM orders;
+```
+
+```text
+ id | status
+----+--------
+  1 | paid
+(1 row)
+```
+
+**ใน pgAdmin:** ชนิดที่กำหนดเองซึ่งสร้างด้วย `CREATE TYPE` จะปรากฏใต้ Schemas แล้ว public แล้ว Types ในแผนผัง browser ข้าง ๆ โหนด Tables คุณสามารถตรวจดูป้ายชื่อที่อนุญาตของ enum ที่นั่นได้โดยไม่ต้องเขียน query
+
+## เคล็ดลับ / ข้อควรระวัง
+
+- ใช้ `timestamptz` ไม่ใช่ `timestamp` สำหรับช่วงเวลาขณะหนึ่งใด ๆ การเก็บเป็น UTC และแปลงตาม session ช่วยหลีกเลี่ยงบั๊กเรื่อง time-zone ได้ทั้งหมวดหมู่ หยิบ `timestamp` ธรรมดามาใช้เฉพาะเมื่อค่าหนึ่งไม่มี zone จริง ๆ เท่านั้น เช่น นาฬิกาปลุก local ที่เกิดซ้ำ ๆ
+- ใช้ `text` เป็นค่าเริ่มต้น และใช้ `varchar(n)` เฉพาะเมื่อความยาวสูงสุดที่แท้จริงเป็นส่วนหนึ่งของกฎ ไม่มีความแตกต่างด้านความเร็ว และ constraint แบบ `CHECK` สามารถบังคับขีดจำกัดบน `text` ได้หากคุณต้องการ
+- เก็บเงินใน `numeric` ไม่ใช่ใน `real` หรือ `double precision` floating point แบบ binary ไม่สามารถแทนค่าอย่าง 0.10 ได้อย่างแม่นยำ ซึ่งนำไปสู่ข้อผิดพลาดในการปัดเศษที่สะสมขึ้น
+- เลือก `jsonb` มากกว่า `json` รูปแบบ binary นั้น query ได้เร็วกว่าและทำ index ได้ ชนิด `json` แบบข้อความมีประโยชน์เป็นหลักเมื่อคุณต้องรักษารูปแบบของ input เดิมไว้ทุกประการ
+- `enum` เยี่ยมมากสำหรับชุดป้ายชื่อที่ตายตัวจริง ๆ แต่การเพิ่มหรือจัดลำดับค่าใหม่ในภายหลังต้องใช้ `ALTER TYPE` หากชุดนั้นเปลี่ยนบ่อย ตาราง lookup เล็ก ๆ ที่มี foreign key จะยืดหยุ่นกว่า
+
+<Callout title="เลือกชนิดที่แคบที่สุดที่ใช้ได้">
+ชนิดที่ถูกต้องทำหน้าที่สองอย่างพร้อมกัน: มันเก็บข้อมูลของคุณได้อย่างมีประสิทธิภาพ และมันปฏิเสธค่าที่ไม่ควรมีอยู่ column ที่กำหนดชนิดเป็น `numeric` สำหรับเงิน, `timestamptz` สำหรับเวลา และ `enum` สำหรับฟิลด์สถานะ เปลี่ยนบั๊กสามจำพวกให้กลายเป็นสถานะที่เป็นไปไม่ได้ การเลือกได้ดีตอนสร้างนั้นถูกกว่าการแก้ข้อมูลในภายหลัง
+</Callout>
+
+export const quizDataTypes = [
+  {
+    q: 'คุณควรใช้ชนิดใดเพื่อเก็บจำนวนเงินอย่างแม่นยำ?',
+    options: ['real', 'double precision', 'numeric', 'float'],
+    answer: 2,
+  },
+  {
+    q: 'เหตุใด timestamptz จึงเป็นที่นิยมกว่า timestamp ธรรมดาสำหรับช่วงเวลาขณะหนึ่ง?',
+    options: [
+      'มันใช้พื้นที่จัดเก็บน้อยกว่า',
+      'มันเก็บช่วงเวลานั้นเป็น UTC และแปลงตาม time zone ของ session',
+      'มันเรียงลำดับได้เร็วกว่า',
+      'มันอนุญาตค่า null ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ชนิด JSON ใดที่เก็บข้อมูลในรูปแบบ binary ที่ทำ index และ query ได้อย่างมีประสิทธิภาพ?',
+    options: ['json', 'jsonb', 'text', 'jsonarray'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tables-and-types/data-types" questions={quizDataTypes} />
+
+<ProgressTracker client:visible id="tables-and-types/data-types" />

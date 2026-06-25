@@ -1,0 +1,178 @@
+---
+title: Replication
+description: คัดลอกการเปลี่ยนแปลงของเซิร์ฟเวอร์ primary ไปยัง read replica ด้วย streaming replication เลือกระหว่างโหมด synchronous และ asynchronous เข้าใจ failover และใช้ logical replication เพื่อคัดลอกตารางที่เลือก
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+เซิร์ฟเวอร์ตัวเดียวคือจุดที่ล้มเหลวได้จุดเดียว ถ้าดิสก์ของมันพังหรือเครื่อง reboot ฐานข้อมูลของคุณก็หายไปจนกว่าจะมีคนมาแก้ไข **Replication** ขจัดความเสี่ยงนั้นด้วยการเก็บสำเนาข้อมูลหนึ่งชุดหรือมากกว่าไว้บนเครื่องอื่น โดยอัปเดตอย่างต่อเนื่องตามที่ต้นฉบับเปลี่ยนแปลง สำเนาเหล่านั้นยังช่วยให้คุณกระจาย traffic การอ่านไปยังเซิร์ฟเวอร์หลายตัวได้
+
+PostgreSQL มีให้สองรูปแบบ: **streaming replication** ที่คัดลอกทั้ง cluster แบบ byte-for-byte และ **logical replication** ที่คัดลอกตารางที่เลือกทีละแถว ทั้งสองแก้ปัญหาที่แตกต่างกัน บทเรียนนี้จึงครอบคลุมทั้งคู่
+
+## write-ahead log คือแหล่งความจริง
+
+ก่อนที่การเปลี่ยนแปลงจะแตะไฟล์ของตาราง PostgreSQL จะบันทึกมันลงใน **write-ahead log** (WAL): stream แบบ append-only ของทุกการแก้ไข log นี้มีไว้สำหรับ crash recovery แต่มันก็เป็นสิ่งที่ replica ต้องการพอดี ถ้าเซิร์ฟเวอร์ตัวที่สอง replay WAL record ชุดเดียวกันในลำดับเดียวกัน มันจะได้สำเนาข้อมูลที่เหมือนกันทุกประการ
+
+Streaming replication ทำสิ่งนั้นพอดี primary ส่ง WAL ของมันไปยัง replica แต่ละตัวผ่าน connection ของเครือข่าย และ replica แต่ละตัวก็ apply record เหล่านั้นอย่างต่อเนื่องเพื่อให้ตามทัน
+
+export const streamDiagram = `flowchart LR
+  C[Client write] --> P[(Primary)]
+  P -->|append| W[Write-ahead log]
+  W -->|stream WAL| R1[(Replica 1 - read only)]
+  W -->|stream WAL| R2[(Replica 2 - read only)]
+  RC1[Read query] --> R1
+  RC2[Read query] --> R2`;
+
+<Mermaid code={streamDiagram} title="primary ส่ง WAL ของมันไปยัง read replica" />
+
+Replica เป็นแบบอ่านอย่างเดียว: มัน apply การเปลี่ยนแปลงของ primary และตอบ query แบบ `SELECT` แต่ปฏิเสธการเขียน สิ่งนี้ทำให้มันเหมาะอย่างยิ่งสำหรับการรับภาระงานรายงาน analytics หรือ workload ที่เน้นการอ่านใด ๆ ออกจาก primary
+
+## การตั้งค่า streaming replication
+
+Streaming replication ถูกตั้งค่าบน primary ด้วยการตั้งค่าเพียงไม่กี่อย่างและบัญชีหนึ่งที่ replica ใช้เชื่อมต่อ ไฟล์ที่เกี่ยวข้องอยู่ใน data directory ของคุณ
+
+```conf
+# postgresql.conf on the primary
+wal_level = replica
+max_wal_senders = 10
+wal_keep_size = 512MB
+```
+
+```conf
+# pg_hba.conf on the primary: allow the replication account to connect
+host    replication    replicator    10.0.0.0/24    scram-sha-256
+```
+
+Replica ถูกสร้างขึ้นด้วยการทำ base backup ของ primary แล้วชี้มันไปที่ primary เพื่อ stream WAL ที่กำลังดำเนินอยู่ เครื่องมือที่คัดลอกสถานะเริ่มต้นคือ `pg_basebackup`
+
+```bash
+# Run on the new replica machine to clone the primary and start streaming
+pg_basebackup \
+  --host=primary.internal \
+  --username=replicator \
+  --pgdata=/var/lib/postgresql/data \
+  --wal-method=stream \
+  --write-recovery-conf
+```
+
+แฟล็ก `--write-recovery-conf` บันทึกรายละเอียดการเชื่อมต่อไว้เพื่อให้ replica รู้ว่าต้องเริ่ม stream ทันทีที่บูตขึ้นมา จากนั้นมันจะตาม primary โดยอัตโนมัติ
+
+## synchronous เทียบกับ asynchronous
+
+ตัวเลือกใหญ่ใน streaming replication คือ *เมื่อใด* ที่ primary จะถือว่าการเขียนเสร็จสิ้น
+
+| โหมด         | primary ยืนยันการ commit เมื่อ...                 | ข้อแลกเปลี่ยน                               |
+|--------------|---------------------------------------------------|--------------------------------------------|
+| Asynchronous | WAL ถูกเขียนในเครื่อง                              | เร็ว แต่ replica อาจล้าหลังได้             |
+| Synchronous  | replica อย่างน้อยหนึ่งตัวเก็บ WAL ไว้แล้วด้วย      | ไม่สูญข้อมูลตอน failover แต่เขียนช้ากว่า    |
+
+Asynchronous เป็นค่าเริ่มต้นและเป็นตัวเลือกที่ใช้กันทั่วไป การเขียนไม่เคยต้องรอเครือข่าย primary จึงยังเร็วอยู่ — แต่ replica อาจล้าหลังไปเล็กน้อย เรียกว่า **replication lag** query ที่ส่งไปยัง replica ที่ล้าหลังอาจยังไม่เห็น commit ล่าสุด
+
+Synchronous replication ทำให้ primary รอให้ replica ตอบรับทุกการ commit คุณเปิดใช้มันด้วยการระบุชื่อ replica ที่ต้องยืนยัน
+
+```conf
+# postgresql.conf on the primary
+synchronous_standby_names = 'replica1'
+```
+
+สิ่งนี้รับประกันว่า commit ที่ตอบรับแล้วจะรอดจากการสูญเสีย primary โดยแลกกับ write latency ที่สูงขึ้น
+
+## Failover
+
+ถ้า primary ตาย replica หนึ่งตัวต้องถูก **promote** ให้เป็น primary ตัวใหม่เพื่อให้การเขียนกลับมาทำงานได้ การ promote บอก replica ให้หยุดตามและเริ่มรับการเขียน
+
+```bash
+# On the chosen replica, promote it to primary
+pg_ctl promote --pgdata=/var/lib/postgresql/data
+```
+
+ในโปรดักชัน เรื่องนี้มักจัดการโดยเครื่องมืออัตโนมัติที่ตรวจจับความล้มเหลวและ promote standby ให้คุณ แต่การกระทำที่อยู่เบื้องหลังก็คือขั้นตอนเดียวเดิมนี้
+
+## logical replication: คัดลอกตารางที่เลือก
+
+Streaming replication คัดลอก *ทั้ง cluster* และไหลทางเดียวไปยัง read-only standby เท่านั้น บางครั้งคุณต้องการน้อยกว่านั้น — แค่ตารางไม่กี่ตาราง — หรือคุณต้องการคัดลอกระหว่าง PostgreSQL major version ที่ต่างกัน เช่นระหว่างการอัปเกรด นั่นคือ **logical replication** ที่สร้างบนโมเดลแบบ publish-and-subscribe
+
+บนต้นทางคุณสร้าง **publication** ที่ระบุชื่อตารางที่จะแชร์ บนปลายทางคุณสร้าง **subscription** ที่เชื่อมต่อและคัดลอกมัน
+
+```sql
+-- On the source database: publish two tables
+CREATE PUBLICATION analytics_pub FOR TABLE orders, customers;
+```
+
+```sql
+-- On the destination database: subscribe to that publication
+CREATE SUBSCRIPTION analytics_sub
+  CONNECTION 'host=source.internal dbname=shop user=repl password=secret'
+  PUBLICATION analytics_pub;
+```
+
+Subscriber คัดลอกแถวที่มีอยู่ก่อน แล้วจึง apply การเปลี่ยนแปลงใหม่ ๆ ต่อไปเมื่อมันเกิดขึ้น ต่างจาก streaming replica ตรงที่ logical subscriber เป็นฐานข้อมูลที่เขียนได้เต็มรูปแบบ — มันสามารถมีตารางและ index พิเศษของตัวเองได้ — ซึ่งเป็นสิ่งที่ทำให้มันมีประโยชน์สำหรับการคัดลอกแบบเลือกและการ staging การอัปเกรดเวอร์ชัน
+
+export const logicalDiagram = `flowchart LR
+  S[(Source database)] -->|CREATE PUBLICATION| Pub[Publication: orders, customers]
+  Pub -->|row changes| Sub[Subscription]
+  Sub --> D[(Destination database - writable)]`;
+
+<Mermaid code={logicalDiagram} title="logical replication เผยแพร่ตารางที่เลือกไปยัง subscriber" />
+
+Logical replication ก็ต้องการให้ยกระดับ `wal_level` เช่นกัน คราวนี้เป็น `logical` บนต้นทาง
+
+```conf
+# postgresql.conf on the source
+wal_level = logical
+```
+
+## เคล็ดลับ / ข้อควรระวัง
+
+- Replica มีไว้สำหรับการอ่านและความพร้อมใช้งาน ส่งทุกการเขียนไปที่ primary; replica จะปฏิเสธมัน
+- เมื่อใช้ asynchronous replication ให้คาดหวังว่าจะมี lag บ้าง ถ้าการอ่านต้องสะท้อนการเขียนที่เพิ่งเกิดขึ้น ให้ส่งไปที่ primary หรือรอให้ replica ตามทัน
+- Synchronous replication แลก latency กับความปลอดภัย ใช้มันเมื่อการสูญเสีย transaction ที่ตอบรับแล้วแม้เพียงรายการเดียวเป็นสิ่งที่รับไม่ได้ ไม่ใช่ใช้เป็นค่าเริ่มต้นแบบเหมารวม
+- Streaming replication คัดลอกทั้ง cluster และต้องตรงเวอร์ชันกัน; logical replication คัดลอกตารางที่เลือกและข้าม major version ได้ ซึ่งเป็นเหตุผลที่มันโดดเด่นสำหรับการอัปเกรด
+- Logical replication ต้องการ replica identity — โดยปกติคือ primary key — บนทุกตารางที่เผยแพร่ เพื่อให้ subscriber จับคู่แถวสำหรับการ update และ delete ได้
+
+<Callout title="log เดียว สองการใช้งาน">
+write-ahead log ถูกคิดค้นขึ้นเพื่อให้ PostgreSQL กู้คืนได้หลังจาก crash ด้วยการ replay การเปลี่ยนแปลงล่าสุด Replication นำ log เดียวกันนั้นมาใช้ซ้ำ: replica เป็นเพียงเซิร์ฟเวอร์อีกตัวที่ replay WAL ของ primary ตลอดไปและผ่านเครือข่าย การเข้าใจ WAL คือการเข้าใจ replication
+</Callout>
+
+export const quizReplication = [
+  {
+    q: 'streaming replica ทำอะไรกับ WAL ที่ได้รับจาก primary?',
+    options: [
+      'มันเก็บไว้เป็น backup แต่ไม่เคยอ่านมัน',
+      'มัน replay record เพื่อรักษาสำเนาข้อมูลที่เหมือนกันและอ่านอย่างเดียว',
+      'มันแปลงมันเป็นการเปลี่ยนแปลงแถวแบบ logical',
+      'มันส่งมันกลับไปที่ primary เพื่อยืนยัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ข้อแลกเปลี่ยนหลักของ synchronous replication เมื่อเทียบกับ asynchronous คืออะไร?',
+    options: [
+      'มันสูญข้อมูลมากกว่าแต่เร็วกว่า',
+      'มัน commit ช้ากว่าแต่รับประกันว่าการเขียนที่ตอบรับแล้วจะรอดจากการสูญเสีย primary',
+      'มันทำงานได้เฉพาะข้าม major version เท่านั้น',
+      'มันขจัดความจำเป็นในการมี primary',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'คุณจะเลือก logical replication แทน streaming replication เมื่อใด?',
+    options: [
+      'เมื่อคุณต้องการสำเนาแบบ byte-for-byte ที่แม่นยำของทั้ง cluster',
+      'เมื่อคุณต้องการคัดลอกเฉพาะตารางที่เลือกหรือ replicate ข้าม major version ที่ต่างกัน',
+      'เมื่อคุณต้องการการเขียนที่เร็วที่สุดเท่าที่จะเป็นไปได้',
+      'เมื่อคุณไม่จำเป็นต้องอ่านจากสำเนาเลย',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="operations-and-scaling/replication" questions={quizReplication} />
+
+<ProgressTracker client:visible id="operations-and-scaling/replication" />

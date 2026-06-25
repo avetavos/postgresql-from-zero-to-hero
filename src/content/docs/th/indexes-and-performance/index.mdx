@@ -1,0 +1,147 @@
+---
+title: ทำไม index จึงสำคัญ
+description: หากไม่มี index PostgreSQL จะอ่านทุกแถวด้วย Sequential Scan ส่วน index จะเปลี่ยนสิ่งนั้นให้กลายเป็นการค้นหาแบบเจาะจงที่รวดเร็ว — นี่คือสิ่งที่โมดูลนี้ครอบคลุม
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+คุณสามารถเขียน SQL ที่ถูกต้องสมบูรณ์แบบได้ แต่มันก็ยังทำงานช้าอยู่ดี คำสั่ง query คืนแถวที่ถูกต้องกลับมา แต่ใช้เวลาหลายวินาทีแทนที่จะเป็นมิลลิวินาที เพราะ PostgreSQL ต้องทำงานมากเกินกว่าที่จำเป็น โดยส่วนใหญ่แล้วทางแก้คือ **index** — โครงสร้างข้อมูลที่แยกต่างหากและถูกเรียงลำดับไว้ ซึ่งช่วยให้เซิร์ฟเวอร์กระโดดตรงไปยังแถวที่คุณต้องการได้ทันที แทนที่จะต้องตรวจสอบทั้งตาราง
+
+โมดูลนี้ว่าด้วยการทำให้ query เร็วและการเข้าใจ *ว่าทำไม* มันถึงเร็วหรือช้า เราจะเริ่มจากแนวคิดที่สำคัญที่สุดเพียงข้อเดียว นั่นคือ PostgreSQL ทำอะไรเมื่อไม่มี index และอะไรจะเปลี่ยนไปเมื่อมี index
+
+## Sequential Scan
+
+ลองนึกถึงตาราง `books` ที่มีสิบล้านแถว และ query นี้:
+
+```sql
+SELECT * FROM books WHERE title = 'The Glass Orchard';
+```
+
+เมื่อไม่มี index บน `title` PostgreSQL ก็ไม่มีทางรู้ว่าแถวนั้นอยู่ที่ไหน ดังนั้นมันจึงอ่านตารางตั้งแต่แถวแรกไปจนถึงแถวสุดท้าย โดยตรวจสอบ title ของทุก ๆ แถว นี่คือ **Sequential Scan** (มักเรียกย่อ ๆ ว่า *seq scan*) มันเรียบง่ายและเชื่อถือได้ แต่ต้นทุนของมันจะเพิ่มขึ้นตามขนาดของตาราง คือถ้าแถวเพิ่มเป็นสองเท่า เวลาก็เพิ่มขึ้นราว ๆ สองเท่า
+
+seq scan ไม่ได้แย่เสมอไป หากคุณกำลังอ่านข้อมูลส่วนใหญ่ของตารางอยู่แล้ว การสแกนทื่อ ๆ ไปเรื่อย ๆ ก็เป็นวิธีที่เร็วที่สุด ปัญหาคือการนำมันมาใช้ค้นหาเข็มในกองฟาง
+
+## index เปลี่ยนอะไรไป
+
+index บน `title` คือโครงสร้างที่ถูกเรียงลำดับไว้ล่วงหน้า ซึ่งจับคู่แต่ละ title เข้ากับตำแหน่งของแถวบนดิสก์ แทนที่จะอ่านสิบล้านแถว PostgreSQL จะเดินผ่าน index — เพียงไม่กี่ขั้นตอน — ลงไปยังรายการของ `'The Glass Orchard'` แล้วดึงเฉพาะแถวนั้นออกมา นี่คือ **Index Scan**
+
+ความแตกต่างก็เหมือนกับการพลิกอ่านหนังสือทุกหน้าเพื่อหาคำคำหนึ่ง เทียบกับการใช้ดัชนีท้ายเล่มเพื่อกระโดดตรงไปยังหน้าที่ถูกต้อง
+
+export const scanCompare = `flowchart TB
+  subgraph NoIndex[No index on title]
+    direction TB
+    Q1[Query: title equals a value] --> S1[Read row 1]
+    S1 --> S2[Read row 2]
+    S2 --> S3[... read every row ...]
+    S3 --> S4[Read row N]
+    S4 --> R1[Matching rows]
+  end
+  subgraph WithIndex[Index on title]
+    direction TB
+    Q2[Query: title equals a value] --> I1[Look up value in sorted index]
+    I1 --> I2[Jump to matching row location]
+    I2 --> R2[Matching rows]
+  end`;
+
+<Mermaid code={scanCompare} title="Sequential Scan เทียบกับ Index Scan" />
+
+เส้นทางด้านซ้ายแตะทุกแถวและขยายตามขนาดของตาราง เส้นทางด้านขวาแตะรายการใน index เพียงจำนวนเล็กน้อยไม่ว่าตารางจะใหญ่แค่ไหนก็ตาม นั่นคือเหตุผลทั้งหมดที่ทำให้ index มีอยู่
+
+## การสาธิตอย่างรวดเร็ว
+
+คุณไม่จำเป็นต้องเชื่อโดยไม่มีหลักฐาน PostgreSQL สามารถบอกคุณได้อย่างชัดเจนว่ามันเลือกกลยุทธ์ใดสำหรับ query ใด ๆ โดยใช้ `EXPLAIN` ซึ่งคุณจะได้เรียนรู้อย่างละเอียดในโมดูลนี้ ตอนนี้ขอเพียงสังเกตความแตกต่างของแผน (plan) ก่อนและหลังการเพิ่ม index
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- before: no index exists yet
+    EXPLAIN SELECT * FROM books WHERE title = 'The Glass Orchard';
+
+    -- create an index, then ask again
+    CREATE INDEX ON books (title);
+    EXPLAIN SELECT * FROM books WHERE title = 'The Glass Orchard';
+    ```
+  </TabItem>
+</Tabs>
+
+แผนแรกรายงานเป็น `Seq Scan` ส่วนแผนที่สองรายงานเป็น `Index Scan` ผลลัพธ์มีหน้าตาแบบนี้:
+
+```text
+                          QUERY PLAN
+---------------------------------------------------------------
+ Seq Scan on books  (cost=0.00..18584.00 rows=1 width=64)
+   Filter: (title = 'The Glass Orchard'::text)
+```
+
+และหลังจากเพิ่ม index:
+
+```text
+                              QUERY PLAN
+---------------------------------------------------------------------
+ Index Scan using books_title_idx on books  (cost=0.42..8.44 rows=1 width=64)
+   Index Cond: (title = 'The Glass Orchard'::text)
+```
+
+สังเกตว่าต้นทุน (cost) โดยประมาณลดลงจากหลักพันเหลือเพียงหลักหน่วย ค่าประมาณต้นทุนนั่นแหละคือสิ่งที่ planner ใช้ในการตัดสินใจ
+
+**ใน pgAdmin:** เปิด Query Tool พิมพ์ `SELECT` แล้วกดปุ่ม Explain (หรือใช้เมนู Explain) pgAdmin จะวาดแผนออกมาเป็นแผนภาพให้คุณเห็นโหนดของการสแกนได้ในพริบตา
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+- **B-tree และพื้นฐานของ index** — `CREATE INDEX`, B-tree ที่เป็นค่าเริ่มต้น, query แบบไหนที่มันช่วยให้เร็วขึ้น, composite index และ unique index
+- **EXPLAIN และ query plan** — การอ่านผลลัพธ์ของ planner, การแยกแยะชนิดของ scan และเหตุที่บางครั้ง index ถูกเพิกเฉยอย่างจงใจ
+- **Specialized index** — GIN, GiST, BRIN และ Hash รวมถึง partial, expression และ covering index สำหรับงานเฉพาะทาง
+- **VACUUM และ statistics** — PostgreSQL คืนพื้นที่จากแถวที่ถูกลบอย่างไร และรักษาความแม่นยำของค่าประมาณของ planner ไว้อย่างไร
+
+## Tips / gotchas
+
+- index ช่วยการอ่านแต่เพิ่มภาระให้การเขียน เพราะทุก ๆ `INSERT`, `UPDATE` และ `DELETE` ต้องคอยปรับปรุง index ให้เป็นปัจจุบันด้วย จงสร้าง index อย่างมีเจตนา ไม่ใช่ทำไปโดยอัตโนมัติ
+- seq scan บนตารางขนาดเล็กนั้นไม่มีปัญหาเลย และมักจะเร็วกว่าการค้นหาผ่าน index ด้วยซ้ำ index จะคุ้มค่ากับตารางขนาดใหญ่และ query ที่เลือกเฉพาะเจาะจง
+- planner ไม่ใช่คุณ เป็นผู้ตัดสินใจว่าจะใช้ index หรือไม่ หน้าที่ของคุณคือจัดเตรียม index ที่มีประโยชน์และ statistics ที่ถูกต้อง ส่วนที่เหลือเป็นเรื่องของ planner
+
+<Callout title="แนวคิดหลัก">
+หากไม่มี index ที่เป็นประโยชน์ PostgreSQL จะอ่านทุกแถวเพื่อตอบ query — นั่นคือ Sequential Scan ที่ต้นทุนเพิ่มขึ้นตามขนาดของตาราง ส่วน index ที่ถูกเลือกมาอย่างดีจะเปลี่ยนการค้นหาแบบเชิงเส้นนั้นให้กลายเป็นการค้นหาที่รวดเร็วและแทบจะคงที่ ทุกสิ่งทุกอย่างที่เหลือในโมดูลนี้ล้วนต่อยอดมาจากการแลกเปลี่ยน (trade-off) เพียงข้อเดียวนี้
+</Callout>
+
+export const quizIndexIntro = [
+  {
+    q: 'PostgreSQL ทำอย่างไรในการค้นหาแถวที่ตรงเงื่อนไขเมื่อไม่มี index ที่เป็นประโยชน์อยู่?',
+    options: [
+      'มันปฏิเสธที่จะรัน query',
+      'มันอ่านทุกแถวในตาราง (Sequential Scan)',
+      'มันเดาจากแถวแรก',
+      'มันคืนค่า error เสมอ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม index จึงสามารถเร่งความเร็วการค้นหาบนตารางขนาดใหญ่ได้อย่างมหาศาล?',
+    options: [
+      'มันบีบอัดตารางเพื่อให้มีข้อมูลที่ต้องอ่านน้อยลง',
+      'มันเป็นโครงสร้างที่เรียงลำดับไว้ ช่วยให้เซิร์ฟเวอร์กระโดดตรงไปยังแถวที่ตรงเงื่อนไขได้ทันที',
+      'มันแคชทั้งตารางไว้ในหน่วยความจำ',
+      'มันลบแถวที่ไม่ตรงเงื่อนไขออกไป',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อใดที่ Sequential Scan ถือเป็นทางเลือกที่สมเหตุสมผลจริง ๆ?',
+    options: [
+      'เมื่อ query คืนข้อมูลส่วนใหญ่ของตารางอยู่แล้ว',
+      'ไม่มีวัน — มันเป็นทางเลือกที่ผิดเสมอ',
+      'เฉพาะบนตารางที่มี primary key เท่านั้น',
+      'เฉพาะภายใน transaction เท่านั้น',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/index" questions={quizIndexIntro} />
+
+<ProgressTracker client:visible id="indexes-and-performance/index" />

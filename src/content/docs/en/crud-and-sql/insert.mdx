@@ -1,0 +1,279 @@
+---
+title: Inserting rows
+description: Add new rows with INSERT — single and multi-row, explicit column lists, DEFAULT values, and getting generated ids back with RETURNING.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Creating data means adding rows, and the statement for that is `INSERT`. You name a table, list the columns you are supplying, and give the values. PostgreSQL fills in anything you leave out — generated ids, columns with a `DEFAULT`, and any column that allows `NULL`.
+
+This lesson uses the `authors` and `books` tables from the module overview.
+
+## A single row
+
+The most basic form lists the columns, then the matching values.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO authors (name, born)
+    VALUES ('Mira Castellan', 1971);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'INSERT INTO authors (name, born) VALUES ($1, $2)',
+      ['Mira Castellan', 1971],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO authors (name, born) VALUES (%s, %s)",
+        ("Mira Castellan", 1971),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx,
+        "INSERT INTO authors (name, born) VALUES ($1, $2)",
+        "Mira Castellan", 1971)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("INSERT INTO authors (name, born) VALUES ($1, $2)")
+        .bind("Mira Castellan")
+        .bind(1971_i32)
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Notice the `psql` tab uses literal values, while every driver uses **placeholders** — `$1`, `$2` in PostgreSQL native style, or `%s` for psycopg — and passes the real values separately. Always supply user data this way; never glue values into the SQL string yourself. Letting the driver bind values keeps types correct and closes the door on SQL injection, where crafted input would otherwise change what your statement does.
+
+**In pgAdmin:** paste the `psql` version into the Query Tool and run it; the message panel will report `INSERT 0 1`, meaning one row was added.
+
+## Letting columns take defaults
+
+The `books` table has `copies_sold int NOT NULL DEFAULT 0`. If you simply omit that column, PostgreSQL uses the default. You can also write `DEFAULT` explicitly to be clear about your intent.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO books (title, author_id, published, copies_sold)
+    VALUES ('The Glass Orchard', 1, 2004, DEFAULT);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)',
+      ['The Glass Orchard', 1, 2004],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO books (title, author_id, published) VALUES (%s, %s, %s)",
+        ("The Glass Orchard", 1, 2004),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx,
+        "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)",
+        "The Glass Orchard", 1, 2004)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)")
+        .bind("The Glass Orchard")
+        .bind(1_i64)
+        .bind(2004_i32)
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Either way, `copies_sold` lands as `0`. Omitting a column entirely is the usual approach; writing `DEFAULT` is handy when you are filling several rows and want every position spelled out.
+
+## Many rows at once
+
+You can list several value tuples in one statement. This is far faster than running one `INSERT` per row, because it is a single round trip to the server.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO authors (name, born) VALUES
+      ('Devon Reyes', 1985),
+      ('Priya Anand', 1990),
+      ('Tomas Holt',  1962);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'INSERT INTO authors (name, born) VALUES ($1, $2), ($3, $4), ($5, $6)',
+      ['Devon Reyes', 1985, 'Priya Anand', 1990, 'Tomas Holt', 1962],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = [("Devon Reyes", 1985), ("Priya Anand", 1990), ("Tomas Holt", 1962)]
+    cur.executemany("INSERT INTO authors (name, born) VALUES (%s, %s)", rows)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows := [][]any{
+        {"Devon Reyes", 1985},
+        {"Priya Anand", 1990},
+        {"Tomas Holt", 1962},
+    }
+    _, err := conn.CopyFrom(ctx,
+        pgx.Identifier{"authors"},
+        []string{"name", "born"},
+        pgx.CopyFromRows(rows))
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let names = ["Devon Reyes", "Priya Anand", "Tomas Holt"];
+    let years = [1985_i32, 1990, 1962];
+    sqlx::query(
+        "INSERT INTO authors (name, born) SELECT * FROM UNNEST($1::text[], $2::int[])",
+    )
+    .bind(&names[..])
+    .bind(&years[..])
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The drivers each have an idiomatic bulk path: psycopg has `executemany`, pgx offers the very fast `CopyFrom`, and with sqlx you can unnest arrays so a single statement inserts many rows.
+
+## Getting the generated id back
+
+The `id` column is `GENERATED ALWAYS AS IDENTITY`, so PostgreSQL assigns it. To learn the value without a second query, append `RETURNING`.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO authors (name, born)
+    VALUES ('Lena Whitfield', 1978)
+    RETURNING id;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id',
+      ['Lena Whitfield', 1978],
+    );
+    console.log(res.rows[0].id);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO authors (name, born) VALUES (%s, %s) RETURNING id",
+        ("Lena Whitfield", 1978),
+    )
+    new_id = cur.fetchone()[0]
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var id int64
+    err := conn.QueryRow(ctx,
+        "INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id",
+        "Lena Whitfield", 1978).Scan(&id)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id",
+    )
+    .bind("Lena Whitfield")
+    .bind(1978_i32)
+    .fetch_one(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The statement both inserts the row and hands back the new id in one trip:
+
+```text
+ id
+----
+  6
+(1 row)
+```
+
+You can return any columns you like — `RETURNING id, name` or even `RETURNING *` to get the whole new row, including defaults the server filled in.
+
+## Tips / gotchas
+
+- Always pass values through driver placeholders (`$1`, `%s`). Building SQL with string concatenation invites SQL injection and breaks on quotes or special characters.
+- With an `IDENTITY` (or `serial`) primary key, do not supply the id yourself — let PostgreSQL generate it and read it back with `RETURNING`.
+- Multi-row inserts are one statement and one round trip, so they are dramatically faster than a loop of single inserts.
+- A column with no value and no default must allow `NULL`, or the insert fails with a not-null violation.
+
+<Callout title="RETURNING is your friend">
+`RETURNING` turns a write into a write-plus-read in a single statement. It avoids a follow-up `SELECT` and avoids race conditions, since the values you get back are exactly the ones this insert produced.
+</Callout>
+
+export const quizInsert = [
+  {
+    q: 'How do you read a server-generated id immediately after inserting?',
+    options: [
+      'Run a separate SELECT max(id) afterwards',
+      'Append RETURNING id to the INSERT',
+      'Read it from the driver connection object',
+      'You cannot — ids are hidden',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A column has DEFAULT 0 and is NOT NULL. What happens if you omit it from the column list?',
+    options: [
+      'The insert fails',
+      'The column is set to NULL',
+      'The column takes its default value of 0',
+      'PostgreSQL prompts you for a value',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Why pass values as placeholders ($1, %s) instead of concatenating them into the SQL string?',
+    options: [
+      'It runs faster in every case',
+      'It avoids SQL injection and keeps types correct',
+      'It is required by the SQL standard',
+      'It lets you skip the column list',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/insert" questions={quizInsert} />
+
+<ProgressTracker client:visible id="crud-and-sql/insert" />

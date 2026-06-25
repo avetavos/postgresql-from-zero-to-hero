@@ -1,0 +1,196 @@
+---
+title: Database, schema และการเชื่อมต่อ
+description: PostgreSQL cluster ซ้อน database, schema และ table อย่างไร — CREATE DATABASE และ CREATE SCHEMA, schema public, search_path, ชื่อแบบ qualified และ role
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+PostgreSQL server เดียวเก็บ table ได้มากกว่าหนึ่งชุด และมันจัดระเบียบพวกมันเป็นชั้น ๆ การเข้าใจการซ้อนกันนี้ — cluster, database, schema, table — ช่วยให้กระจ่างว่าข้อมูลของคุณอยู่ที่ไหนและจะตั้งชื่อมันอย่างไร บทเรียนนี้จะเดินไล่ลงไปทีละชั้นและแสดงวิธีสร้างมัน
+
+## ชั้นต่าง ๆ
+
+server หนึ่งที่รันอยู่เรียกว่า **cluster** cluster หนึ่งบรรจุ **database** หนึ่งหรือมากกว่า ซึ่งแยกออกจากกันอย่างสมบูรณ์: การเชื่อมต่อหนึ่งสื่อสารกับฐานข้อมูลเพียงหนึ่งเดียวในแต่ละครั้ง ภายในแต่ละ database มี **schema** ซึ่งเป็นการจัดกลุ่ม table (และ object อื่น ๆ) ที่มีชื่อ ภายในแต่ละ schema มี **table** เอง แผนภาพแสดงการซ้อนกัน
+
+export const layersDiagram = `flowchart TD
+  CL[Cluster: one server] --> DB1[Database: appdb]
+  CL --> DB2[Database: postgres]
+  DB1 --> S1[Schema: public]
+  DB1 --> S2[Schema: billing]
+  S1 --> T1[Table: customers]
+  S1 --> T2[Table: orders]
+  S2 --> T3[Table: invoices]`;
+
+<Mermaid code={layersDiagram} title="cluster ซ้อน database, schema และ table อย่างไร" />
+
+## การสร้าง database
+
+database คือหน่วยของการแยกตัว คุณให้แต่ละแอปพลิเคชันมี database ของตัวเองเพื่อให้ table ของพวกมันไม่ชนกัน การสร้างหนึ่งอันเป็น statement เดียว
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE DATABASE shop;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE DATABASE shop');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    conn.autocommit = True
+    cur.execute("CREATE DATABASE shop")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE DATABASE shop")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE DATABASE shop")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+หากต้องการเริ่มใช้ database ใหม่ คุณเชื่อมต่อใหม่ไปยังมัน ใน `psql` นั่นคือ `\c shop` ส่วนใน driver คุณเปิดการเชื่อมต่อใหม่โดยใช้ `shop` เป็น database ใน connection string คุณไม่สามารถรัน `CREATE DATABASE` ภายใน transaction ได้ ซึ่งเป็นเหตุผลว่าทำไมตัวอย่าง Python จึงเปิด autocommit
+
+## การสร้าง schema และ schema public
+
+ภายใน database, schema ให้คุณจัดกลุ่ม table ที่เกี่ยวข้องและหลีกเลี่ยงชื่อที่ชนกัน ทุก database ใหม่เริ่มต้นด้วย schema หนึ่งที่มีอยู่แล้ว ชื่อว่า **public** และเว้นแต่คุณจะระบุเป็นอย่างอื่น table ของคุณจะไปอยู่ที่นั่น
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE SCHEMA billing;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE SCHEMA billing');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE SCHEMA billing")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE SCHEMA billing")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE SCHEMA billing")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน pgAdmin:** schema ใหม่ปรากฏใต้ Schemas ใน browser tree เมื่อคุณรีเฟรช database คุณยังสร้างได้โดยการคลิกขวาที่ Schemas DBeaver แสดงการจัดกลุ่มเดียวกันใน navigator ของตัวเอง
+
+## ชื่อแบบ qualified และ search_path
+
+table มีชื่อเต็มแบบ **qualified name** ในรูปแบบ `schema.table` เช่น `billing.invoices` คุณเขียนชื่อแบบ qualified ได้เสมอและ PostgreSQL จะรู้แน่ชัดว่าคุณหมายถึง table ใด เมื่อคุณเขียนชื่อแบบ unqualified อย่าง `invoices` PostgreSQL จะมองผ่าน **search_path** — รายการ schema ที่เรียงลำดับ — และใช้ตัวที่ตรงกันตัวแรก โดย default แล้ว search path จัด `public` ไว้ก่อน ซึ่งเป็นเหตุผลว่าทำไม table ที่คุณสร้างโดยไม่ระบุ schema จึงไปลงที่นั่นและอ่านกลับมาได้ด้วยชื่อเปล่า ๆ ของมัน
+
+คุณตรวจสอบและเปลี่ยน search path สำหรับ session ของคุณได้
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SHOW search_path;
+    SET search_path TO billing, public;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('SET search_path TO billing, public');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("SET search_path TO billing, public")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "SET search_path TO billing, public")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("SET search_path TO billing, public")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+   search_path
+-----------------
+ "$user", public
+(1 row)
+```
+
+เมื่อ `billing` อยู่ก่อนใน path, `invoices` แบบ unqualified ตอนนี้จะ resolve ไปยัง `billing.invoices` การเขียนชื่อแบบ qualified ขจัดความสงสัยทั้งหมดและเป็นนิสัยที่ปลอดภัยที่สุดในฐานข้อมูลที่ใช้ร่วมกัน
+
+## Role เทียบกับ database
+
+มันง่ายที่จะสับสนระหว่างแนวคิดบัญชีหลักสองอย่าง **database** คือภาชนะสำหรับข้อมูลของคุณ ส่วน **role** คือบัญชีที่เชื่อมต่อและได้รับสิทธิ์ในการกระทำต่อข้อมูลนั้น — role เป็นทั้ง user และ group ใน PostgreSQL พวกมันเป็นอิสระต่อกัน: role เดียวสามารถเป็นเจ้าของและเชื่อมต่อกับ database หลายอันได้ และ database หนึ่งสามารถถูกใช้โดยหลาย role ได้ คุณล็อกอินเป็น role `postgres` ซึ่งเป็น superuser ตลอดโมดูลนี้ ระบบจริงสร้าง role ที่จำกัดสิทธิ์ต่อแอปพลิเคชัน ซึ่งโมดูล operations จะครอบคลุม
+
+## เคล็ดลับ / จุดที่ต้องระวัง
+
+- การเชื่อมต่อมุ่งเป้าไปที่ database เพียงหนึ่งเดียวเสมอ หากต้องการสลับ คุณเชื่อมต่อใหม่
+- database ใหม่มาพร้อม schema `public` ดังนั้น table ที่คุณสร้างโดยไม่ตั้งชื่อ schema จะไปลงที่ `public`
+- ชื่อแบบ unqualified ถูก resolve ผ่าน `search_path` ส่วนรูปแบบ `schema.table` แบบ qualified ไม่กำกวมและปลอดภัยที่สุดในฐานข้อมูลที่ใช้ร่วมกัน
+- `CREATE DATABASE` รันภายใน transaction block ไม่ได้ ดังนั้นเครื่องมือต่าง ๆ จึงต้อง commit มันเดี่ยว ๆ
+- role (บัญชี) และ database (ภาชนะข้อมูล) เป็นแนวคิดที่แยกจากกัน อย่าปฏิบัติต่ออันหนึ่งเสมือนเป็นอีกอัน
+
+<Callout title="cluster, database, schema, table">
+ลองนึกภาพสี่ชั้นเป็นกล่องที่ซ้อนกัน: server บรรจุ database, database บรรจุ schema, schema บรรจุ table การรู้ว่าคุณอยู่ในกล่องใดตอบคำถาม "table ของฉันอยู่ที่ไหน?" ได้เกือบทั้งหมด และการเขียนชื่อแบบ qualified `schema.table` ช่วยให้คุณรอดพ้นจากเซอร์ไพรส์ของ search_path
+</Callout>
+
+export const quizDatabasesSchemas = [
+  {
+    q: 'schema ใดมีอยู่ในทุก database ใหม่โดย default?',
+    options: ['billing', 'public', 'system', 'main'],
+    answer: 1,
+  },
+  {
+    q: 'search_path ควบคุมอะไร?',
+    options: [
+      'schema ใดบ้างที่ถูกค้นเพื่อ resolve ชื่อ table แบบ unqualified',
+      'file path ที่ข้อมูลถูกเก็บไว้',
+      'ลำดับที่ row ถูกส่งกลับมา',
+      'database ใดที่คุณเชื่อมต่อ',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'role และ database สัมพันธ์กันอย่างไร?',
+    options: [
+      'role เป็นเพียงอีกชื่อหนึ่งของ database',
+      'พวกมันเป็นอิสระต่อกัน: role คือบัญชี ส่วน database คือภาชนะข้อมูล',
+      'แต่ละ database มีได้เพียงหนึ่ง role',
+      'role เก็บข้อมูลและ database เก็บบัญชี',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-setup/databases-schemas-and-connecting" questions={quizDatabasesSchemas} />
+
+<ProgressTracker client:visible id="intro-and-setup/databases-schemas-and-connecting" />

@@ -1,0 +1,172 @@
+---
+title: Views and materialized views
+description: Name a query with CREATE VIEW for an always-fresh result, or cache an expensive query with CREATE MATERIALIZED VIEW and REFRESH it on demand — and know when to use each.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+When the same complex query keeps appearing across your application, copying its SQL everywhere is fragile. PostgreSQL lets you give a query a name and then use that name like a table. There are two flavors with very different behavior: a **view** runs the underlying query every time you read it, while a **materialized view** stores the result and only recomputes when you ask.
+
+We reuse the `authors` and `books` tables from the CRUD module for the examples below.
+
+## A view is a stored query
+
+`CREATE VIEW` saves a `SELECT` under a name. Reading the view runs that query fresh against the current data, so its result is always up to date. Nothing is stored except the definition.
+
+```sql
+CREATE VIEW author_book_counts AS
+SELECT a.id,
+       a.name,
+       count(b.id) AS book_count,
+       coalesce(sum(b.copies_sold), 0) AS total_sold
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.id, a.name;
+```
+
+```text
+CREATE VIEW
+```
+
+Now query it as if it were a table:
+
+```sql
+SELECT name, book_count, total_sold
+FROM author_book_counts
+WHERE book_count > 0
+ORDER BY total_sold DESC;
+```
+
+```text
+      name       | book_count | total_sold
+-----------------+------------+------------
+ Dana Whitfield  |          2 |       1800
+ Marcus Lindqvist|          1 |        950
+(2 rows)
+```
+
+Because the query runs each time, inserting a new book and re-reading the view immediately reflects the change. The cost is that every read pays the full price of the join and aggregation.
+
+## A materialized view caches the result
+
+`CREATE MATERIALIZED VIEW` runs the query once and stores the rows on disk, like a snapshot. Reads are then as cheap as reading a table — but the data is frozen at the moment it was built or last refreshed.
+
+```sql
+CREATE MATERIALIZED VIEW author_book_counts_cached AS
+SELECT a.id,
+       a.name,
+       count(b.id) AS book_count,
+       coalesce(sum(b.copies_sold), 0) AS total_sold
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.id, a.name;
+```
+
+```text
+SELECT 3
+```
+
+If you now insert a new book, the materialized view does **not** change. You bring it up to date with `REFRESH`:
+
+```sql
+REFRESH MATERIALIZED VIEW author_book_counts_cached;
+```
+
+```text
+REFRESH MATERIALIZED VIEW
+```
+
+A plain `REFRESH` takes a lock that blocks reads while it rebuilds. To keep the view readable during refresh, add `CONCURRENTLY` — this requires a unique index on the materialized view first:
+
+```sql
+CREATE UNIQUE INDEX idx_abc_cached_id ON author_book_counts_cached (id);
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY author_book_counts_cached;
+```
+
+**In pgAdmin:** both objects appear in the browser tree — views under Views and materialized views under Materialized Views. Right-clicking a materialized view offers a Refresh action that runs the statement for you.
+
+## How they differ at read time
+
+The two behave the same to write (`SELECT ... FROM name`) but differently underneath. A view forwards your query to the stored definition; a materialized view answers from its own stored rows.
+
+export const viewDiagram = `flowchart LR
+  subgraph View
+    Q1[SELECT from view] --> D1[Stored query definition]
+    D1 --> T1[(Live tables)]
+    T1 --> R1[Always-fresh result]
+  end
+  subgraph Materialized view
+    Q2[SELECT from matview] --> S2[(Stored result rows)]
+    S2 --> R2[Fast but possibly stale result]
+    RF[REFRESH] --> T2[(Live tables)]
+    T2 --> S2
+  end`;
+
+<Mermaid code={viewDiagram} title="View passes through to live data; matview reads its own cached rows" />
+
+## Choosing between them
+
+| Question                                  | View                  | Materialized view              |
+|-------------------------------------------|-----------------------|--------------------------------|
+| Is the result always current?             | Yes                   | Only after a refresh           |
+| How expensive is each read?               | Full query cost       | Cheap (reads stored rows)      |
+| Does it use disk for results?             | No                    | Yes                            |
+| Can you index the result directly?        | No                    | Yes                            |
+| Best when                                 | Data changes often    | Query is costly, staleness OK  |
+
+Use a plain view to tidy up and reuse a query whose cost is acceptable on every read. Reach for a materialized view when the query is genuinely expensive (heavy joins, aggregates over big tables) and your application can tolerate results that lag behind by minutes or hours.
+
+## Tips / gotchas
+
+- A materialized view is stale by definition until you refresh it. Schedule a refresh (a cron job, a scheduled task, or a trigger) that matches how fresh the data needs to be.
+- `REFRESH MATERIALIZED VIEW CONCURRENTLY` needs a unique index on the view and does more work, but it lets reads continue during the rebuild. A plain refresh is faster but blocks readers.
+- Plain views add no storage and no staleness, but they also add no speed — each read re-runs the full query. They are about reuse and readability, not performance.
+- You generally cannot write through a view that aggregates or joins. Simple single-table views can be updatable, but the moment you add `GROUP BY` or joins, treat the view as read-only.
+
+<Callout title="Fresh versus fast">
+The whole decision comes down to a trade. A view gives you correctness for free and pays at every read. A materialized view gives you speed and asks you to manage staleness with refreshes. Pick the side of that trade your feature actually needs.
+</Callout>
+
+export const quizViews = [
+  {
+    q: 'What happens when you SELECT from a plain (non-materialized) view?',
+    options: [
+      'It returns rows stored on disk from the last refresh',
+      'It runs the underlying query fresh against current data',
+      'It always returns an empty result until refreshed',
+      'It modifies the underlying tables',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'After inserting a new row into a base table, how does a materialized view reflect it?',
+    options: [
+      'Automatically and immediately',
+      'Never, materialized views are read-only snapshots forever',
+      'Only after you run REFRESH MATERIALIZED VIEW',
+      'Only after you DROP and recreate the table',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'What does REFRESH MATERIALIZED VIEW CONCURRENTLY require?',
+    options: [
+      'A unique index on the materialized view',
+      'A trigger on the base table',
+      'A superuser connection',
+      'The view to be empty',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="advanced-postgres/views-and-materialized-views" questions={quizViews} />
+
+<ProgressTracker client:visible id="advanced-postgres/views-and-materialized-views" />

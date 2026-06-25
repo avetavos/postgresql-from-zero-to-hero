@@ -1,0 +1,105 @@
+---
+title: Operations & Scaling
+description: Running PostgreSQL in production — high availability with replication, handling many clients with pooling, taming big tables with partitioning, and protecting data with backups and access control.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Writing correct SQL is only half the job. The other half is keeping a single PostgreSQL server happy when it suddenly has to serve thousands of users, survive a crashed disk, hold tables with billions of rows, and refuse anyone who should not be there. That collection of concerns is what people mean when they say **operations** — the work of running a database in production rather than on your laptop.
+
+This module steps away from query syntax and looks at the shape of a real deployment. None of it changes the SQL you already know; instead it surrounds that one server with the pieces that make it dependable at scale.
+
+## The four production concerns
+
+Almost every operational topic in PostgreSQL falls under one of four headings. Each one answers a different "what happens when..." question.
+
+| Concern              | The question it answers                          | The usual answer            |
+|----------------------|--------------------------------------------------|-----------------------------|
+| High availability    | What if the primary server dies?                 | Replication and failover    |
+| Many clients         | What if thousands of apps connect at once?       | Connection pooling          |
+| Big tables           | What if one table grows to billions of rows?     | Partitioning                |
+| Durability & access  | What if a disk fails or an attacker connects?    | Backups and security        |
+
+A small project may ignore all four. A serious production system eventually needs every one of them, and the four interact: replicas help availability *and* spread read load, pooling protects a primary that is also feeding replicas, and so on.
+
+## A production-shaped deployment
+
+A laptop runs one PostgreSQL process and one client. A production setup spreads work across several pieces. Application servers do not talk to the database directly; they go through a **connection pooler** that keeps a small number of reusable server connections. One node is the **primary** that accepts writes, and one or more **replicas** receive a continuous copy of its changes and answer read-only queries.
+
+export const deploymentDiagram = `flowchart TD
+  App1[App server] --> Pool[Connection pooler]
+  App2[App server] --> Pool
+  App3[App server] --> Pool
+  Pool --> Primary[(Primary - reads and writes)]
+  Primary -->|streams changes| R1[(Replica - reads)]
+  Primary -->|streams changes| R2[(Replica - reads)]
+  Primary -->|base backup plus WAL| Backup[Backup and archive storage]`;
+
+<Mermaid code={deploymentDiagram} title="A production-shaped PostgreSQL deployment" />
+
+Read the diagram from the top. Many app servers funnel through one pooler so the primary never sees a flood of raw connections. The primary streams every change to its replicas, which take read traffic off its back. And the primary's data is continuously copied to backup storage so the whole thing can be rebuilt after a disaster.
+
+## What this module covers
+
+- **Replication** — streaming the primary's write-ahead log to read replicas for availability, and logical replication for copying selected tables between servers.
+- **Connection pooling** — why each PostgreSQL connection is an operating-system process, and how a pooler such as PgBouncer multiplexes many clients onto few server connections.
+- **Partitioning** — splitting one enormous logical table into many physical partitions so queries and maintenance touch only the slice they need.
+- **Backup and security** — logical and physical backups, point-in-time recovery, roles and `GRANT`, row-level security, and locking down who may connect.
+
+## Where this fits
+
+You already know how to model data, query it, index it, and wrap changes in transactions. Operations is what lets that knowledge survive contact with real traffic. Nothing here is a different PostgreSQL; it is the same server, configured and surrounded so that a single machine's limits and a single machine's failures stop being your application's limits and failures.
+
+## Tips / gotchas
+
+- Do not reach for replication or partitioning on day one. A single well-tuned server with good indexes handles a surprising amount of load; add complexity only when you can measure the need.
+- Replicas are for availability and read scaling, not for taking writes — every write still goes to one primary.
+- A backup you have never restored is a hope, not a backup. The only proof is a successful test restore.
+- Security is not a final step you bolt on; least-privilege roles and restricted network access are cheapest to set up before anything depends on the loose version.
+
+<Callout title="Same database, bigger stage">
+Operations does not replace what you have learned — it scales it. The primary in every diagram in this module is running the very same SQL engine you used in the earlier lessons. Replication, pooling, partitioning, and backups are the supporting cast that lets that engine perform in production.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What is the main job of a connection pooler in front of PostgreSQL?',
+    options: [
+      'It encrypts the data stored on disk',
+      'It multiplexes many client connections onto a small number of server connections',
+      'It automatically writes SQL queries for you',
+      'It replaces the need for backups',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In a typical replicated setup, where do write statements go?',
+    options: [
+      'To any replica that has spare capacity',
+      'Only to the primary server',
+      'To the connection pooler, which stores them',
+      'To the backup archive',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which production concern does partitioning primarily address?',
+    options: [
+      'Surviving a crashed primary',
+      'Handling thousands of simultaneous clients',
+      'Working efficiently with one extremely large table',
+      'Encrypting traffic on the wire',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="operations-and-scaling/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="operations-and-scaling/index" />

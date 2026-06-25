@@ -1,0 +1,179 @@
+---
+title: Connection pooling
+description: Why each PostgreSQL connection is a heavyweight process, how PgBouncer's session, transaction, and statement pooling modes work, and how to connect your application through a pooler.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A surprising amount of production trouble traces back to one fact: in PostgreSQL, every client connection is backed by its own operating-system process on the server. A few connections cost almost nothing. A few thousand cost a great deal of memory and scheduling overhead, and the server slows to a crawl long before it runs out of useful work to do.
+
+**Connection pooling** fixes this by putting a small middleman between your applications and the database. The pooler keeps a modest number of real server connections open and hands them out to clients as needed, so the database only ever deals with a handful of connections no matter how many clients exist.
+
+## Why connections are heavy
+
+When a client connects, the PostgreSQL postmaster forks a dedicated backend process to serve it. That process holds memory for caches, sort buffers, and bookkeeping, and the operating system must schedule it alongside every other backend. Idle connections still occupy a process; a web app that opens a connection per request and leaves it idle between requests wastes that cost over and over.
+
+This is why a default install caps `max_connections` at a low number such as 100. Raising it does not make the problem go away — it just lets you create more expensive processes.
+
+export const heavyDiagram = `flowchart LR
+  Cli[Many app clients] -->|hundreds of connections| PG[(PostgreSQL)]
+  PG --> B1[Backend process]
+  PG --> B2[Backend process]
+  PG --> B3[Backend process]
+  PG --> B4[Backend process]
+  PG --> B5[Backend process]`;
+
+<Mermaid code={heavyDiagram} title="Without pooling, each client gets its own server process" />
+
+## A pooler in the middle
+
+A pooler such as **PgBouncer** sits between the clients and the server. Clients connect to the pooler, which is cheap to talk to, and the pooler maintains a small set of real connections to PostgreSQL. When a client needs the database, the pooler lends it a server connection, then takes it back so another client can reuse it.
+
+export const poolDiagram = `flowchart LR
+  Cli[Thousands of clients] -->|cheap client connections| Pool[PgBouncer pooler]
+  Pool -->|few reused server connections| PG[(PostgreSQL)]`;
+
+<Mermaid code={poolDiagram} title="Many clients share a few server connections through a pooler" />
+
+The result is dramatic: ten thousand application clients might be served by twenty real PostgreSQL connections, because no client holds a server connection while it is idle.
+
+## Pooling modes
+
+PgBouncer offers three modes that differ in *how long* a client keeps a borrowed server connection.
+
+| Mode        | Server connection is returned after... | Notes                                              |
+|-------------|-----------------------------------------|----------------------------------------------------|
+| Session     | The client disconnects                  | Safest, but a connection is held for the whole session |
+| Transaction | Each transaction commits or rolls back  | The common choice; great reuse with one caveat     |
+| Statement   | Each individual statement               | Most aggressive; forbids multi-statement transactions |
+
+**Transaction mode** is the popular default. A server connection is borrowed only for the duration of one transaction, so between transactions it is free for others. This gives excellent reuse for typical web traffic, where each request is a short transaction.
+
+The catch is that anything tied to a *session* rather than a transaction can break, because the next transaction may land on a different server connection. Prepared statements, session-level `SET` commands, advisory locks, and `LISTEN`/`NOTIFY` all assume connection continuity that transaction mode does not provide.
+
+## A minimal pgbouncer.ini
+
+PgBouncer is configured with a small INI file. The essentials are which databases it fronts, where it listens, and the pooling mode.
+
+```ini
+[databases]
+shop = host=127.0.0.1 port=5432 dbname=shop
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer/userlist.txt
+pool_mode = transaction
+max_client_conn = 10000
+default_pool_size = 20
+```
+
+Here `max_client_conn` is how many clients may connect to PgBouncer, while `default_pool_size` is how many real PostgreSQL connections it keeps per database — twenty server connections fronting up to ten thousand clients.
+
+## Connecting through the pooler
+
+From your application's point of view, the pooler looks just like PostgreSQL. You point your driver at the pooler's host and port — `6432` above instead of `5432` — and nothing else changes.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```bash
+    # Connect to PgBouncer instead of PostgreSQL directly
+    psql "host=127.0.0.1 port=6432 dbname=shop user=app"
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    import { Pool } from 'pg';
+
+    // Point the driver at the pooler's port, not 5432
+    const pool = new Pool({
+      host: '127.0.0.1',
+      port: 6432,
+      database: 'shop',
+      user: 'app',
+    });
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import psycopg
+
+    conn = psycopg.connect(
+        host="127.0.0.1",
+        port=6432,
+        dbname="shop",
+        user="app",
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    conn, err := pgx.Connect(ctx,
+        "host=127.0.0.1 port=6432 dbname=shop user=app")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect("postgres://app@127.0.0.1:6432/shop")
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** register a new server connection whose host and port point at PgBouncer (port `6432`). pgAdmin treats it like any PostgreSQL server, which is a handy way to confirm the pooler is reachable.
+
+## Tips / gotchas
+
+- Transaction mode is the usual recommendation because it gives the best connection reuse for short web requests. Reach for session mode only when you genuinely need session continuity.
+- In transaction mode, avoid features that span transactions on one connection — server-side prepared statements, session `SET`, advisory locks, and `LISTEN`/`NOTIFY` may misbehave. Many drivers offer a setting to disable server-side prepared statements for this reason.
+- A pooler does not replace the driver's own connection pool; you can run both, but size them so the driver never asks for more than the pooler can supply.
+- Set `default_pool_size` based on your server's capacity, not your client count. A small pool that is always busy beats a large pool that swamps the database.
+
+<Callout title="Idle is the enemy">
+The core insight of pooling is that most application connections sit idle most of the time, yet each idle PostgreSQL connection still costs a process. A pooler lets those idle moments be shared. You are not adding capacity to the database — you are stopping clients from hoarding it while they have nothing to do.
+</Callout>
+
+export const quizPooling = [
+  {
+    q: 'Why are PostgreSQL connections considered heavy?',
+    options: [
+      'Each one downloads the entire database',
+      'Each one is backed by a dedicated operating-system process on the server',
+      'Each one requires a separate disk',
+      'Each one opens a new TCP port on the client',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In PgBouncer transaction mode, when is a server connection returned to the pool?',
+    options: [
+      'When the client disconnects',
+      'After each individual statement',
+      'When the current transaction commits or rolls back',
+      'Never; it is held for the session',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Which feature is most likely to misbehave under transaction-mode pooling?',
+    options: [
+      'A plain single-statement SELECT',
+      'Session-level SET commands and advisory locks that assume one connection',
+      'A short INSERT inside one transaction',
+      'Connecting with a username and password',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="operations-and-scaling/connection-pooling" questions={quizPooling} />
+
+<ProgressTracker client:visible id="operations-and-scaling/connection-pooling" />

@@ -1,0 +1,196 @@
+---
+title: Creating tables
+description: Use CREATE TABLE to declare columns and types, generate primary keys with IDENTITY or SERIAL, guard against errors with IF NOT EXISTS, and remove tables with DROP TABLE.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Every table starts life with a `CREATE TABLE` statement. You name the table, then list its columns inside parentheses, giving each one a name and a data type. The server stores that definition and from then on enforces it on every row you insert. Creating tables is **DDL** — data definition language — and it is almost always written and run as plain SQL, whether you type it into `psql` or feed it to a migration tool.
+
+We will build a `products` table for a small shop and grow it as the lesson goes on.
+
+## The basic shape
+
+The minimum is a table name and one or more columns. Each column is a name followed by a type, with columns separated by commas.
+
+```sql
+CREATE TABLE products (
+  id     integer,
+  name   text,
+  price  numeric(10, 2)
+);
+```
+
+That creates a table with three columns: an `id` whole number, a `name` of text, and a `price` stored as an exact decimal with up to ten digits and two after the point. It works, but it is too loose — nothing stops two products from sharing an `id`, and every column may be left empty. We fix that with a primary key and constraints next.
+
+**In pgAdmin:** after running the statement in the Query Tool, refresh the Tables node in the browser tree and the new `products` table appears. Expanding it reveals a Columns node listing each column and its type.
+
+## Inspecting a table with backslash-d
+
+In `psql` the `\d` command describes a table: its columns, their types, nullability, and any defaults. It is the fastest way to confirm a table looks the way you intended.
+
+```sql
+\d products
+```
+
+```text
+                        Table "public.products"
+ Column |     Type      | Collation | Nullable | Default
+--------+---------------+-----------+----------+---------
+ id     | integer       |           |          |
+ name   | text          |           |          |
+ price  | numeric(10,2) |           |          |
+```
+
+Right now every column is nullable and there is no default. As we add a primary key and constraints, more of those cells fill in.
+
+## Generating primary keys automatically
+
+You rarely want to assign id numbers by hand. PostgreSQL can do it for you. The modern way is `GENERATED ALWAYS AS IDENTITY`, which makes the server supply the next value automatically. The older shortcut is `SERIAL`, which you will still see in plenty of existing code.
+
+```sql
+CREATE TABLE products (
+  id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name   text NOT NULL,
+  price  numeric(10, 2) NOT NULL
+);
+```
+
+Now `id` is filled in by the server, declared the primary key, and `name` and `price` can no longer be left empty. The same table written with the older style would use `id bigserial PRIMARY KEY`. Both produce an auto-incrementing key; the `IDENTITY` form is the SQL-standard one and is preferred in modern PostgreSQL.
+
+## Creating a table from a driver
+
+Most applications run their `CREATE TABLE` statements once, at setup or through a migration step, rather than on every request. Here is the same migration sent from each driver — useful when your application owns its schema.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE TABLE products (
+      id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      name  text NOT NULL,
+      price numeric(10, 2) NOT NULL
+    );
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(`
+      CREATE TABLE products (
+        id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        name  text NOT NULL,
+        price numeric(10, 2) NOT NULL
+      )
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        CREATE TABLE products (
+          id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          name  text NOT NULL,
+          price numeric(10, 2) NOT NULL
+        )
+    """)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, `
+      CREATE TABLE products (
+        id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        name  text NOT NULL,
+        price numeric(10, 2) NOT NULL
+      )`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query(
+        "CREATE TABLE products (
+           id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+           name  text NOT NULL,
+           price numeric(10, 2) NOT NULL
+         )",
+    )
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The SQL is identical everywhere; only the way you hand it to the server differs. Because DDL does not take user input, there are no parameters to bind here.
+
+## IF NOT EXISTS and DROP TABLE
+
+Running `CREATE TABLE products` a second time is an error, because the table already exists. Adding `IF NOT EXISTS` makes the statement a no-op when the table is already there, which is handy in setup scripts that may run more than once.
+
+```sql
+CREATE TABLE IF NOT EXISTS products (
+  id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name  text NOT NULL,
+  price numeric(10, 2) NOT NULL
+);
+```
+
+To remove a table and all of its rows, use `DROP TABLE`. It is permanent and immediate, so treat it with the same care as `DELETE`. The `IF EXISTS` form avoids an error when the table is already gone.
+
+```sql
+DROP TABLE IF EXISTS products;
+```
+
+**In pgAdmin:** you can also drop a table by right-clicking it in the browser tree and choosing Delete/Drop, but running `DROP TABLE` in the Query Tool keeps the action in your script history.
+
+## Tips / gotchas
+
+- Prefer `GENERATED ALWAYS AS IDENTITY` over `SERIAL` for new tables. It is the SQL-standard syntax, avoids some ownership quirks of the sequence `SERIAL` creates behind the scenes, and reads more clearly.
+- Use `bigint` rather than `integer` for identity keys on tables you expect to grow. A four-byte `integer` runs out around two billion rows, and switching the type later is disruptive.
+- Add `IF NOT EXISTS` to creation scripts that may run repeatedly, but leave it off one-time migrations where a duplicate table really should be an error you notice.
+- `DROP TABLE` removes both the structure and every row with no confirmation. Double-check the table name, and prefer dropping inside a transaction you can roll back if you are unsure.
+- Column and table names are folded to lowercase unless double-quoted, so pick lowercase, snake_case names to avoid surprises.
+
+<Callout title="IDENTITY is the modern default">
+When you reach for an auto-incrementing key, write `bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY`. It expresses intent clearly, follows the SQL standard, and sidesteps the legacy behavior of `SERIAL`. Reserve `SERIAL` for reading older code, not writing new tables.
+</Callout>
+
+export const quizCreating = [
+  {
+    q: 'Which clause makes PostgreSQL supply primary-key values automatically using the SQL-standard syntax?',
+    options: [
+      'AUTO_INCREMENT',
+      'GENERATED ALWAYS AS IDENTITY',
+      'PRIMARY AUTO',
+      'DEFAULT NEXTVAL',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does adding IF NOT EXISTS to a CREATE TABLE statement do?',
+    options: [
+      'Drops the old table first',
+      'Skips creation without error when the table already exists',
+      'Creates a temporary table',
+      'Renames the existing table',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does DROP TABLE products; do?',
+    options: [
+      'Empties the rows but keeps the structure',
+      'Removes the table structure and all of its rows permanently',
+      'Hides the table from pgAdmin only',
+      'Creates a backup before deleting',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tables-and-types/creating-tables" questions={quizCreating} />
+
+<ProgressTracker client:visible id="tables-and-types/creating-tables" />

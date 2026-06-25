@@ -1,0 +1,226 @@
+---
+title: Upsert ด้วย ON CONFLICT
+description: เพิ่ม row หรือ update มันถ้ามีอยู่แล้ว ในคำสั่งเดียว — upsert ของ PostgreSQL ด้วย ON CONFLICT, pseudo-table EXCLUDED และ DO NOTHING
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+บางครั้งคุณอยากจะ insert row หนึ่ง แต่ถ้ามีตัวที่ตรงกันอยู่แล้ว คุณอยากจะ update มันมากกว่าที่จะล้มเหลว การทำสิ่งนี้ด้วยมือ — ตรวจสอบก่อน แล้วค่อย insert หรือ update — มี race condition: คำขอสองอันสามารถเห็น "ไม่มี row" ทั้งคู่ และพยายาม insert ทั้งคู่ได้ PostgreSQL แก้ปัญหานี้แบบ atomic ด้วย `INSERT ... ON CONFLICT` ซึ่งมักเรียกว่า **upsert** (update บวก insert)
+
+สำหรับตัวอย่างเหล่านี้ ลองจินตนาการว่า table `books` มี unique constraint บน `title` ดังนั้นจึงไม่มีหนังสือสองเล่มที่มี title เหมือนกันเป๊ะ ๆ ได้
+
+```sql
+ALTER TABLE books ADD CONSTRAINT books_title_key UNIQUE (title);
+```
+
+## upsert ตัดสินใจอย่างไร
+
+เมื่อ insert จะละเมิด unique constraint ที่ระบุชื่อไว้ PostgreSQL จะไม่ขึ้น error แต่จะรัน action ใน `ON CONFLICT` clause ของคุณแทน — ไม่ว่าจะเป็นการ update row ที่มีอยู่ หรือไม่ทำอะไรเลยอย่างเงียบ ๆ
+
+export const upsertDiagram = `flowchart TD
+  A[INSERT row] --> B{Conflicts with unique constraint?}
+  B -- No --> C[Insert the new row]
+  B -- Yes --> D{ON CONFLICT action}
+  D -- DO UPDATE --> E[Update the existing row]
+  D -- DO NOTHING --> F[Leave the existing row unchanged]`;
+
+<Mermaid code={upsertDiagram} title="ON CONFLICT ทำอะไรเมื่อเจอข้อมูลซ้ำ" />
+
+## DO UPDATE ด้วย EXCLUDED
+
+คุณระบุชื่อ column (หรือ constraint) ที่นิยาม conflict แล้วอธิบายว่าจะ update อย่างไร ภายในการ update นั้น table พิเศษ `EXCLUDED` เก็บค่าที่คุณ *พยายาม* จะ insert ไว้ คุณจึงสามารถคัดลอกมันลงใน row ที่มีอยู่ได้
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO books (title, author_id, published, copies_sold)
+    VALUES ('The Glass Orchard', 1, 2005, 1200)
+    ON CONFLICT (title)
+    DO UPDATE SET
+      published   = EXCLUDED.published,
+      copies_sold = EXCLUDED.copies_sold
+    RETURNING id, title, copies_sold;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      `INSERT INTO books (title, author_id, published, copies_sold)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (title)
+       DO UPDATE SET published = EXCLUDED.published,
+                     copies_sold = EXCLUDED.copies_sold
+       RETURNING id, title, copies_sold`,
+      ['The Glass Orchard', 1, 2005, 1200],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        """
+        INSERT INTO books (title, author_id, published, copies_sold)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (title)
+        DO UPDATE SET published = EXCLUDED.published,
+                      copies_sold = EXCLUDED.copies_sold
+        RETURNING id, title, copies_sold
+        """,
+        ("The Glass Orchard", 1, 2005, 1200),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        `INSERT INTO books (title, author_id, published, copies_sold)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (title)
+         DO UPDATE SET published = EXCLUDED.published,
+                       copies_sold = EXCLUDED.copies_sold
+         RETURNING id, title, copies_sold`,
+        "The Glass Orchard", 1, 2005, 1200)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "INSERT INTO books (title, author_id, published, copies_sold)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (title)
+         DO UPDATE SET published = EXCLUDED.published,
+                       copies_sold = EXCLUDED.copies_sold
+         RETURNING id, title, copies_sold",
+    )
+    .bind("The Glass Orchard")
+    .bind(1_i64)
+    .bind(2005_i32)
+    .bind(1200_i32)
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เนื่องจากหนังสือชื่อ "The Glass Orchard" มีอยู่แล้ว การ insert จึงกลายเป็นการ update ของ row นั้น:
+
+```text
+ id |       title       | copies_sold
+----+-------------------+-------------
+  1 | The Glass Orchard |        1200
+(1 row)
+```
+
+รันคำสั่งเดียวกันด้วย title ใหม่เอี่ยม แล้วจะไม่มี conflict ดังนั้นมันจึง insert ตามปกติและคืน id ที่ถูกสร้างขึ้นใหม่สด ๆ
+
+**ใน pgAdmin:** รันคำสั่งสองครั้งใน Query Tool — การรันครั้งแรก insert ครั้งที่สองชน conflict และ update ตาราง Data Output แสดง row ที่ถูกคืนกลับมาในแต่ละครั้ง
+
+## DO NOTHING
+
+ถ้าคุณต้องการ insert เฉพาะตอนที่ row เป็นของใหม่ และข้ามตัวซ้ำไปเงียบ ๆ ให้ใช้ `DO NOTHING` ไม่มี error, ไม่มี update
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO books (title, author_id, published)
+    VALUES ('The Glass Orchard', 1, 2005)
+    ON CONFLICT (title) DO NOTHING;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING',
+      ['The Glass Orchard', 1, 2005],
+    );
+    console.log(res.rowCount); // 0 when the row already existed
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO books (title, author_id, published) VALUES (%s, %s, %s) ON CONFLICT (title) DO NOTHING",
+        ("The Glass Orchard", 1, 2005),
+    )
+    # cur.rowcount is 0 when nothing was inserted
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tag, err := conn.Exec(ctx,
+        "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING",
+        "The Glass Orchard", 1, 2005)
+    // tag.RowsAffected() is 0 when the row already existed
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let result = sqlx::query(
+        "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING",
+    )
+    .bind("The Glass Orchard")
+    .bind(1_i64)
+    .bind(2005_i32)
+    .execute(&pool)
+    .await?;
+    // result.rows_affected() is 0 when nothing was inserted
+    ```
+  </TabItem>
+</Tabs>
+
+เมื่อ row มีอยู่แล้ว จะไม่มี row ใดได้รับผลกระทบ เมื่อมันเป็นของใหม่ จะมีหนึ่ง row ถูก insert
+
+## Tips / gotchas
+
+- upsert ต้องการ unique constraint หรือ unique index เพื่อตรวจจับ conflict `ON CONFLICT (title)` ทำงานได้เพราะ `title` เป็น unique เท่านั้น หากไม่มีสิ่งนั้น PostgreSQL ก็ไม่มีแนวคิดเรื่องข้อมูลซ้ำ
+- table `EXCLUDED` อ้างถึง row ที่คุณพยายาม insert ใช้มันใน `DO UPDATE` เพื่อดึงค่าใหม่เข้าไปใน row ที่มีอยู่
+- คุณสามารถเพิ่ม `WHERE` ให้กับ `DO UPDATE` เพื่อ update เฉพาะภายใต้เงื่อนไขบางอย่าง เช่น `DO UPDATE SET copies_sold = EXCLUDED.copies_sold WHERE EXCLUDED.copies_sold > books.copies_sold`
+- `DO NOTHING` คืนค่า row ที่ได้รับผลกระทบเป็นศูนย์เมื่อเกิด conflict ดังนั้นจงตรวจสอบจำนวน row หากคุณจำเป็นต้องรู้ว่า insert เกิดขึ้นจริงหรือไม่
+- จงส่งค่าผ่าน placeholder ตรงนี้ด้วยเช่นกัน upsert ยังคงเป็น `INSERT` และกฎ SQL injection เดียวกันก็ยังใช้ได้
+
+<Callout title="คำสั่ง atomic เดียว">
+ชัยชนะที่แท้จริงของ `ON CONFLICT` คือความเป็น atomic การตรวจสอบแล้วค่อย insert ในโค้ดแอปพลิเคชันอาจแพ้ race ระหว่างคำขอสองอันได้ แต่คำสั่ง upsert เดียวจะ insert หรือ update เพียงครั้งเดียวพอดี โดยมี unique constraint บังคับความถูกต้องให้คุณ
+</Callout>
+
+export const quizUpsert = [
+  {
+    q: 'What must exist on a column before ON CONFLICT (col) can detect a duplicate?',
+    options: [
+      'A foreign key',
+      'A unique constraint or unique index',
+      'A NOT NULL constraint',
+      'A default value',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In DO UPDATE, what does EXCLUDED.copies_sold refer to?',
+    options: [
+      'The value currently stored in the existing row',
+      'The value you attempted to insert',
+      'Always zero',
+      'A random row from the table',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does ON CONFLICT (title) DO NOTHING do when the title already exists?',
+    options: [
+      'Raises a unique violation error',
+      'Updates the existing row',
+      'Skips the insert, affecting zero rows',
+      'Deletes the existing row',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/upsert-on-conflict" questions={quizUpsert} />
+
+<ProgressTracker client:visible id="crud-and-sql/upsert-on-conflict" />

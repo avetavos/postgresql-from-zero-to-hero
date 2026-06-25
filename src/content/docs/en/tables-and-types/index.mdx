@@ -1,0 +1,114 @@
+---
+title: Tables and types
+description: A table is a typed, constrained shape for your rows. This module covers creating tables, the type system, constraints, and evolving a schema over time.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Before you can insert, read, update, or delete a single row, you need somewhere for that row to live. In PostgreSQL that home is a **table**: a named grid of columns, where every column has a fixed **data type** and an optional set of **constraints**. The type decides what kind of value a column can hold — a whole number, a piece of text, a moment in time — and the constraints decide which combinations of values the database will accept at all.
+
+That combination is what makes a relational database trustworthy. A column typed as `integer` will never silently store the word "twelve", and a column marked `NOT NULL` will never end up empty. The shape you declare up front becomes a contract the server enforces on every write, forever.
+
+## What a table really is
+
+A table is a definition, not just a bucket. When you create one you are telling the server three things at once: the **name** of each column, its **type**, and any **rules** that values must satisfy. Together those define the shape every row must fit.
+
+| Part of a table | What you declare | Example |
+|-----------------|------------------|---------|
+| Column name     | A label for the field | `email` |
+| Data type       | The kind of value allowed | `text`, `integer`, `timestamptz` |
+| Constraint      | A rule the value must satisfy | `NOT NULL`, `UNIQUE`, `CHECK` |
+
+Once the table exists, PostgreSQL guards that shape. Try to store text in a numeric column or a duplicate in a `UNIQUE` column and the statement is rejected with an error — the bad data never makes it in.
+
+## How the pieces fit together
+
+The four lessons in this module build on one another. You start by creating a table, choose the right type for each column, attach constraints that keep the data honest, and finally learn to change all of that safely as your application grows.
+
+export const moduleOverview = `flowchart TD
+  A[CREATE TABLE] --> B[Choose a data type per column]
+  B --> C[Attach constraints]
+  C --> D[A trustworthy table shape]
+  D --> E[ALTER TABLE to evolve it]
+  E --> D`;
+
+<Mermaid code={moduleOverview} title="From an empty schema to an evolving table" />
+
+## A first look
+
+Here is a small table that uses one column of each idea you will meet in this module: an identity primary key, typed columns, and a couple of constraints. Do not worry about every keyword yet — each gets its own lesson.
+
+```sql
+CREATE TABLE members (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  email      text NOT NULL UNIQUE,
+  full_name  text NOT NULL,
+  joined_on  date NOT NULL DEFAULT current_date,
+  is_active  boolean NOT NULL DEFAULT true
+);
+```
+
+Reading it top to bottom: every member gets an automatically generated `id`, must have a unique `email` and a `full_name`, joins on a date that defaults to today, and is active unless told otherwise. The whole shape is described in five lines, and the server will enforce all of it.
+
+**In pgAdmin:** expand your database in the left-hand browser, open Schemas then public then Tables, and you will see each table you create. Right-clicking a table and choosing Properties shows its columns, types, and constraints in a form view.
+
+## What this module covers
+
+- **Creating tables** — the `CREATE TABLE` statement, declaring columns and types, automatic primary keys, and dropping tables you no longer need.
+- **Data types** — the core building blocks: numbers, text, booleans, dates and times, UUIDs, JSON, arrays, and your own enumerated types.
+- **Constraints** — the rules that keep data valid: primary and foreign keys, uniqueness, not-null, checks, and defaults.
+- **Altering schema** — changing a live table with `ALTER TABLE` without losing data, and why some changes need more care than others.
+
+## Tips / gotchas
+
+- Designing the table is the most important step you take with a column's data, because a good type and the right constraints prevent whole categories of bad data from ever existing.
+- Types are not just storage hints. PostgreSQL refuses values that do not fit, which turns many would-be application bugs into immediate, obvious errors.
+- Constraints are checked by the database itself, so they hold no matter which application, driver, or person writes the data.
+- You can change a table later, but changing a busy production table needs planning. The final lesson covers how to do it safely.
+
+<Callout title="Shape first, data second">
+A relational database earns its reliability from the shape you declare. Spend the extra minutes choosing types and constraints when you create a table; that small effort is repaid every single time the server rejects a value that would have been a bug.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does a column data type guarantee about the values stored in that column?',
+    options: [
+      'That values are sorted automatically',
+      'That only values of that kind can be stored, others are rejected',
+      'That the column is indexed',
+      'That the column can never be empty',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Where is a constraint such as NOT NULL enforced?',
+    options: [
+      'In each application that connects to the database',
+      'By the database server itself, on every write',
+      'Only in the pgAdmin GUI',
+      'Only when you run a manual check',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which three things do you declare for a column when creating a table?',
+    options: [
+      'Name, type, and optional constraints',
+      'Name, index, and password',
+      'Type, backup, and replica',
+      'Name, color, and order',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="tables-and-types/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="tables-and-types/index" />

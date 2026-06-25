@@ -1,0 +1,284 @@
+---
+title: Transaction basics
+description: Use BEGIN, COMMIT, and ROLLBACK to make a group of statements atomic, and use SAVEPOINT with ROLLBACK TO for partial rollbacks — all through a transfer-between-accounts example.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A transaction turns several statements into one indivisible unit. You open it with `BEGIN`, run the statements you want grouped, and then close it with `COMMIT` to keep the work or `ROLLBACK` to discard it. Nothing inside the transaction is visible to other connections until you commit.
+
+We will use a small `accounts` table for every example in this lesson.
+
+```sql
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+```
+
+## The classic transfer
+
+Moving 100 from Ada to Linus is two updates that must happen together. If the server crashed between them, atomicity guarantees neither change survives, so money is never created or destroyed.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+    UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus';
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('UPDATE accounts SET balance = balance - $1 WHERE owner = $2', [100, 'Ada']);
+      await client.query('UPDATE accounts SET balance = balance + $1 WHERE owner = $2', [100, 'Linus']);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("UPDATE accounts SET balance = balance - %s WHERE owner = %s", (100, "Ada"))
+        cur.execute("UPDATE accounts SET balance = balance + %s WHERE owner = %s", (100, "Linus"))
+    # the block commits on success and rolls back on any exception
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE owner = $2", 100, "Ada"); err != nil {
+        tx.Rollback(ctx)
+        return err
+    }
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE owner = $2", 100, "Linus"); err != nil {
+        tx.Rollback(ctx)
+        return err
+    }
+    err = tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE owner = $2")
+        .bind(100_i64).bind("Ada").execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts SET balance = balance + $1 WHERE owner = $2")
+        .bind(100_i64).bind("Linus").execute(&mut *tx).await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+After the commit, the balances reflect both updates together.
+
+```text
+ id | owner | balance
+----+-------+---------
+  1 | Ada   |     400
+  2 | Linus |     200
+(2 rows)
+```
+
+## Choosing to abandon the work
+
+If anything looks wrong before you commit, `ROLLBACK` discards every change made since `BEGIN`, as if the transaction never ran. Here Ada lacks the funds, so we throw the whole thing away.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+    -- on reflection, cancel everything:
+    ROLLBACK;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await client.query('BEGIN');
+    await client.query('UPDATE accounts SET balance = balance - $1 WHERE owner = $2', [100, 'Ada']);
+    await client.query('ROLLBACK');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    conn.rollback()  # discards everything since the transaction began
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.Begin(ctx)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE owner = $2", 100, "Ada")
+    tx.Rollback(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE owner = $2")
+        .bind(100_i64).bind("Ada").execute(&mut *tx).await?;
+    tx.rollback().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## The life of a transaction
+
+Every transaction follows the same path: it begins, runs its statements, and ends in exactly one of two ways. There is no in-between state once you decide.
+
+export const txnFlow = `flowchart TD
+  A[BEGIN] --> B[Run statements]
+  B --> C{Everything correct?}
+  C -->|Yes| D[COMMIT: changes become permanent]
+  C -->|No| E[ROLLBACK: changes discarded]
+  D --> F[Transaction ends]
+  E --> F`;
+
+<Mermaid code={txnFlow} title="A transaction begins, runs, and either commits or rolls back" />
+
+## Partial rollback with SAVEPOINT
+
+Sometimes you want to undo only part of a transaction without abandoning the rest. A `SAVEPOINT` is a named marker inside the transaction; `ROLLBACK TO` rewinds to that marker, keeping everything before it and discarding everything after.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+    SAVEPOINT after_debit;
+    UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody';
+    -- that owner does not exist; undo just the second update:
+    ROLLBACK TO after_debit;
+    UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus';
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await client.query('BEGIN');
+    await client.query("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'");
+    await client.query('SAVEPOINT after_debit');
+    await client.query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'");
+    await client.query('ROLLBACK TO after_debit');
+    await client.query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'");
+    await client.query('COMMIT');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
+        try:
+            with conn.transaction():  # a nested block acts as a savepoint
+                cur.execute("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
+                raise ValueError("undo just this part")
+        except ValueError:
+            pass
+        cur.execute("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.Begin(ctx)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
+    tx.Exec(ctx, "SAVEPOINT after_debit")
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
+    tx.Exec(ctx, "ROLLBACK TO after_debit")
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
+    tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
+        .execute(&mut *tx).await?;
+    sqlx::query("SAVEPOINT after_debit").execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
+        .execute(&mut *tx).await?;
+    sqlx::query("ROLLBACK TO after_debit").execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The debit and the final credit are kept; only the work between the savepoint and `ROLLBACK TO` is thrown away.
+
+```text
+ owner | balance
+-------+---------
+ Ada   |     400
+ Linus |     200
+(2 rows)
+```
+
+## Tips / gotchas
+
+- Keep transactions short. A transaction that stays open holds resources and, as the MVCC lesson shows, can hold back cleanup of old row versions.
+- By default a connection is in auto-commit mode: each lone statement is its own committed transaction. You only leave that mode by issuing `BEGIN`.
+- An error inside a transaction puts it into an aborted state; PostgreSQL then rejects further commands until you `ROLLBACK` (or `ROLLBACK TO` a savepoint).
+- In application code, always pair `BEGIN` with a `ROLLBACK` on the error path. The driver examples above show the try-or-finally pattern that guarantees the connection never leaks an open transaction.
+
+<Callout title="Commit is the point of no return">
+Before `COMMIT`, your changes live only in your transaction and can vanish with a single `ROLLBACK`. After `COMMIT`, durability takes over and the change is written to survive a crash. Treat the commit as the moment you are sure.
+</Callout>
+
+export const quizBasics = [
+  {
+    q: 'What does ROLLBACK do to the statements run since BEGIN?',
+    options: [
+      'Commits them faster',
+      'Discards them as if they never ran',
+      'Applies only the first one',
+      'Saves them to a separate table',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the purpose of a SAVEPOINT?',
+    options: [
+      'It permanently commits part of a transaction',
+      'It lets you roll back to a marker without abandoning the whole transaction',
+      'It speeds up the next COMMIT',
+      'It creates a backup file on disk',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is a single statement run on its own committed automatically?',
+    options: [
+      'Never; you must always type COMMIT',
+      'When the connection is in auto-commit mode, outside any BEGIN',
+      'Only on a primary key table',
+      'Only when RETURNING is used',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactions-and-concurrency/transactions-basics" questions={quizBasics} />
+
+<ProgressTracker client:visible id="transactions-and-concurrency/transactions-basics" />

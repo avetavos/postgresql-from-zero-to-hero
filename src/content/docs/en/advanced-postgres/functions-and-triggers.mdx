@@ -1,0 +1,205 @@
+---
+title: Functions and triggers
+description: Write a small PL/pgSQL function that returns a value with CREATE FUNCTION ... LANGUAGE plpgsql, then wire a trigger to run it automatically — keeping updated_at current or auditing every insert.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+So far every piece of logic has lived in your application. PostgreSQL can also run logic itself: a **function** is a named, reusable block of code stored in the database, and a **trigger** is a rule that fires a function automatically whenever rows change. Together they let you enforce behavior in one place, no matter which application or person touches the table.
+
+We work with a `products` table that tracks when each row was last changed.
+
+```sql
+CREATE TABLE products (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name       text NOT NULL,
+  price      numeric(10, 2) NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+## A small PL/pgSQL function
+
+`CREATE FUNCTION` with `LANGUAGE plpgsql` defines a function in PostgreSQL's procedural language. PL/pgSQL adds variables, conditionals, and loops on top of SQL. Here is a focused function that returns a value: it applies a percentage discount to a price.
+
+```sql
+CREATE FUNCTION apply_discount(price numeric, percent numeric)
+RETURNS numeric
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF percent < 0 OR percent > 100 THEN
+    RAISE EXCEPTION 'percent must be between 0 and 100, got %', percent;
+  END IF;
+  RETURN round(price - (price * percent / 100), 2);
+END;
+$$;
+```
+
+```text
+CREATE FUNCTION
+```
+
+The `$$` markers are dollar quoting — they delimit the function body so you do not have to escape the quotes inside it. Call the function like any built-in:
+
+```sql
+SELECT name, price, apply_discount(price, 15) AS sale_price
+FROM products;
+```
+
+```text
+    name     | price  | sale_price
+-------------+--------+------------
+ Trail Runner| 120.00 |     102.00
+ City Loafer |  95.00 |      80.75
+(2 rows)
+```
+
+## A trigger function
+
+A trigger needs a function that returns the special type `trigger`. Inside it, the implicit record `NEW` holds the row being inserted or updated, and `OLD` holds the previous version on an update. This function stamps the current time onto `updated_at` before the row is written.
+
+```sql
+CREATE FUNCTION set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+```
+
+```text
+CREATE FUNCTION
+```
+
+A `BEFORE` trigger must `RETURN NEW` — the row it returns is the one that actually gets stored, so this is how a trigger can modify incoming data.
+
+## Wiring the trigger
+
+`CREATE TRIGGER` connects the function to a table and an event. This one fires `BEFORE UPDATE` for each affected row.
+
+```sql
+CREATE TRIGGER trg_set_updated_at
+BEFORE UPDATE ON products
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+```
+
+```text
+CREATE TRIGGER
+```
+
+Now any update refreshes the timestamp without the application having to remember:
+
+```sql
+UPDATE products SET price = 110.00 WHERE name = 'Trail Runner'
+RETURNING name, price, updated_at;
+```
+
+```text
+    name     | price  |          updated_at
+-------------+--------+-------------------------------
+ Trail Runner| 110.00 | 2026-06-25 09:14:02.118+00
+(1 row)
+```
+
+## Auditing on insert
+
+The same pattern audits changes. Create an audit table, a trigger function that records the new row, and an `AFTER INSERT` trigger so the log is written once the insert succeeds.
+
+```sql
+CREATE TABLE product_audit (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  product_id bigint NOT NULL,
+  action     text NOT NULL,
+  logged_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE FUNCTION audit_product_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  INSERT INTO product_audit (product_id, action)
+  VALUES (NEW.id, 'INSERT');
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_audit_product_insert
+AFTER INSERT ON products
+FOR EACH ROW
+EXECUTE FUNCTION audit_product_insert();
+```
+
+```text
+CREATE TRIGGER
+```
+
+An `AFTER` trigger runs once the row is safely written, which is right for logging — you only want an audit entry for inserts that actually happened.
+
+## How a trigger fires
+
+The flow is always the same: a write statement arrives, PostgreSQL detects it matches a trigger's event, the trigger function runs, and the operation continues with whatever the function returned.
+
+export const triggerDiagram = `flowchart TD
+  W[INSERT or UPDATE on products] --> E{Matches a trigger event}
+  E -->|BEFORE| B[set_updated_at runs, returns NEW]
+  B --> S[(Row written with new timestamp)]
+  E -->|AFTER| A[audit_product_insert runs]
+  S --> A
+  A --> L[(Row recorded in product_audit)]`;
+
+<Mermaid code={triggerDiagram} title="A write fires its matching trigger, which runs a function" />
+
+## Tips / gotchas
+
+- Triggers hide logic from anyone reading the application code. Document every trigger — what it does and which table it sits on — so a timestamp that updates "by magic" is never a mystery.
+- Keep functions small and single-purpose. A function that validates input is easy to test and reuse; one that does five unrelated things becomes the same tangle you were trying to avoid.
+- Choose `BEFORE` to modify or validate the incoming row (you can change `NEW`), and `AFTER` for side effects like logging that should only happen once the write succeeds.
+- A `BEFORE` row-level trigger function must `RETURN NEW` to let the row through; returning `NULL` silently cancels the operation for that row, which is occasionally useful but surprising.
+
+<Callout title="Logic that always runs">
+The strength of a trigger is that it cannot be skipped — every insert or update goes through it, whatever client made the change. That same strength is its danger: behavior lives somewhere the application code never mentions. Use triggers for invariants you truly want enforced everywhere, and write them down.
+</Callout>
+
+export const quizFunctions = [
+  {
+    q: 'What type must a function return so it can be used by a trigger?',
+    options: ['void', 'trigger', 'record', 'boolean'],
+    answer: 1,
+  },
+  {
+    q: 'Inside a BEFORE trigger function, what does the NEW record hold?',
+    options: [
+      'The previous version of the row only',
+      'The row being inserted or updated',
+      'A count of affected rows',
+      'The trigger definition',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why is an AFTER trigger the right choice for writing an audit log?',
+    options: [
+      'It runs before validation so it is faster',
+      'It can modify the incoming row',
+      'It runs only once the write has succeeded',
+      'It cancels the operation by default',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="advanced-postgres/functions-and-triggers" questions={quizFunctions} />
+
+<ProgressTracker client:visible id="advanced-postgres/functions-and-triggers" />

@@ -1,0 +1,156 @@
+---
+title: EXPLAIN and query plans
+description: Read the planner's output with EXPLAIN and EXPLAIN (ANALYZE, BUFFERS), tell Seq Scan from Index Scan and Bitmap, read cost and rows and timing, and learn why an index is sometimes ignored.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+When a query is slow, guessing is a waste of time. PostgreSQL will tell you exactly how it intends to run a query, and how it actually ran. The tool is `EXPLAIN`, and learning to read its output is the single most useful performance skill you can pick up.
+
+## The planner chooses a plan
+
+You write *what* you want; the **query planner** decides *how* to get it. For a given query there can be many possible plans — scan the whole table, use this index, use that one, combine two — and the planner estimates the cost of each, then picks the cheapest.
+
+export const plannerFlow = `flowchart LR
+  Q[Your SQL query] --> P[Query planner]
+  P --> E1[Estimate: Seq Scan cost]
+  P --> E2[Estimate: Index Scan cost]
+  P --> E3[Estimate: Bitmap Scan cost]
+  E1 --> C[Pick the cheapest plan]
+  E2 --> C
+  E3 --> C
+  C --> X[Execute chosen plan]`;
+
+<Mermaid code={plannerFlow} title="How the planner chooses a plan" />
+
+Those cost estimates depend on statistics about your data — how many rows the table has, how many distinct values a column holds, and so on. If the statistics are stale, the planner makes bad guesses, which is the topic of the final lesson in this module.
+
+## EXPLAIN: the estimated plan
+
+`EXPLAIN` prints the plan the planner *would* use, without running the query. It is instant and safe to run on anything.
+
+```sql
+EXPLAIN SELECT * FROM books WHERE author_id = 4;
+```
+
+```text
+                              QUERY PLAN
+----------------------------------------------------------------------
+ Index Scan using books_author_idx on books  (cost=0.42..12.61 rows=6 width=64)
+   Index Cond: (author_id = 4)
+```
+
+Read the numbers in parentheses:
+
+- `cost=0.42..12.61` — two figures in arbitrary cost units. The first is the estimated startup cost (work before the first row appears); the second is the estimated total cost. Lower is cheaper; the planner compares these across candidate plans.
+- `rows=6` — how many rows the planner *estimates* this node will return.
+- `width=64` — the estimated average row size in bytes.
+
+The top line also names the strategy: here, an `Index Scan` using a named index, with the `Index Cond` showing which condition the index handled.
+
+## EXPLAIN ANALYZE: what really happened
+
+`EXPLAIN ANALYZE` actually *runs* the query and reports real timings alongside the estimates. Adding `BUFFERS` also reports how many data pages were read, which tells you whether the work came from cache or from disk.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE author_id = 4;
+```
+
+```text
+                                                  QUERY PLAN
+--------------------------------------------------------------------------------------------------------------
+ Index Scan using books_author_idx on books  (cost=0.42..12.61 rows=6 width=64) (actual time=0.018..0.024 rows=6 loops=1)
+   Index Cond: (author_id = 4)
+   Buffers: shared hit=4
+ Planning Time: 0.092 ms
+ Execution Time: 0.041 ms
+```
+
+The new `actual time=0.018..0.024 rows=6 loops=1` block is the truth: real startup and total time in milliseconds, the real row count, and how many times this node ran. Compare estimated `rows` to actual `rows`: a large gap is the classic sign of stale statistics or a misled planner. `Buffers: shared hit=4` means four pages were served from cache and none from disk.
+
+## Telling the scan types apart
+
+Three scan strategies appear constantly. Learning to recognise them is most of the battle.
+
+- **Seq Scan** — reads the whole table top to bottom. Expected when no useful index exists, or when the query returns a large fraction of the rows anyway.
+- **Index Scan** — walks an index, then fetches each matching row from the table. Best when the query is *selective*, returning a small slice of the table.
+- **Bitmap Heap Scan** (paired with a **Bitmap Index Scan**) — builds a bitmap of matching row locations from the index, sorts it, then reads the table in physical order. PostgreSQL chooses this middle ground when a query matches more rows than an index scan handles well but fewer than a full seq scan.
+
+A bitmap plan looks like this:
+
+```text
+                                  QUERY PLAN
+------------------------------------------------------------------------------
+ Bitmap Heap Scan on books  (cost=12.10..520.30 rows=900 width=64)
+   Recheck Cond: (published > 2000)
+   ->  Bitmap Index Scan on books_published_idx  (cost=0.00..11.88 rows=900 width=0)
+         Index Cond: (published > 2000)
+```
+
+The indented `->` line is a child node feeding its parent. Plans are trees: read them from the most-indented node outward, because inner nodes run first and pass their rows up.
+
+## Why the planner sometimes ignores an index
+
+A common surprise: you create an index, but `EXPLAIN` still shows a `Seq Scan`. This is usually the planner being *right*, not wrong:
+
+- **The query is not selective.** If a condition matches half the table, jumping back and forth between the index and the table is slower than reading the table straight through. A seq scan wins.
+- **The table is tiny.** On a table of a few hundred rows, a seq scan is essentially free, and the planner skips the index overhead.
+- **Statistics are stale.** If the planner thinks a condition matches far more rows than it really does, it may avoid the index. Running `ANALYZE` on the table fixes the estimates.
+- **The condition cannot use the index.** A leading-wildcard `LIKE`, a function wrapped around the column, or a type mismatch can all make an existing index unusable.
+
+**In pgAdmin:** the Explain button runs `EXPLAIN`, and the Explain menu has an Analyze option for `EXPLAIN ANALYZE`. The result is drawn as a graphical tree where each node shows its scan type and cost, and thicker arrows mean more rows — a fast way to spot the expensive node.
+
+## Tips / gotchas
+
+- `EXPLAIN ANALYZE` actually executes the query. For a `SELECT` that is harmless, but for an `UPDATE` or `DELETE` it will change your data — wrap it in a transaction you `ROLLBACK` if you need to inspect a write.
+- Plans are only meaningful on realistic data. A query that seq-scans a 100-row test table may index-scan the same table with a million rows. Test against representative volumes.
+- Always compare estimated `rows` against actual `rows`. A big mismatch points to statistics that need refreshing.
+- Read plan trees inside-out: the most indented nodes execute first and feed their parents.
+
+<Callout title="Let EXPLAIN replace guessing">
+Before you add an index or rewrite a query, run `EXPLAIN (ANALYZE, BUFFERS)` and read what PostgreSQL actually does. The plan tells you the scan type, where the time goes, and whether your estimates match reality — turning performance work from guesswork into measurement.
+</Callout>
+
+export const quizExplain = [
+  {
+    q: 'What is the difference between EXPLAIN and EXPLAIN ANALYZE?',
+    options: [
+      'There is no difference',
+      'EXPLAIN only estimates the plan; EXPLAIN ANALYZE actually runs the query and reports real timings',
+      'EXPLAIN ANALYZE is faster',
+      'EXPLAIN ANALYZE only works on indexes',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'You create an index but EXPLAIN still shows a Seq Scan. What is a likely reason?',
+    options: [
+      'PostgreSQL never uses indexes automatically',
+      'The query matches a large fraction of the table, so a seq scan is cheaper',
+      'Indexes only work inside transactions',
+      'The index is corrupt',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In a plan, what does a large gap between estimated rows and actual rows usually indicate?',
+    options: [
+      'The query is wrong',
+      'The planner statistics are stale or misleading',
+      'The table has no primary key',
+      'The index is unique',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/explain-and-query-plans" questions={quizExplain} />
+
+<ProgressTracker client:visible id="indexes-and-performance/explain-and-query-plans" />

@@ -1,5 +1,157 @@
 ---
 title: CRUD & SQL
-description: Insert, query, update, and delete rows with SQL via psql and the official drivers.
+description: Insert, read, update, and delete rows with SQL — the four verbs you will use every day, shown in psql and four official drivers.
+sidebar:
+  order: 1
 ---
-Coming soon.
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A database is only useful when you can put data in, get it back out, change it, and remove it. In PostgreSQL you do all of that by sending **SQL** — a text language the server understands. You never edit table files by hand; instead you write a statement, the server parses it, runs it, and returns either a count of affected rows or a result set.
+
+Almost every SQL statement you write maps to one of four ideas, collectively known as **CRUD**: create, read, update, and delete. This module walks through each one with examples you can paste straight into `psql`, plus the exact same operation expressed in four popular drivers so you can carry the knowledge into real application code.
+
+## The four verbs
+
+The acronym CRUD lines up with four SQL keywords. Learn these and you can already do most day-to-day database work.
+
+| CRUD action | SQL keyword | What it does                          |
+|-------------|-------------|---------------------------------------|
+| Create      | `INSERT`    | Adds new rows to a table              |
+| Read        | `SELECT`    | Returns rows matching your criteria   |
+| Update      | `UPDATE`    | Changes columns in existing rows      |
+| Delete      | `DELETE`    | Removes rows from a table             |
+
+Everything is built around **rows in tables**. A table is a named grid of columns with fixed types; a row is one record. SQL statements describe *what* you want — "give me books published after 2000" — and the server figures out *how* to do it.
+
+## How a statement travels
+
+Whether you type into `psql` or call a driver from your app, the path is the same: your code hands a SQL string to the server, the server works on the stored rows, and a reply comes back.
+
+export const overviewDiagram = `flowchart LR
+  A[Your app or psql] -->|SQL text| B[PostgreSQL server]
+  B -->|reads and writes| C[(Table rows on disk)]
+  C -->|result set or row count| B
+  B -->|reply| A`;
+
+<Mermaid code={overviewDiagram} title="A SQL statement round trip" />
+
+## The example schema
+
+To keep things concrete, every lesson in this module reuses one tiny schema: a table of `authors` and a table of `books`. Here is the setup, which you can run once to follow along.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE TABLE authors (
+      id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      name  text NOT NULL,
+      born  int
+    );
+
+    CREATE TABLE books (
+      id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      title       text NOT NULL,
+      author_id   bigint REFERENCES authors (id),
+      published   int,
+      copies_sold int NOT NULL DEFAULT 0
+    );
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(`
+      CREATE TABLE authors (
+        id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        name text NOT NULL,
+        born int
+      )
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        CREATE TABLE authors (
+          id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          name text NOT NULL,
+          born int
+        )
+    """)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, `
+      CREATE TABLE authors (
+        id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        name text NOT NULL,
+        born int
+      )`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query(
+        "CREATE TABLE authors (
+           id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+           name text NOT NULL,
+           born int
+         )",
+    )
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** open the Query Tool on your database, paste the `CREATE TABLE` statements, and press the run button. You will see the new tables appear under Schemas then Tables in the left-hand browser tree.
+
+## What this module covers
+
+- **Insert** — adding rows one at a time or in bulk, letting columns take defaults, and getting generated ids back.
+- **Select and filtering** — choosing columns, narrowing with `WHERE`, sorting, and paging.
+- **Update and delete** — changing and removing rows safely, and why a forgotten `WHERE` is dangerous.
+- **Upsert** — inserting a row, or updating it if it already exists, in a single statement.
+
+## Tips / gotchas
+
+- SQL keywords are case-insensitive (`select` equals `SELECT`), but uppercase keywords are a common readability convention used throughout this course.
+- Identifiers like table and column names are folded to lowercase unless you double-quote them, so `Authors` and `authors` refer to the same table.
+- A statement ends with a semicolon in `psql`. Drivers usually send one statement per call, so the semicolon is optional there.
+- Reads (`SELECT`) never change data; the other three verbs do, so treat them with more care.
+
+<Callout title="Mental model">
+Think of SQL as a conversation. You make a request in writing, PostgreSQL does the work against the rows, and it always answers — either with data or with a count of how many rows it touched. The rest of this module is just learning the four kinds of requests.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'Which SQL keyword corresponds to the "read" part of CRUD?',
+    options: ['INSERT', 'SELECT', 'UPDATE', 'DELETE'],
+    answer: 1,
+  },
+  {
+    q: 'In PostgreSQL, how do you change data stored on disk?',
+    options: [
+      'By editing the table files directly with a text editor',
+      'By sending SQL statements that the server executes',
+      'Only through the pgAdmin GUI',
+      'By restarting the server',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which statement does NOT modify the data in a table?',
+    options: ['INSERT', 'UPDATE', 'DELETE', 'SELECT'],
+    answer: 3,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="crud-and-sql/index" />

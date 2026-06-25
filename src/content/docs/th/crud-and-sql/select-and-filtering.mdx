@@ -1,0 +1,319 @@
+---
+title: การ select และการกรอง
+description: อ่าน row ด้วย SELECT — เลือก column, จำกัดด้วย WHERE, เรียงด้วย ORDER BY และแบ่งหน้าผลลัพธ์ด้วย LIMIT และ OFFSET
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+การอ่านเป็นสิ่งที่คุณทำกับฐานข้อมูลบ่อยที่สุด และ `SELECT` คือวิธีที่คุณทำมัน `SELECT` หนึ่งคำสั่งอธิบายว่าคุณต้องการ column ไหน, row ไหนที่เข้าเกณฑ์, เรียงลำดับอย่างไร และเอาเท่าไหร่ เซิร์ฟเวอร์จะส่งคืนชุดผลลัพธ์ (result set) — ศูนย์หรือมากกว่าหนึ่ง row — โดยไม่เปลี่ยนแปลงอะไรบนดิสก์
+
+ตัวอย่างเหล่านี้สมมติว่า table `authors` ถูกเติมด้วย row จำนวนหนึ่งจากบทเรียน insert
+
+## การเลือก column
+
+แสดงรายการ column ที่คุณต้องการหลัง `SELECT` ใช้ `*` เฉพาะตอนสำรวจอย่างรวดเร็วเท่านั้น ในโค้ดจริง ให้ระบุชื่อ column เพื่อให้ผลลัพธ์คงที่ แม้ในภายหลังจะมีคนเพิ่ม column เข้ามา
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT id, name, born FROM authors;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query('SELECT id, name, born FROM authors');
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("SELECT id, name, born FROM authors")
+    for row in cur.fetchall():
+        print(row)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, "SELECT id, name, born FROM authors")
+    defer rows.Close()
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("SELECT id, name, born FROM authors")
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ id |      name       | born
+----+-----------------+------
+  1 | Mira Castellan  | 1971
+  2 | Devon Reyes     | 1985
+  3 | Priya Anand     | 1990
+  4 | Tomas Holt      | 1962
+(4 rows)
+```
+
+## การจำกัดด้วย WHERE
+
+`WHERE` เก็บไว้เฉพาะ row ที่เงื่อนไขเป็นจริงเท่านั้น คุณสามารถเปรียบเทียบด้วย `=`, `<`, `>`, `<=`, `>=` และรวมเงื่อนไขด้วย `AND` และ `OR`
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name, born
+    FROM authors
+    WHERE born >= 1980 AND born < 1995;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT name, born FROM authors WHERE born >= $1 AND born < $2',
+      [1980, 1995],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT name, born FROM authors WHERE born >= %s AND born < %s",
+        (1980, 1995),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "SELECT name, born FROM authors WHERE born >= $1 AND born < $2",
+        1980, 1995)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("SELECT name, born FROM authors WHERE born >= $1 AND born < $2")
+        .bind(1980_i32)
+        .bind(1995_i32)
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    name     | born
+-------------+------
+ Devon Reyes | 1985
+ Priya Anand | 1990
+(2 rows)
+```
+
+## IN, BETWEEN และการจับคู่ pattern
+
+`IN` ตรวจสอบการเป็นสมาชิกในรายการ, `BETWEEN` เป็นช่วงแบบรวมปลายทั้งสองข้าง และ `LIKE` จับคู่ pattern ของข้อความ `LIKE` สนใจตัวพิมพ์เล็กพิมพ์ใหญ่ PostgreSQL ยังมี `ILIKE` สำหรับการจับคู่แบบไม่สนใจตัวพิมพ์เล็กพิมพ์ใหญ่ด้วย ใน pattern นั้น `%` จับคู่กับอักขระต่อเนื่องชุดใดก็ได้ และ `_` จับคู่กับหนึ่งอักขระพอดี
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name, born
+    FROM authors
+    WHERE born BETWEEN 1960 AND 1980
+      AND name ILIKE '%a%';
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT name, born FROM authors WHERE born BETWEEN $1 AND $2 AND name ILIKE $3',
+      [1960, 1980, '%a%'],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT name, born FROM authors WHERE born BETWEEN %s AND %s AND name ILIKE %s",
+        (1960, 1980, "%a%"),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "SELECT name, born FROM authors WHERE born BETWEEN $1 AND $2 AND name ILIKE $3",
+        1960, 1980, "%a%")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT name, born FROM authors WHERE born BETWEEN $1 AND $2 AND name ILIKE $3",
+    )
+    .bind(1960_i32)
+    .bind(1980_i32)
+    .bind("%a%")
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+      name      | born
+----------------+------
+ Mira Castellan | 1971
+ Tomas Holt     | 1962
+(2 rows)
+```
+
+## การจัดการ NULL
+
+`NULL` หมายถึง "ไม่ทราบ" ดังนั้นมันจึงไม่ทำตัวเหมือนค่าธรรมดาทั่วไป คุณไม่สามารถทดสอบมันด้วย `=` ได้ ให้ใช้ `IS NULL` และ `IS NOT NULL` แทน สมมติว่า author คนหนึ่งไม่มีปีเกิดที่บันทึกไว้
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name FROM authors WHERE born IS NULL;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query('SELECT name FROM authors WHERE born IS NULL');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("SELECT name FROM authors WHERE born IS NULL")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, "SELECT name FROM authors WHERE born IS NULL")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("SELECT name FROM authors WHERE born IS NULL")
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## การเรียงลำดับและแบ่งหน้า
+
+`ORDER BY` เรียงผลลัพธ์ เติม `DESC` เพื่อเรียงจากมากไปน้อย `LIMIT` จำกัดจำนวน row และ `OFFSET` ข้าม row จากด้านบน — เมื่อใช้ร่วมกันจะช่วยให้คุณแบ่งหน้าผ่าน table ขนาดใหญ่ได้
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name, born
+    FROM authors
+    ORDER BY born DESC
+    LIMIT 2 OFFSET 1;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT name, born FROM authors ORDER BY born DESC LIMIT $1 OFFSET $2',
+      [2, 1],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT name, born FROM authors ORDER BY born DESC LIMIT %s OFFSET %s",
+        (2, 1),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "SELECT name, born FROM authors ORDER BY born DESC LIMIT $1 OFFSET $2",
+        2, 1)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("SELECT name, born FROM authors ORDER BY born DESC LIMIT $1 OFFSET $2")
+        .bind(2_i64)
+        .bind(1_i64)
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    name     | born
+-------------+------
+ Devon Reyes | 1985
+ Mira Castellan | 1971
+(2 rows)
+```
+
+**ใน pgAdmin:** รันอันใดก็ได้เหล่านี้ใน Query Tool ผลลัพธ์จะปรากฏในตาราง Data Output ด้านล่าง ที่ซึ่งคุณยังสามารถเรียง column ได้ด้วยการคลิกที่หัวคอลัมน์
+
+## Tips / gotchas
+
+- `NULL` ใช้ตรรกะสามค่า (three-valued logic): การเปรียบเทียบกับ `NULL` ไม่ได้เป็นจริงหรือเท็จ แต่เป็นไม่ทราบ (unknown) ดังนั้น row เหล่านั้นจึงถูกตัดออกโดย `WHERE` จงใช้ `IS NULL` แทน `= NULL` เสมอ
+- `LIMIT` ที่ไม่มี `ORDER BY` จะคืนชุดย่อยแบบสุ่ม — เซิร์ฟเวอร์อาจคืน row ในลำดับใดก็ได้ และลำดับนั้นอาจเปลี่ยนไประหว่างการรันแต่ละครั้ง จงจับคู่ `LIMIT` กับ `ORDER BY` ที่มีผลแน่นอน (deterministic) เสมอ
+- `ILIKE` สะดวกแต่ไม่สามารถใช้ index ธรรมดาได้อย่างมีประสิทธิภาพ สำหรับการค้นหาข้อความหนัก ๆ ให้ศึกษา trigram index หรือ full-text search ในภายหลังของคอร์ส
+- การ select เฉพาะ column ที่คุณต้องการช่วยให้ result set เล็กและโค้ดของคุณทนทานต่อการเปลี่ยนแปลง schema
+
+<Callout title="เรียงลำดับก่อนแบ่งหน้า">
+การแบ่งหน้า (pagination) มีความหมายก็ต่อเมื่ออยู่บนการเรียงลำดับที่คงที่ ถ้าสอง row เสมอกันบน column ที่ใช้เรียง ให้เพิ่มตัวตัดสินเสมอ (tiebreaker) เช่น `ORDER BY born DESC, id` เพื่อให้ row เดิมไม่ปรากฏบนสองหน้า
+</Callout>
+
+export const quizSelect = [
+  {
+    q: 'How do you correctly find rows where the born column is unknown?',
+    options: [
+      'WHERE born = NULL',
+      'WHERE born IS NULL',
+      'WHERE born == NULL',
+      'WHERE born <> 0',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is true about LIMIT without an ORDER BY?',
+    options: [
+      'It always returns the oldest rows',
+      'It returns an arbitrary, possibly changing subset',
+      'It raises an error',
+      'It sorts by primary key automatically',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which operator does a case-insensitive pattern match in PostgreSQL?',
+    options: ['LIKE', 'ILIKE', 'BETWEEN', 'IN'],
+    answer: 1,
+  },
+  {
+    q: 'What does OFFSET 1 do in a SELECT?',
+    options: [
+      'Returns only the first row',
+      'Skips the first row of the ordered result',
+      'Limits the result to one row',
+      'Offsets the column positions',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/select-and-filtering" questions={quizSelect} />
+
+<ProgressTracker client:visible id="crud-and-sql/select-and-filtering" />

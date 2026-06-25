@@ -1,0 +1,184 @@
+---
+title: Specialized indexes
+description: Beyond B-tree — GIN for jsonb arrays and full-text, GiST for geometric and range data, BRIN for huge append-only tables, Hash for equality, plus partial, expression, and covering INCLUDE indexes.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+B-tree handles equality, ranges, sorting, and prefix matches — which covers most queries. But some data and some query shapes call for a different structure. PostgreSQL ships with several other index access methods, and a few index *variants* that apply to any access method. This lesson is a tour of when to reach for each.
+
+## GIN — for values that contain many items
+
+A **Generalized Inverted Index** (GIN) is built for columns where each row holds *multiple* searchable items: the elements of an array, the keys and values of a `jsonb` document, or the words ("lexemes") of a full-text document. GIN maps each item to the rows that contain it, so "find every row containing this item" is fast.
+
+```sql
+-- speed up containment queries on a jsonb column
+CREATE INDEX books_meta_gin ON books USING gin (metadata);
+
+-- now this uses the index
+SELECT * FROM books WHERE metadata @> '{"genre": "fiction"}';
+```
+
+Use GIN when you query *inside* composite values: `jsonb` containment with `@>`, array membership, or full-text search with `tsvector`.
+
+## GiST — for geometric, range, and nearest-neighbour data
+
+A **Generalized Search Tree** (GiST) supports queries that B-tree cannot express: do two shapes overlap, does a point fall inside a box, which rows are nearest to this location, do two ranges intersect. It is the backbone of geometric types, range types, and the PostGIS extension.
+
+```sql
+-- index a range column for overlap queries
+CREATE INDEX rooms_booking_gist ON rooms USING gist (booked_during);
+
+-- find bookings that overlap a given period
+SELECT * FROM rooms WHERE booked_during && '[2026-06-01,2026-06-08)'::tsrange;
+```
+
+Use GiST for spatial data, range overlap with `&&`, and nearest-neighbour ordering.
+
+## BRIN — for huge, naturally ordered tables
+
+A **Block Range Index** (BRIN) is tiny. Instead of indexing every row, it stores the minimum and maximum value for each block range of the table. It works beautifully when the column's values line up with physical storage order — classically a timestamp column on an append-only log or events table, where new rows always have larger timestamps.
+
+```sql
+-- a tiny index for a massive, time-ordered table
+CREATE INDEX events_created_brin ON events USING brin (created_at);
+
+SELECT * FROM events WHERE created_at >= '2026-06-01';
+```
+
+BRIN uses a fraction of the space of a B-tree. The trade-off: it only helps when the data is physically ordered by the indexed column. On randomly distributed values it is nearly useless.
+
+## Hash — for equality only
+
+A **Hash** index supports exactly one operation: equality (`=`). It cannot do ranges or sorting. Modern B-tree equality lookups are so good that Hash is rarely the clear winner, but it can use slightly less space for large, equality-only columns.
+
+```sql
+CREATE INDEX books_isbn_hash ON books USING hash (isbn);
+
+SELECT * FROM books WHERE isbn = '978-0-00-000000-0';
+```
+
+Reach for Hash only when you have measured that it beats B-tree for a pure-equality workload; otherwise default to B-tree.
+
+## Partial indexes — index only the rows you query
+
+A **partial** index covers only rows matching a `WHERE` clause. If your queries always look at a small subset, indexing only that subset makes the index smaller and faster to maintain.
+
+```sql
+-- only books still in print get indexed
+CREATE INDEX books_active_idx ON books (title) WHERE in_print = true;
+```
+
+This index is ideal when most queries include `WHERE in_print = true`; the planner can use it, and rows where `in_print` is false never enter the index at all.
+
+## Expression indexes — index a computed value
+
+If you frequently filter on the *result* of an expression, index that expression directly. A plain index on `email` does not help a case-insensitive search, but an index on `lower(email)` does.
+
+```sql
+CREATE INDEX authors_lower_name_idx ON authors (lower(name));
+
+-- now this is an index scan, not a seq scan
+SELECT * FROM authors WHERE lower(name) = 'ada lovelace';
+```
+
+The query's expression must match the indexed expression exactly for the planner to use it.
+
+## Covering indexes — answer the query from the index alone
+
+A **covering** index uses `INCLUDE` to store extra columns in the index that are not part of the search key. If every column a query needs is in the index, PostgreSQL can answer from the index without touching the table at all — an *index-only scan*.
+
+```sql
+-- search on author_id, but also carry title and published along
+CREATE INDEX books_author_cover_idx
+  ON books (author_id) INCLUDE (title, published);
+
+-- can be answered from the index alone
+SELECT title, published FROM books WHERE author_id = 4;
+```
+
+The `INCLUDE` columns are stored only in the index leaves, not used for ordering, so they add data without changing the search behaviour.
+
+## Creating any of these from a driver
+
+The `CREATE INDEX` statement is just SQL, so any driver issues it the same way. Here is the GIN example across the drivers.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE INDEX books_meta_gin ON books USING gin (metadata);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE INDEX books_meta_gin ON books USING gin (metadata)');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE INDEX books_meta_gin ON books USING gin (metadata)")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE INDEX books_meta_gin ON books USING gin (metadata)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE INDEX books_meta_gin ON books USING gin (metadata)")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** the Create Index dialog has an Access Method dropdown listing btree, hash, gin, gist, brin, and others, and an option for the `INCLUDE` columns, so you can build any of these without writing the SQL by hand.
+
+## Tips / gotchas
+
+- Match the access method to the query shape: GIN for "contains an item", GiST for "overlaps or is near", BRIN for "huge and physically ordered", Hash for "equality only", and B-tree for everything else.
+- BRIN is only effective when the physical row order tracks the indexed column. On unordered data it will not help.
+- Partial and expression indexes are variants you can apply on top of any access method, not separate types. Combine them: a partial GIN index is perfectly valid.
+- For a covering index, list the search columns normally and put the merely-returned columns in `INCLUDE`, so they do not bloat the part of the index used for searching.
+
+<Callout title="Specialized, not exotic">
+Most of your indexes will be plain B-trees. But when you store `jsonb`, search arrays or full text, work with geometry or ranges, or have a billion-row time-series table, the specialized access methods turn an impossible query into an easy one. Knowing they exist is half the value; reach for them when B-tree cannot express the question.
+</Callout>
+
+export const quizSpecialized = [
+  {
+    q: 'Which index type is designed for jsonb containment, array membership, and full-text search?',
+    options: ['BRIN', 'GIN', 'Hash', 'B-tree'],
+    answer: 1,
+  },
+  {
+    q: 'When is a BRIN index a good fit?',
+    options: [
+      'For randomly distributed values',
+      'For a huge table whose physical order tracks the indexed column, such as a timestamp log',
+      'For enforcing uniqueness',
+      'For case-insensitive text search',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does INCLUDE add to an index?',
+    options: [
+      'Extra search keys that change the ordering',
+      'Non-key columns stored in the index so a query can be answered without reading the table',
+      'A uniqueness constraint',
+      'A second access method',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/specialized-indexes" questions={quizSpecialized} />
+
+<ProgressTracker client:visible id="indexes-and-performance/specialized-indexes" />

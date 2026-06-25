@@ -1,0 +1,109 @@
+---
+title: What is PostgreSQL
+description: The relational model of tables and relationships, ACID guarantees, MVCC in one line, the extensibility that sets Postgres apart, and when it is the right tool.
+sidebar:
+  order: 2
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+PostgreSQL is a relational database: it stores data as **tables** and lets you describe relationships between those tables. On top of that foundation it adds strong correctness guarantees and an unusual amount of flexibility, which together explain why it is a default choice for so many projects. This lesson explains the core ideas so the rest of the course has solid ground to stand on.
+
+## The relational model
+
+In the relational model, data lives in tables. A **table** is a named grid. Each **column** has a name and a fixed type, and each **row** is one record with a value for every column. A table of customers might have columns for an id, a name, and an email; each row is one customer.
+
+The power comes from **relationships**. A row in one table can point at a row in another by storing its key. An `orders` table stores the `customer_id` of the customer who placed each order, linking the two tables together. The diagram below shows two tables related this way.
+
+export const relationDiagram = `flowchart LR
+  subgraph customers
+    C1[id: 1, name: Mira]
+    C2[id: 2, name: Devon]
+  end
+  subgraph orders
+    O1[id: 100, customer_id: 1]
+    O2[id: 101, customer_id: 1]
+    O3[id: 102, customer_id: 2]
+  end
+  O1 -->|customer_id references id| C1
+  O2 -->|customer_id references id| C1
+  O3 -->|customer_id references id| C2`;
+
+<Mermaid code={relationDiagram} title="Two tables related by a key" />
+
+The id that uniquely identifies a row is its **primary key**. The column in another table that points back at it is a **foreign key**. You will design tables and keys in the next module and combine them with joins later; for now the takeaway is that relationships are stored as plain values, not hidden pointers.
+
+## ACID guarantees
+
+PostgreSQL promises that your data stays correct through crashes, errors, and concurrent access. Those promises are summarized by the acronym **ACID**.
+
+| Letter | Property | What it means for you |
+|--------|----------|------------------------|
+| A | Atomicity | A group of changes either all happen or none do |
+| C | Consistency | Every change leaves the database obeying its rules |
+| I | Isolation | Concurrent transactions do not corrupt each other |
+| D | Durability | Once committed, a change survives a crash |
+
+The unit that carries these guarantees is the **transaction** — a group of statements treated as one all-or-nothing operation. Transactions get a full module later; for now, know that PostgreSQL never leaves your data half-changed.
+
+## MVCC in one line
+
+PostgreSQL achieves isolation through **MVCC**, multi-version concurrency control: instead of locking rows for readers, it keeps multiple versions of a row so readers see a consistent snapshot while writers work, and readers never block writers.
+
+## Extensibility
+
+What truly sets PostgreSQL apart is how much you can extend it. You are not limited to a fixed menu of features.
+
+- **Rich and custom types** — beyond numbers and text, Postgres ships with dates, arrays, geometric types, network addresses, and more, and you can define your own.
+- **JSONB** — store and index real JSON documents inside a column, blending relational and document styles in one database.
+- **Extensions** — drop-in packages add whole capabilities, such as `postgis` for geographic data or `pg_trgm` for fuzzy text matching, installed with a single `CREATE EXTENSION` command.
+
+This flexibility means one PostgreSQL instance can often replace several specialized tools, keeping your stack simpler.
+
+## When PostgreSQL fits
+
+PostgreSQL is a strong default for almost any application that stores structured data and cares about correctness: web and mobile backends, analytics, internal tools, and more. It shines when your data has clear relationships, when you need transactions you can trust, or when you want one engine that can also handle JSON, search, and geospatial work.
+
+It is a less natural fit when you need a pure in-memory cache for ephemeral data, or a specialized engine for a single extreme workload such as time-series at massive ingest rates — though even there, extensions often close the gap. For the vast majority of projects, reaching for PostgreSQL first is a safe and durable choice.
+
+## Tips / gotchas
+
+- Think in tables and relationships from the start; modeling data well early saves pain later.
+- A primary key uniquely identifies a row; a foreign key in another table points back at it.
+- ACID is not magic you turn on — it is always on, carried by transactions.
+- Reach for JSONB when part of your data is genuinely schemaless, but keep the structured parts in normal columns.
+- Before adopting a separate specialized database, check whether a PostgreSQL extension already covers the need.
+
+<Callout title="Relational first, flexible always">
+The relational model gives you correctness and clear structure; ACID gives you trust; extensibility gives you room to grow. PostgreSQL is the rare tool that offers all three at once, which is why so much of this course is simply learning to use one database really well.
+</Callout>
+
+export const quizWhatIs = [
+  {
+    q: 'In the relational model, what holds the data?',
+    options: ['Documents', 'Tables made of rows and columns', 'Key-value pairs', 'Graphs of nodes'],
+    answer: 1,
+  },
+  {
+    q: 'What does the "D" in ACID guarantee?',
+    options: [
+      'Data is deleted after each session',
+      'Once committed, a change survives a crash',
+      'Decimals are stored exactly',
+      'Duplicate rows are rejected',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which feature lets you store and index real JSON documents inside a column?',
+    options: ['MVCC', 'JSONB', 'Foreign keys', 'Atomicity'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-setup/what-is-postgresql" questions={quizWhatIs} />
+
+<ProgressTracker client:visible id="intro-and-setup/what-is-postgresql" />

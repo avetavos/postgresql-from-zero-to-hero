@@ -1,0 +1,336 @@
+---
+title: Aggregate และ GROUP BY
+description: ยุบหลายแถวให้กลายเป็นตัวเลขสรุปด้วย count, sum, avg, min, และ max, จัดกลุ่มด้วย GROUP BY, กรองกลุ่มด้วย HAVING, และเข้าใจความต่างระหว่าง count(*) กับ count(col)
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+จนถึงตอนนี้ทุกคิวรีคืนแถวที่มีอยู่แล้ว aggregate function ต่างออกไป: มันอ่านหลายแถวแล้วผลิตค่าสรุปออกมาเพียงค่าเดียว มีหนังสือกี่เล่ม? ยอดขายรวมทั้งหมดกี่เล่ม? ปีที่ตีพิมพ์โดยเฉลี่ยคือปีไหน? แต่ละข้อนั้นคือตัวเลขหนึ่งตัวที่ถูกบีบออกมาจากทั้งคอลัมน์ เพิ่ม `GROUP BY` เข้าไปแล้วคุณจะได้ตัวเลขสรุปหนึ่งตัวต่อหนึ่งกลุ่ม แทนที่จะได้หนึ่งตัวสำหรับทั้งตาราง
+
+เรายังคงใช้ตาราง `authors`, `books`, และ `sales` ต่อไป
+
+## Aggregate function ทั่วทั้งตาราง
+
+เมื่อไม่มี `GROUP BY` aggregate function จะพับผลลัพธ์ทั้งหมดลงเหลือเพียงแถวเดียว ตัวที่ใช้บ่อยที่สุดคือ `count`, `sum`, `avg`, `min`, และ `max`
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT
+      count(*)    AS sale_rows,
+      sum(copies) AS total_copies,
+      avg(copies) AS avg_per_sale,
+      max(copies) AS biggest_sale
+    FROM sales;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
+             avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+      FROM sales
+    `);
+    console.log(res.rows[0]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
+               avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+        FROM sales
+    """)
+    summary = cur.fetchone()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    row := conn.QueryRow(ctx, `
+      SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
+             avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+      FROM sales`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let row = sqlx::query(
+        "SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
+                avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+         FROM sales",
+    )
+    .fetch_one(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ sale_rows | total_copies |     avg_per_sale     | biggest_sale
+-----------+--------------+----------------------+--------------
+         6 |         1850 | 308.3333333333333333 |          900
+(1 row)
+```
+
+สังเกตว่า `avg` คืนค่าตัวเลขความละเอียดสูง ห่อมันด้วย `round(avg(copies), 2)` เมื่อคุณต้องการตัวเลขทศนิยมสองตำแหน่งที่ดูเรียบร้อย
+
+## GROUP BY: หนึ่งสรุปต่อหนึ่งกลุ่ม
+
+`GROUP BY` แยกแถวออกเป็นถังที่ใช้ค่าเดียวกันในคอลัมน์ที่ระบุไว้ แล้วรัน aggregate ครั้งเดียวต่อหนึ่งถัง ที่นี่เรารวมจำนวนเล่มที่ขายได้ต่อภูมิภาค
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT region, sum(copies) AS copies_in_region
+    FROM sales
+    GROUP BY region
+    ORDER BY copies_in_region DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT region, sum(copies) AS copies_in_region
+      FROM sales
+      GROUP BY region
+      ORDER BY copies_in_region DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT region, sum(copies) AS copies_in_region
+        FROM sales
+        GROUP BY region
+        ORDER BY copies_in_region DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT region, sum(copies) AS copies_in_region
+      FROM sales
+      GROUP BY region
+      ORDER BY copies_in_region DESC`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT region, sum(copies) AS copies_in_region
+         FROM sales
+         GROUP BY region
+         ORDER BY copies_in_region DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ region | copies_in_region
+--------+------------------
+ East   |             1100
+ West   |              750
+(2 rows)
+```
+
+แต่ละภูมิภาคกลายเป็นผลลัพธ์หนึ่งแถว คอลัมน์ `region` อยู่ใน `SELECT` ได้เพราะมันคือสิ่งที่เราจัดกลุ่มตาม ทุกอย่างที่เหลือต้องอยู่ภายใน aggregate
+
+## กรองกลุ่มด้วย HAVING
+
+`WHERE` กรองแถวแต่ละแถว *ก่อน* ที่มันจะถูกจัดกลุ่ม ในการกรองบนผลลัพธ์ของ aggregate คุณต้องใช้ `HAVING` ซึ่งทำงาน *หลัง* การจัดกลุ่ม ที่นี่เราเก็บเฉพาะภูมิภาคที่ขายได้มากกว่าแปดร้อยเล่ม
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT region, sum(copies) AS copies_in_region
+    FROM sales
+    GROUP BY region
+    HAVING sum(copies) > 800
+    ORDER BY copies_in_region DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT region, sum(copies) AS copies_in_region
+      FROM sales
+      GROUP BY region
+      HAVING sum(copies) > 800
+      ORDER BY copies_in_region DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT region, sum(copies) AS copies_in_region
+        FROM sales
+        GROUP BY region
+        HAVING sum(copies) > 800
+        ORDER BY copies_in_region DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT region, sum(copies) AS copies_in_region
+      FROM sales
+      GROUP BY region
+      HAVING sum(copies) > 800
+      ORDER BY copies_in_region DESC`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT region, sum(copies) AS copies_in_region
+         FROM sales
+         GROUP BY region
+         HAVING sum(copies) > 800
+         ORDER BY copies_in_region DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ region | copies_in_region
+--------+------------------
+ East   |             1100
+(1 row)
+```
+
+ใช้ `WHERE` ทิ้งแถวที่คุณไม่อยากให้ถูกนับเลย และใช้ `HAVING` ทิ้งทั้งกลุ่มโดยอิงจากยอดรวมของกลุ่ม ทั้งสองมักปรากฏในคิวรีเดียวกัน
+
+## count(*) เทียบกับ count(column)
+
+`count(*)` นับแถว ส่วน `count(column)` นับแถวที่คอลัมน์นั้นไม่เป็น `NULL` ความต่างนี้สำคัญทุกครั้งที่คอลัมน์หนึ่งอาจขาดหายไป การ join `authors` เข้ากับ `books` ด้วย `LEFT JOIN` แสดงให้เห็นชัดเจน
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT a.name,
+           count(*)      AS row_count,
+           count(b.id)   AS book_count
+    FROM authors AS a
+    LEFT JOIN books AS b ON b.author_id = a.id
+    GROUP BY a.name
+    ORDER BY a.name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT a.name, count(*) AS row_count, count(b.id) AS book_count
+      FROM authors AS a
+      LEFT JOIN books AS b ON b.author_id = a.id
+      GROUP BY a.name
+      ORDER BY a.name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT a.name, count(*) AS row_count, count(b.id) AS book_count
+        FROM authors AS a
+        LEFT JOIN books AS b ON b.author_id = a.id
+        GROUP BY a.name
+        ORDER BY a.name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT a.name, count(*) AS row_count, count(b.id) AS book_count
+      FROM authors AS a
+      LEFT JOIN books AS b ON b.author_id = a.id
+      GROUP BY a.name
+      ORDER BY a.name`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT a.name, count(*) AS row_count, count(b.id) AS book_count
+         FROM authors AS a
+         LEFT JOIN books AS b ON b.author_id = a.id
+         GROUP BY a.name
+         ORDER BY a.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    name     | row_count | book_count
+-------------+-----------+------------
+ Mara Linde  |         2 |          2
+ Owen Pryce  |         1 |          1
+ Sela Vance  |         1 |          0
+(3 rows)
+```
+
+Sela Vance แสดง `row_count` เป็นหนึ่งเพราะ `LEFT JOIN` ยังคงผลิตแถวให้เธอ แต่ `book_count` เป็นศูนย์เพราะ `b.id` เป็น `NULL` ตรงนั้น และ `count(b.id)` ข้ามค่า `NULL` ไป
+
+## ทิป / จุดพลาดที่พบบ่อย
+
+- ทุกคอลัมน์ในรายการ `SELECT` ที่ไม่ได้ห่อด้วย aggregate ต้องปรากฏใน `GROUP BY` มิฉะนั้น PostgreSQL จะบอกไม่ได้ว่าจะแสดงค่าของแถวไหน และจะโยน error ออกมา
+- หยิบ `count(*)` มาใช้เพื่อนับแถว และ `count(col)` เพื่อนับค่าที่ไม่เป็น `NULL` ใช้ `count(DISTINCT col)` เพื่อนับค่าที่ไม่ซ้ำกันและไม่เป็น `NULL`
+- `WHERE` กรองแถวก่อนจัดกลุ่ม ส่วน `HAVING` กรองกลุ่มหลังจากนั้น คุณใส่ aggregate ใน `WHERE` ไม่ได้
+- aggregate มองข้าม `NULL` สำหรับ `sum`, `avg`, `min`, และ `max` ด้วยเช่นกัน ดังนั้นค่าเฉลี่ยจึงคิดเฉพาะจากค่าที่ไม่เป็น `NULL` เท่านั้น
+
+<Callout title="GROUP BY ยุบแถว และนั่นคือจุดประสงค์">
+หลังจาก `GROUP BY` คุณจะไม่มีแถวต้นฉบับอีกต่อไป — คุณมีหนึ่งแถวต่อหนึ่งกลุ่ม ถ้าคุณพบว่าตัวเองอยากได้ทั้งยอดรวมของกลุ่มและแถวแต่ละแถวในผลลัพธ์เดียวกัน นั่นคือสัญญาณให้หันไปหา window function ซึ่งครอบคลุมในบทเรียนสุดท้ายของโมดูลนี้
+</Callout>
+
+export const quizAggregates = [
+  {
+    q: 'ความต่างระหว่าง count(*) กับ count(some_column) คืออะไร?',
+    options: [
+      'มันเหมือนกันทุกประการ',
+      'count(*) นับทุกแถว ส่วน count(some_column) นับเฉพาะแถวที่คอลัมน์นั้นไม่เป็น NULL',
+      'count(*) เร็วกว่าแต่แม่นยำน้อยกว่า',
+      'count(some_column) นับค่าที่ไม่ซ้ำกันโดยอัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'clause ใดกรองกลุ่มโดยอิงจากผลลัพธ์ของ aggregate?',
+    options: ['WHERE', 'HAVING', 'GROUP BY', 'ORDER BY'],
+    answer: 1,
+  },
+  {
+    q: 'คอลัมน์ที่ไม่ผ่าน aggregate ปรากฏใน SELECT ของคุณแต่ไม่อยู่ใน GROUP BY จะเกิดอะไรขึ้น?',
+    options: [
+      'PostgreSQL เดาค่าให้',
+      'PostgreSQL โยน error ออกมา',
+      'คอลัมน์นั้นถูกทิ้งไปอย่างเงียบ ๆ',
+      'มันถูกปฏิบัติเหมือนเป็น count(*)',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/aggregates-group-by" questions={quizAggregates} />
+
+<ProgressTracker client:visible id="joins-and-relationships/aggregates-group-by" />

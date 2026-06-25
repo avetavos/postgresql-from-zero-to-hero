@@ -1,0 +1,147 @@
+---
+title: Transactions & Concurrency
+description: จัดกลุ่มหลายคำสั่งให้เป็นหน่วยแบบ all-or-nothing ด้วย transaction แล้วเรียนรู้ว่า PostgreSQL ปล่อยให้หลายตัวทำงานพร้อมกันได้อย่างไรผ่าน isolation, MVCC และ locking
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+จนถึงตอนนี้ทุกคำสั่งที่คุณเขียนต่างก็ทำงานของตัวเองแยกกัน แต่ในแอปพลิเคชันจริง การกระทำทางธุรกิจหนึ่งอย่างมักต้องใช้หลายคำสั่งที่ต้องสำเร็จไปด้วยกันทั้งหมดหรือไม่สำเร็จเลย การโอนเงินระหว่างสองบัญชีคือตัวอย่างคลาสสิก คือแถวหนึ่งลดลง อีกแถวหนึ่งเพิ่มขึ้น และคุณไม่มีทางยอมให้เกิดการทำสำเร็จเพียงครึ่งเดียวได้เลย
+
+**transaction** คือเครื่องมือสำหรับสิ่งนี้โดยเฉพาะ มันจัดกลุ่มคำสั่งหนึ่งคำสั่งขึ้นไปให้เป็นหน่วยงานเดียวแบบ all-or-nothing ไม่ทุกคำสั่งมีผล ก็ไม่มีคำสั่งไหนมีผลเลย นอกจากนี้ ฐานข้อมูลที่มีงานหนาแน่นยังมี transaction หลายตัวทำงานพร้อมกันในเวลาเดียวกัน ซึ่งนี่คือสิ่งที่เราหมายถึงคำว่า **concurrency** โมดูลนี้พูดถึงทั้งสองเรื่อง คือวิธีนิยามหน่วยงาน และวิธีที่ PostgreSQL ป้องกันไม่ให้ transaction เหล่านั้นทำให้ข้อมูลของกันและกันเสียหาย
+
+## การรับประกันสี่ข้อ: ACID
+
+transaction ใน PostgreSQL ให้การรับประกันแก่คุณสี่ข้อ จำง่าย ๆ ด้วยตัวย่อ **ACID**
+
+| ตัวอักษร | คุณสมบัติ    | สิ่งที่รับประกัน                                                        |
+|--------|-------------|-------------------------------------------------------------------------|
+| A      | Atomicity   | ทุกคำสั่ง commit ไปด้วยกันหรือ roll back ไปด้วยกัน ไม่มีทางทำเสร็จครึ่งเดียว   |
+| C      | Consistency | ฐานข้อมูลเคลื่อนจากสถานะที่ถูกต้องหนึ่งไปยังอีกสถานะที่ถูกต้อง โดยเคารพ constraint |
+| I      | Isolation   | transaction ที่ทำงานพร้อมกันจะไม่เห็นงานที่ยังไม่เสร็จของกันและกัน         |
+| D      | Durability  | เมื่อ commit แล้ว การเปลี่ยนแปลงจะอยู่รอดผ่านการ crash หรือไฟดับ               |
+
+Atomicity คือส่วนที่คุณรู้สึกได้ตรง ๆ ที่สุดเมื่อพิมพ์ `COMMIT` หรือ `ROLLBACK` ส่วน Isolation คือส่วนที่เริ่มน่าสนใจเมื่อมีไคลเอนต์มากกว่าหนึ่งตัวเชื่อมต่ออยู่ และเป็นจุดที่เนื้อหาเชิงลึกส่วนใหญ่ของโมดูลนี้อยู่
+
+## ชิ้นส่วนต่าง ๆ ประกอบกันอย่างไร
+
+สี่บทเรียนถัดไปต่อยอดกันเป็นชั้น คุณเริ่ม transaction คุณเลือกว่ามันควรถูก isolate มากแค่ไหน และเบื้องล่างของทั้งสองสิ่งนั้น PostgreSQL ใช้กลไกสองอย่างเพื่อให้ concurrency ปลอดภัย คือการเก็บแถวเดียวกันไว้หลายเวอร์ชัน และการจับ lock เมื่อจำเป็น
+
+export const moduleMap = `flowchart TD
+  A[Transaction: BEGIN to COMMIT] --> B[Isolation level: how much it sees]
+  B --> C[MVCC: each transaction reads a snapshot]
+  B --> D[Locking: serialize conflicting writes]
+  C --> E[Safe concurrency for many clients]
+  D --> E`;
+
+<Mermaid code={moduleMap} title="จากหนึ่ง transaction สู่ concurrency ที่ปลอดภัย" />
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+- **Transaction basics** — `BEGIN`, `COMMIT`, `ROLLBACK`, atomicity และ `SAVEPOINT` สำหรับการ roll back บางส่วน สาธิตด้วยการโอนเงินระหว่างบัญชี
+- **Isolation levels** — Read Committed, Repeatable Read และ Serializable พร้อม read anomaly ที่แต่ละระดับป้องกันได้
+- **MVCC** — Multi-Version Concurrency Control ที่ writer ไม่ block reader และ reader ไม่ block writer เพราะแต่ละ transaction อ่านจาก snapshot ที่สอดคล้องกัน
+- **Locking and deadlocks** — row lock แบบชัดเจนด้วย `SELECT ... FOR UPDATE`, เหตุที่สอง transaction เกิด deadlock ได้ และวิธีที่ PostgreSQL ตัดสินผลเสมอ
+
+## ดูภาพรวมก่อน
+
+คุณจะได้รู้จักคำสั่งเหล่านี้อย่างเป็นเรื่องเป็นราวในบทเรียนถัดไป แต่นี่คือรูปร่างของ transaction เพื่อให้เนื้อหาที่เหลือของโมดูลอ่านได้อย่างเป็นธรรมชาติ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+    UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [100, 1]);
+      await client.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [100, 2]);
+      await client.query('COMMIT');
+    } finally {
+      client.release();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("UPDATE accounts SET balance = balance - %s WHERE id = %s", (100, 1))
+        cur.execute("UPDATE accounts SET balance = balance + %s WHERE id = %s", (100, 2))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.Begin(ctx)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", 100, 2)
+    tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE id = $2")
+        .bind(100_i64).bind(1_i64).execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts SET balance = balance + $1 WHERE id = $2")
+        .bind(100_i64).bind(2_i64).execute(&mut *tx).await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน pgAdmin:** โดยค่าเริ่มต้น Query Tool จะรันแต่ละคำสั่งใน transaction แบบ auto-commit ของตัวเอง หากต้องการจัดกลุ่มคำสั่ง ให้พิมพ์ `BEGIN;` ด้วยตัวเองที่ด้านบนและ `COMMIT;` ที่ท้าย แล้วรันทั้งบล็อกพร้อมกันทีเดียว
+
+## Tips / gotchas
+
+- connection ที่ไม่ได้อยู่ภายใน transaction แบบชัดเจนจะรันแต่ละคำสั่งใน transaction โดยปริยายของตัวเอง และ commit ทันที สิ่งนี้เรียกว่า auto-commit
+- isolation คือสเปกตรัม ไม่ใช่สวิตช์ ระดับที่สูงขึ้นป้องกัน anomaly ได้มากขึ้น แต่ทำให้ conflict มีโอกาส abort มากขึ้นด้วย
+- PostgreSQL ไม่เคยขอให้ reader รอ writer สำหรับ query `SELECT` ธรรมดา นั่นคือประโยชน์เด่นของ MVCC
+- deadlock เป็นความเป็นไปได้ปกติในระบบ concurrent ใด ๆ ไม่ใช่บั๊ก แอปพลิเคชันที่เขียนดีจะคาดหมายมันไว้และ retry
+
+<Callout title="โมเดลความคิดสำหรับโมดูลนี้">
+ถือสองความคิดไว้พร้อมกัน transaction คือขอบเขตของ *คุณ* คุณเป็นผู้ตัดสินใจว่างานเริ่มและจบเมื่อใด ส่วนการควบคุม concurrency คืองานของ *PostgreSQL* มันเป็นผู้ตัดสินใจว่า transaction ของคุณจะอยู่ร่วมกับของคนอื่นทุกคนอย่างไร เนื้อหาที่เหลือของโมดูลนี้แสดงให้เห็นจุดที่ความรับผิดชอบทั้งสองนี้มาบรรจบกัน
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does the "A" in ACID guarantee about a transaction?',
+    options: [
+      'มันรันเร็วกว่าการแยกเป็นหลายคำสั่งเสมอ',
+      'ทุกคำสั่งของมัน commit ไปด้วยกันหรือไม่มีคำสั่งไหน commit เลย',
+      'มันไม่มีทาง roll back ได้เลยเมื่อเริ่มไปแล้ว',
+      'มัน lock ฐานข้อมูลทั้งหมดในขณะที่ทำงาน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does "concurrency" mean in the context of a database?',
+    options: [
+      'การรันคำสั่งตามลำดับตัวอักษร',
+      'transaction หลายตัวทำงานในเวลาเดียวกัน',
+      'การเก็บข้อมูลในตารางมากกว่าหนึ่งตาราง',
+      'commit เฉพาะวันสุดสัปดาห์เท่านั้น',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which ACID property describes that concurrent transactions do not see each other unfinished work?',
+    options: ['Atomicity', 'Consistency', 'Isolation', 'Durability'],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="transactions-and-concurrency/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="transactions-and-concurrency/index" />

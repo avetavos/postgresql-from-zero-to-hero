@@ -1,0 +1,241 @@
+---
+title: Isolation levels
+description: Read Committed, Repeatable Read และ Serializable — read anomaly ที่แต่ละระดับป้องกัน และวิธีตั้งระดับด้วย SET TRANSACTION ISOLATION LEVEL
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+เมื่อ transaction หลายตัวทำงานพร้อมกัน พวกมันอาจรบกวนกันในแบบที่ให้ผลลัพธ์น่าประหลาดใจ **isolation level** คือลูกบิดที่ควบคุมว่าหนึ่ง transaction จะถูกปกป้องจากงานที่กำลังดำเนินอยู่ของตัวอื่นมากแค่ไหน หมุนลูกบิดขึ้นจะป้องกัน anomaly ได้มากขึ้น แต่ทำให้ conflict มีโอกาส fail และต้อง retry มากขึ้น
+
+## anomaly ต่าง ๆ
+
+มาตรฐาน SQL ตั้งชื่อชุดของปรากฏการณ์ที่ isolation ระดับอ่อนกว่ายอมให้เกิดได้ ระดับต่าง ๆ ของ PostgreSQL ถูกนิยามด้วยว่ามันห้ามปรากฏการณ์ใดบ้าง
+
+- **dirty read** — การอ่านแถวที่ transaction อื่นเปลี่ยนแปลงแต่ยังไม่ได้ commit PostgreSQL ไม่เคยยอมให้เกิดสิ่งนี้ในระดับใด ๆ
+- **non-repeatable read** — การอ่านแถวเดียวกันสองครั้งใน transaction เดียวแล้วได้ค่าที่ committed แตกต่างกัน เพราะ transaction อื่นเปลี่ยนมันในระหว่างนั้น
+- **phantom read** — การรันการค้นหาเดียวกันสองครั้งแล้วพบแถวที่ไม่มีอยู่ในครั้งแรก เพราะ transaction อื่น insert พวกมันเข้ามา
+- **write skew** — สอง transaction ต่างก็อ่านชุดของแถวที่ซ้อนทับกัน แล้วต่างก็เขียนตามสิ่งที่ตัวเองอ่าน ให้ผลลัพธ์ที่ลำดับ serial เดี่ยว ๆ ไม่อาจสร้างขึ้นได้
+
+## สามระดับที่คุณเลือกได้
+
+PostgreSQL มีระดับที่ใช้งานได้สามระดับ (ชื่อมาตรฐานตัวที่สี่คือ Read Uncommitted มีอยู่จริงแต่ที่นี่มันทำงานเหมือน Read Committed เพราะ dirty read ไม่เคยถูกอนุญาต)
+
+```text
+Isolation level   | Dirty read | Non-repeatable read | Phantom read | Write skew
+------------------+------------+---------------------+--------------+-----------
+Read Committed    | No         | Possible            | Possible     | Possible
+Repeatable Read   | No         | No                  | No           | Possible
+Serializable      | No         | No                  | No           | No
+```
+
+Read Committed คือค่าเริ่มต้น แต่ละคำสั่งในระดับนี้เห็น snapshot ใหม่ของข้อมูลทั้งหมดที่ committed ก่อนคำสั่งนั้นเริ่ม ซึ่งเป็นเหตุที่การอ่านสองครั้งใน transaction เดียวกันให้ค่าไม่ตรงกันได้
+
+## การตั้งระดับ
+
+คุณยกระดับของ transaction ด้วย `SET TRANSACTION ISOLATION LEVEL` สั่งทันทีหลัง `BEGIN` และก่อนที่จะมีการอ่านหรือเขียนข้อมูลใด ๆ driver ต่าง ๆ เปิดเผยแนวคิดเดียวกันนี้ผ่าน transaction options ของพวกมัน
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+    SELECT balance FROM accounts WHERE owner = 'Ada';
+    -- ... later in the same transaction, the value is guaranteed unchanged
+    SELECT balance FROM accounts WHERE owner = 'Ada';
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await client.query('BEGIN');
+    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    const a = await client.query("SELECT balance FROM accounts WHERE owner = 'Ada'");
+    const b = await client.query("SELECT balance FROM accounts WHERE owner = 'Ada'");
+    await client.query('COMMIT');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        conn.isolation_level = "REPEATABLE READ"  # set before the first query
+        cur.execute("SELECT balance FROM accounts WHERE owner = 'Ada'")
+        first = cur.fetchone()
+        cur.execute("SELECT balance FROM accounts WHERE owner = 'Ada'")
+        second = cur.fetchone()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+    var first, second int64
+    tx.QueryRow(ctx, "SELECT balance FROM accounts WHERE owner = 'Ada'").Scan(&first)
+    tx.QueryRow(ctx, "SELECT balance FROM accounts WHERE owner = 'Ada'").Scan(&second)
+    tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx).await?;
+    let first: i64 = sqlx::query_scalar("SELECT balance FROM accounts WHERE owner = 'Ada'")
+        .fetch_one(&mut *tx).await?;
+    let second: i64 = sqlx::query_scalar("SELECT balance FROM accounts WHERE owner = 'Ada'")
+        .fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน pgAdmin:** เปิดแท็บ Query Tool สองแท็บเทียบกัน ตั้ง isolation level สูงในแท็บหนึ่งด้วย `BEGIN; SET TRANSACTION ISOLATION LEVEL ...` แล้วรัน `UPDATE` ในอีกแท็บเพื่อดูว่าการอ่านซ้ำของ transaction แรกยังคงเสถียรอย่างไร
+
+## ระดับหนึ่ง ๆ ตัดสินใจว่าจะยอมให้อะไรได้บ้างอย่างไร
+
+การตัดสินใจมีรูปร่างเดียวกันทุกครั้ง คือเมื่อคำสั่งอ่านข้อมูล ระดับจะกำหนดว่ามันเห็น snapshot ใด และว่าการ commit ที่ขัดแย้งกันโดยคนอื่นจะส่งผลต่อผลลัพธ์ได้หรือไม่
+
+export const isoFlow = `flowchart TD
+  A[Statement reads data] --> B{Isolation level}
+  B -->|Read Committed| C[Fresh snapshot per statement]
+  B -->|Repeatable Read| D[One snapshot for the whole transaction]
+  B -->|Serializable| E[Snapshot plus conflict tracking]
+  C --> F[Same row may differ on a second read]
+  D --> G[Repeated reads are stable]
+  E --> H[Abort if the result could not occur serially]`;
+
+<Mermaid code={isoFlow} title="แต่ละ isolation level อ่านจากกลยุทธ์ snapshot ที่ต่างกัน" />
+
+## Serializable และการ retry
+
+Serializable คือระดับที่แข็งแกร่งที่สุด PostgreSQL รับประกันว่าผลลัพธ์จะเป็นเสมือน transaction ที่ทำงานพร้อมกันได้รันต่อ ๆ กันตามลำดับใดลำดับหนึ่ง เพื่อทำเช่นนี้ มันเฝ้าระวังรูปแบบที่อันตราย และเมื่อตรวจพบ มันจะ abort transaction หนึ่งด้วย **serialization failure** (SQLSTATE `40001`) นั่นไม่ใช่บั๊ก แต่เป็นระดับที่กำลังทำหน้าที่ของมัน แอปพลิเคชันของคุณต้องจับ error นั้นและรัน transaction ใหม่อีกครั้ง
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+    -- ... your reads and writes ...
+    COMMIT;  -- may raise: ERROR: could not serialize access ... (40001)
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    async function runSerializable(work, attempts = 3) {
+      for (let i = 0; i < attempts; i++) {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+          await work(client);
+          await client.query('COMMIT');
+          return;
+        } catch (e) {
+          await client.query('ROLLBACK');
+          if (e.code !== '40001') throw e; // retry only on serialization failure
+        } finally {
+          client.release();
+        }
+      }
+      throw new Error('too many serialization retries');
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import psycopg
+    for _ in range(3):
+        try:
+            with conn.transaction():
+                conn.isolation_level = "SERIALIZABLE"
+                run_my_work(cur)
+            break
+        except psycopg.errors.SerializationFailure:
+            continue  # retry the whole transaction
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    for i := 0; i < 3; i++ {
+        tx, _ := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+        if err := runMyWork(ctx, tx); err != nil {
+            tx.Rollback(ctx)
+            return err
+        }
+        err := tx.Commit(ctx)
+        var pgErr *pgconn.PgError
+        if errors.As(err, &pgErr) && pgErr.Code == "40001" {
+            continue // serialization failure: retry
+        }
+        break
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    for _ in 0..3 {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *tx).await?;
+        run_my_work(&mut tx).await?;
+        match tx.commit().await {
+            Ok(_) => break,
+            Err(e) if is_serialization_failure(&e) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ERROR:  could not serialize access due to read/write dependencies among transactions
+DETAIL:  Reason code: ... 
+HINT:  The transaction might succeed if retried.
+```
+
+## Tips / gotchas
+
+- Read Committed คือค่าเริ่มต้นที่เหมาะกับ workload ส่วนใหญ่ จงยกระดับเมื่อคุณมี anomaly จริง ๆ ที่ต้องป้องกันเท่านั้น
+- ที่ระดับ Serializable (และ Repeatable Read สำหรับ write conflict) ให้ห่อ transaction ไว้ในลูป retry ที่รันมันใหม่เมื่อเจอ SQLSTATE `40001` เสมอ คำแนะนำใน error ยังบอกคุณเช่นนั้นด้วย
+- ตั้ง isolation level ที่จุดเริ่มต้นสุดของ transaction เมื่อมีการเข้าถึงข้อมูลแล้ว คุณจะเปลี่ยนมันไม่ได้
+- ระดับที่สูงกว่าไม่ได้ "ถูกต้องกว่า" แบบฟรี ๆ มันแลกโอกาส abort ที่สูงขึ้นกับการรับประกันที่แข็งแกร่งขึ้น ดังนั้นจงวัดผลก่อนจะหยิบ Serializable มาใช้ทุกที่
+
+<Callout title="เลือกระดับที่อ่อนที่สุดที่ยังถูกต้อง">
+isolation คือการตัดทิ้ง anomaly จำเพาะออกไป ไม่ใช่การเข้มงวดให้สุดทาง จงระบุว่า anomaly ใดจะทำให้ตรรกะของคุณพังจริง ๆ เลือกระดับต่ำสุดที่ห้ามมัน และเพิ่มลูป retry หากระดับนั้น abort ได้ ถูกต้องและประหยัด ชนะ เข้มงวดและช้า
+</Callout>
+
+export const quizIso = [
+  {
+    q: 'Which isolation level is the PostgreSQL default?',
+    options: ['Read Uncommitted', 'Read Committed', 'Repeatable Read', 'Serializable'],
+    answer: 1,
+  },
+  {
+    q: 'What should an application do when a Serializable transaction fails with SQLSTATE 40001?',
+    options: [
+      'ลด isolation level ลงอย่างถาวร',
+      'retry ทั้ง transaction ใหม่',
+      'เพิกเฉยต่อ error แล้วทำต่อ',
+      'รีสตาร์ทเซิร์ฟเวอร์ฐานข้อมูล',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which anomaly does Repeatable Read prevent that Read Committed allows?',
+    options: [
+      'dirty read',
+      'non-repeatable read',
+      'การสูญเสีย durability',
+      'syntax error',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactions-and-concurrency/isolation-levels" questions={quizIso} />
+
+<ProgressTracker client:visible id="transactions-and-concurrency/isolation-levels" />

@@ -1,0 +1,279 @@
+---
+title: การเพิ่ม row
+description: เพิ่ม row ใหม่ด้วย INSERT — แบบ row เดียวและหลาย row, ระบุรายการ column อย่างชัดเจน, ค่า DEFAULT และการดึง id ที่ถูกสร้างขึ้นกลับมาด้วย RETURNING
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+การสร้างข้อมูลหมายถึงการเพิ่ม row และคำสั่งสำหรับสิ่งนั้นคือ `INSERT` คุณระบุชื่อ table แสดงรายการ column ที่คุณกำลังจะให้ค่า แล้วให้ค่าเหล่านั้น PostgreSQL จะเติมทุกอย่างที่คุณเว้นไว้ — id ที่ถูกสร้างขึ้น, column ที่มี `DEFAULT` และ column ใด ๆ ที่อนุญาตให้เป็น `NULL`
+
+บทเรียนนี้ใช้ table `authors` และ `books` จากภาพรวมของโมดูล
+
+## row เดียว
+
+รูปแบบพื้นฐานที่สุดแสดงรายการ column ก่อน แล้วตามด้วยค่าที่ตรงกัน
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO authors (name, born)
+    VALUES ('Mira Castellan', 1971);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'INSERT INTO authors (name, born) VALUES ($1, $2)',
+      ['Mira Castellan', 1971],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO authors (name, born) VALUES (%s, %s)",
+        ("Mira Castellan", 1971),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx,
+        "INSERT INTO authors (name, born) VALUES ($1, $2)",
+        "Mira Castellan", 1971)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("INSERT INTO authors (name, born) VALUES ($1, $2)")
+        .bind("Mira Castellan")
+        .bind(1971_i32)
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+สังเกตว่าแท็บ `psql` ใช้ค่าตรง ๆ (literal value) ในขณะที่ทุก driver ใช้ **placeholder** — `$1`, `$2` ในสไตล์ native ของ PostgreSQL หรือ `%s` สำหรับ psycopg — แล้วส่งค่าจริงแยกต่างหาก จงให้ข้อมูลของผู้ใช้แบบนี้เสมอ อย่าเอาค่ามาต่อเข้ากับ SQL string ด้วยตัวเองเด็ดขาด การปล่อยให้ driver bind ค่าให้ จะรักษา type ให้ถูกต้องและปิดประตูไม่ให้เกิด SQL injection ซึ่งเป็นกรณีที่ input ที่ถูกประดิษฐ์ขึ้นมาจะเปลี่ยนสิ่งที่คำสั่งของคุณทำ
+
+**ใน pgAdmin:** วางเวอร์ชัน `psql` ลงใน Query Tool แล้วรัน แผงข้อความจะรายงานว่า `INSERT 0 1` ซึ่งหมายความว่ามี row หนึ่งถูกเพิ่มเข้าไป
+
+## ปล่อยให้ column รับค่า default
+
+table `books` มี `copies_sold int NOT NULL DEFAULT 0` ถ้าคุณเพียงแค่ละ column นั้นไว้ PostgreSQL จะใช้ค่า default คุณยังเขียน `DEFAULT` อย่างชัดเจนเพื่อแสดงเจตนาของคุณได้ด้วย
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO books (title, author_id, published, copies_sold)
+    VALUES ('The Glass Orchard', 1, 2004, DEFAULT);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)',
+      ['The Glass Orchard', 1, 2004],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO books (title, author_id, published) VALUES (%s, %s, %s)",
+        ("The Glass Orchard", 1, 2004),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx,
+        "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)",
+        "The Glass Orchard", 1, 2004)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)")
+        .bind("The Glass Orchard")
+        .bind(1_i64)
+        .bind(2004_i32)
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ไม่ว่าจะวิธีไหน `copies_sold` ก็จะลงเอยเป็น `0` การละ column ไปทั้งหมดเป็นวิธีปกติทั่วไป ส่วนการเขียน `DEFAULT` มีประโยชน์เมื่อคุณกำลังเติมหลาย row และต้องการให้ทุกตำแหน่งถูกระบุออกมาชัด ๆ
+
+## หลาย row พร้อมกัน
+
+คุณสามารถแสดงรายการ value tuple หลายอันในคำสั่งเดียวได้ ซึ่งเร็วกว่าการรัน `INSERT` หนึ่งครั้งต่อหนึ่ง row อย่างมาก เพราะมันเป็นการเดินทางไป-กลับครั้งเดียวไปยังเซิร์ฟเวอร์
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO authors (name, born) VALUES
+      ('Devon Reyes', 1985),
+      ('Priya Anand', 1990),
+      ('Tomas Holt',  1962);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'INSERT INTO authors (name, born) VALUES ($1, $2), ($3, $4), ($5, $6)',
+      ['Devon Reyes', 1985, 'Priya Anand', 1990, 'Tomas Holt', 1962],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    rows = [("Devon Reyes", 1985), ("Priya Anand", 1990), ("Tomas Holt", 1962)]
+    cur.executemany("INSERT INTO authors (name, born) VALUES (%s, %s)", rows)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows := [][]any{
+        {"Devon Reyes", 1985},
+        {"Priya Anand", 1990},
+        {"Tomas Holt", 1962},
+    }
+    _, err := conn.CopyFrom(ctx,
+        pgx.Identifier{"authors"},
+        []string{"name", "born"},
+        pgx.CopyFromRows(rows))
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let names = ["Devon Reyes", "Priya Anand", "Tomas Holt"];
+    let years = [1985_i32, 1990, 1962];
+    sqlx::query(
+        "INSERT INTO authors (name, born) SELECT * FROM UNNEST($1::text[], $2::int[])",
+    )
+    .bind(&names[..])
+    .bind(&years[..])
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+driver แต่ละตัวมีเส้นทางสำหรับ bulk ที่เป็นสำนวนเฉพาะตัว: psycopg มี `executemany`, pgx มี `CopyFrom` ที่เร็วมาก และด้วย sqlx คุณสามารถ unnest array เพื่อให้คำสั่งเดียว insert ได้หลาย row
+
+## การดึง id ที่ถูกสร้างขึ้นกลับมา
+
+column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น PostgreSQL จึงเป็นผู้กำหนดค่าให้ หากต้องการทราบค่าโดยไม่ต้อง query ครั้งที่สอง ให้เติม `RETURNING`
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO authors (name, born)
+    VALUES ('Lena Whitfield', 1978)
+    RETURNING id;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id',
+      ['Lena Whitfield', 1978],
+    );
+    console.log(res.rows[0].id);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO authors (name, born) VALUES (%s, %s) RETURNING id",
+        ("Lena Whitfield", 1978),
+    )
+    new_id = cur.fetchone()[0]
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var id int64
+    err := conn.QueryRow(ctx,
+        "INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id",
+        "Lena Whitfield", 1978).Scan(&id)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id",
+    )
+    .bind("Lena Whitfield")
+    .bind(1978_i32)
+    .fetch_one(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+คำสั่งนี้ทั้ง insert row และส่ง id ใหม่กลับมาให้ในการเดินทางครั้งเดียว:
+
+```text
+ id
+----
+  6
+(1 row)
+```
+
+คุณสามารถ return column ใดก็ได้ที่คุณต้องการ — `RETURNING id, name` หรือแม้แต่ `RETURNING *` เพื่อรับ row ใหม่ทั้งแถว รวมถึง default ที่เซิร์ฟเวอร์เติมให้ด้วย
+
+## Tips / gotchas
+
+- ส่งค่าผ่าน placeholder ของ driver (`$1`, `%s`) เสมอ การสร้าง SQL ด้วยการต่อ string เปิดทางให้ SQL injection และพังเมื่อเจออัญประกาศหรืออักขระพิเศษ
+- เมื่อใช้ primary key แบบ `IDENTITY` (หรือ `serial`) อย่าให้ค่า id เอง — ปล่อยให้ PostgreSQL สร้างมันแล้วอ่านกลับมาด้วย `RETURNING`
+- การ insert หลาย row เป็นคำสั่งเดียวและการเดินทางไป-กลับครั้งเดียว ดังนั้นจึงเร็วกว่าการวน loop insert ทีละแถวอย่างมาก
+- column ที่ไม่มีค่าและไม่มี default ต้องอนุญาตให้เป็น `NULL` ได้ มิฉะนั้น insert จะล้มเหลวด้วย not-null violation
+
+<Callout title="RETURNING คือเพื่อนของคุณ">
+`RETURNING` เปลี่ยนการเขียน (write) ให้กลายเป็น write บวก read ในคำสั่งเดียว มันหลีกเลี่ยงการตามด้วย `SELECT` และหลีกเลี่ยง race condition เพราะค่าที่คุณได้กลับมาคือค่าที่ insert นี้สร้างขึ้นเป๊ะ ๆ
+</Callout>
+
+export const quizInsert = [
+  {
+    q: 'How do you read a server-generated id immediately after inserting?',
+    options: [
+      'Run a separate SELECT max(id) afterwards',
+      'Append RETURNING id to the INSERT',
+      'Read it from the driver connection object',
+      'You cannot — ids are hidden',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'A column has DEFAULT 0 and is NOT NULL. What happens if you omit it from the column list?',
+    options: [
+      'The insert fails',
+      'The column is set to NULL',
+      'The column takes its default value of 0',
+      'PostgreSQL prompts you for a value',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'Why pass values as placeholders ($1, %s) instead of concatenating them into the SQL string?',
+    options: [
+      'It runs faster in every case',
+      'It avoids SQL injection and keeps types correct',
+      'It is required by the SQL standard',
+      'It lets you skip the column list',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/insert" questions={quizInsert} />
+
+<ProgressTracker client:visible id="crud-and-sql/insert" />

@@ -1,0 +1,185 @@
+---
+title: MVCC
+description: Multi-Version Concurrency Control — วิธีที่ PostgreSQL ปล่อยให้ writer และ reader ทำงานโดยไม่ block กัน ด้วยการเก็บแถวไว้หลายเวอร์ชันและให้แต่ละ transaction มี snapshot
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+isolation level ในบทเรียนก่อนหน้าทั้งหมดตั้งอยู่บนเครื่องยนต์ตัวเดียว คือ **Multi-Version Concurrency Control** หรือ MVCC คำมั่นสัญญาของมันพูดได้ง่ายและทรงพลังในทางปฏิบัติ คือ writer ไม่ block reader และ reader ไม่ block writer รายงานยาว ๆ สามารถอ่านต่อไปได้ในขณะที่การ update หลั่งไหลเข้ามา และไม่มีฝ่ายใดต้องรออีกฝ่าย
+
+## แนวคิดหลัก: ไม่เคยเขียนทับที่เดิม
+
+เมื่อคุณ `UPDATE` แถวหนึ่ง PostgreSQL ไม่ได้เปลี่ยน byte เดิม มันเขียน **เวอร์ชันใหม่** ของแถวและทำเครื่องหมายเวอร์ชันเก่าว่าถูกแทนที่แล้ว ชั่วขณะหนึ่งทั้งสองเวอร์ชันมีอยู่บนดิสก์ transaction หนึ่ง ๆ จะเห็นเวอร์ชันใดขึ้นอยู่กับว่า transaction นั้นเริ่มเมื่อใด
+
+แต่ละเวอร์ชันของแถวพก system column ที่ซ่อนอยู่สองคอลัมน์ ซึ่งบันทึกช่วงชีวิตของมัน
+
+- `xmin` — id ของ transaction ที่สร้างเวอร์ชันนี้
+- `xmax` — id ของ transaction ที่ลบหรือแทนที่มัน (เป็นศูนย์ในขณะที่เวอร์ชันยังมีชีวิตอยู่)
+
+transaction จะเห็นเวอร์ชันหนึ่งก็ต่อเมื่อมันถูกสร้างโดย transaction ที่ committed ไปก่อน snapshot ของ transaction ที่กำลังอ่าน และยังไม่ถูกแทนที่ในมุมมองของ snapshot นั้น
+
+## แต่ละ transaction อ่านจาก snapshot
+
+**snapshot** คือชุดของข้อมูลที่ committed แล้วซึ่ง transaction ได้รับอนุญาตให้เห็น ภายใต้ Read Committed แต่ละคำสั่งจะหยิบ snapshot ใหม่ ภายใต้ Repeatable Read และ Serializable ทั้ง transaction ใช้ snapshot เดียวร่วมกัน เพราะการอ่านถูกตอบจาก snapshot `SELECT` ธรรมดาจึงไม่จำเป็นต้อง lock อะไรเลยและไม่เคยรอ writer
+
+export const mvccDiagram = `flowchart TD
+  V1["Row version 1: balance 500, xmin 100, xmax 205"]
+  V2["Row version 2: balance 400, xmin 205, xmax 0"]
+  V1 -->|UPDATE by txn 205 creates| V2
+  S1["Snapshot A: started before txn 205 committed"]
+  S2["Snapshot B: started after txn 205 committed"]
+  S1 -->|reads| V1
+  S2 -->|reads| V2`;
+
+<Mermaid code={mvccDiagram} title="หนึ่งแถว สองเวอร์ชัน สอง snapshot เห็นค่าต่างกัน" />
+
+ในแผนภาพ transaction 205 เปลี่ยน balance จาก 500 เป็น 400 reader ที่ snapshot เกิดก่อนการ commit ยังคงเห็น 500 จากเวอร์ชัน 1 reader ที่เริ่มหลังจากนั้นเห็น 400 จากเวอร์ชัน 2 ทั้งคู่กำลังอ่านโดยไม่มี lock ในเวลาเดียวกัน และทั้งคู่ถูกต้องสำหรับจุดเวลาของตัวเอง
+
+## ดู column ที่ซ่อนอยู่
+
+คุณสามารถขอ `xmin` และ `xmax` ได้โดยตรง ซึ่งทำให้กลไกนี้เป็นรูปธรรม รัน query เดียวกันก่อนและหลังการ update จาก session อื่นเพื่อดูเวอร์ชันเปลี่ยน
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT id, balance, xmin, xmax FROM accounts WHERE owner = 'Ada';
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1',
+      ['Ada'],
+    );
+    console.log(res.rows[0]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("SELECT id, balance, xmin, xmax FROM accounts WHERE owner = %s", ("Ada",))
+    row = cur.fetchone()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var id, xmin, xmax int64
+    var balance float64
+    conn.QueryRow(ctx,
+        "SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1", "Ada").
+        Scan(&id, &balance, &xmin, &xmax)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let row = sqlx::query("SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1")
+        .bind("Ada")
+        .fetch_one(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ id | balance |  xmin  | xmax
+----+---------+--------+------
+  1 |     400 | 100205 |    0
+(1 row)
+```
+
+## dead tuple และ VACUUM
+
+เวอร์ชันเก่าที่ถูกทิ้งไว้จากการ update และ delete เรียกว่า **dead tuple** เมื่อไม่มี snapshot ของ transaction ที่กำลังทำงานตัวใดต้องการเวอร์ชันนั้นอีกต่อไป มันก็เป็นเพียงพื้นที่ที่เสียเปล่า PostgreSQL ทวงคืนพื้นที่นั้นด้วย **VACUUM** ซึ่งรันอัตโนมัติในเบื้องหลัง (autovacuum) และยังรันด้วยมือได้ด้วย
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    VACUUM accounts;
+    -- check how many dead tuples a table is carrying:
+    SELECT relname, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'accounts';
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('VACUUM accounts'); // run outside a transaction block
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    conn.autocommit = True       # VACUUM cannot run inside a transaction
+    cur.execute("VACUUM accounts")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "VACUUM accounts") // must not be inside a transaction
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("VACUUM accounts").execute(&pool).await?; // not inside a transaction
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ relname  | n_dead_tup
+----------+------------
+ accounts |          0
+(1 row)
+```
+
+**ใน pgAdmin:** คลิกขวาที่ตารางในแผนผัง browser แล้วเลือก Maintenance เพื่อรัน `VACUUM` (หรือ `VACUUM ANALYZE`) ผ่านกล่องโต้ตอบแทนการพิมพ์เอง
+
+## Tips / gotchas
+
+- การอ่านธรรมดาไม่จับ row lock ภายใต้ MVCC ถ้าคุณต้องการให้การอ่านจองแถวไว้สำหรับการเขียนที่กำลังจะมา นั่นคือหน้าที่ของ `SELECT ... FOR UPDATE` ในบทเรียน locking
+- transaction ที่รันนานคือศัตรูของการ vacuuming ในขณะที่ transaction ยังเปิดค้าง snapshot ของมันอาจยังต้องการเวอร์ชันเก่า dead tuple จึงถูกลบไม่ได้และตารางจะบวม
+- `VACUUM` ทวงคืนพื้นที่เพื่อใช้ซ้ำภายในตาราง ปกติแล้วมันไม่ลดขนาดไฟล์บนดิสก์ ส่วน `VACUUM FULL` ที่หนักกว่านั้นทำได้ แต่มัน lock ตารางในขณะที่ทำงาน
+- การ update แถวเดิมซ้ำ ๆ บ่อย ๆ สร้างหลายเวอร์ชัน จับตา `n_dead_tup` ใน `pg_stat_user_tables` แล้วปล่อยให้ autovacuum ตามทัน หรือปรับจูนมันสำหรับตารางที่ร้อน
+
+<Callout title="ทำไม SELECT ของคุณจึงไม่เคยรอ">
+เหตุที่ analytics query ที่ช้าและการ update ที่หลั่งไหลสามารถรันด้วยกันได้อย่างมีความสุขก็คือ MVCC reader เห็น snapshot ที่ถูกตรึงไว้ ส่วน writer ต่อท้ายเวอร์ชันใหม่ไว้ข้างเวอร์ชันเก่า ไม่มีใคร block ใคร ราคาที่ต้องจ่ายคือ dead tuple ที่ถูกทิ้งไว้ ซึ่งเป็นเหตุผลที่ VACUUM มีอยู่นั่นเอง
+</Callout>
+
+export const quizMvcc = [
+  {
+    q: 'Under MVCC, what happens to a row when you UPDATE it?',
+    options: [
+      'byte ของมันถูกเขียนทับที่เดิม',
+      'เวอร์ชันใหม่ถูกเขียนและเวอร์ชันเก่าถูกทำเครื่องหมายว่าถูกแทนที่',
+      'แถวถูก lock จนกว่าจะ VACUUM ครั้งถัดไป',
+      'ตารางถูกเขียนใหม่ทั้งหมด',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why does an ordinary SELECT not need to wait for a writer?',
+    options: [
+      'เพราะ writer ถูกหยุดชั่วคราวในระหว่างการอ่าน',
+      'เพราะ reader ตอบจาก snapshot ที่สอดคล้องกันของข้อมูลที่ committed แล้ว',
+      'เพราะ SELECT อ่านจาก cache เสมอ',
+      'เพราะ PostgreSQL ไม่มี writer',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What problem do long-running transactions cause for MVCC?',
+    options: [
+      'พวกมันทำให้ snapshot เสียหาย',
+      'พวกมันกัน VACUUM ไม่ให้ลบเวอร์ชันเก่าของแถว ทำให้เกิดการบวม',
+      'พวกมันปิด autovacuum อย่างถาวร',
+      'พวกมันลด isolation level ลง',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactions-and-concurrency/mvcc" questions={quizMvcc} />
+
+<ProgressTracker client:visible id="transactions-and-concurrency/mvcc" />

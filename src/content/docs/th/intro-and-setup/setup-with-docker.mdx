@@ -1,0 +1,146 @@
+---
+title: ตั้งค่าด้วย Docker
+description: รัน PostgreSQL จาก Docker image อย่างเป็นทางการ — คำสั่ง docker run คำสั่งเดียว, docker-compose.yml พร้อม pgAdmin, การตรวจสอบ container และการเชื่อมต่อด้วย psql
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+วิธีที่เร็วที่สุดในการได้ PostgreSQL จริงมารันคือ Docker image `postgres` อย่างเป็นทางการ Docker จะดาวน์โหลดสำเนาฐานข้อมูลที่พร้อมใช้งาน เริ่มมันใน container ที่แยกออกมา และรื้อมันออกอย่างสะอาดเมื่อคุณเสร็จแล้ว — ไม่ต้องติดตั้งทั้งระบบ ไม่มี service หลงเหลือ บทเรียนนี้จะพาคุณจากศูนย์ไปสู่ฐานข้อมูลที่รันอยู่และเชื่อมต่อได้ด้วยคำสั่งไม่กี่บรรทัด
+
+คุณจะต้องมี Docker ติดตั้งและรันอยู่ ทุกอย่างด้านล่างใช้คำสั่ง `docker` และ `docker compose` แบบธรรมดา
+
+## คำสั่งเดียวเพื่อรัน Postgres
+
+คำสั่งเดียวนี้จะ pull image หากจำเป็นและเริ่มฐานข้อมูล มันตั้งรหัสผ่าน superuser, publish port มาตรฐาน และเก็บข้อมูลใน named volume เพื่อให้มันอยู่รอดผ่านการ restart container
+
+```bash
+docker run --name pg \
+  -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 \
+  -v pgdata:/var/lib/postgresql/data \
+  -d postgres:17
+```
+
+ทัวร์สั้น ๆ เกี่ยวกับ flag ต่าง ๆ:
+
+- `--name pg` ตั้งชื่อที่จำง่ายให้ container เพื่อให้คำสั่งในภายหลังอ้างถึงมันได้
+- `-e POSTGRES_PASSWORD=secret` ตั้งรหัสผ่านสำหรับ user `postgres` เริ่มต้น ตัวแปรนี้จำเป็นต้องมี image จะปฏิเสธที่จะเริ่มหากไม่มีมัน
+- `-p 5432:5432` แมป PostgreSQL port ของ container ไปยัง port เดียวกันบนเครื่องของคุณ เพื่อให้เครื่องมือบน host เชื่อมต่อกับ `localhost:5432` ได้
+- `-v pgdata:/var/lib/postgresql/data` mount named volume ที่ directory ซึ่ง Postgres เก็บไฟล์ของมัน เพื่อให้ข้อมูลของคุณไม่สูญหายเมื่อ container ถูกลบ
+- `-d postgres:17` รัน image อย่างเป็นทางการ tag `17` ในเบื้องหลัง
+
+## docker-compose.yml สำหรับการตั้งค่าที่ทำซ้ำได้
+
+การพิมพ์คำสั่งนั้นทุกครั้งก็น่าเบื่อ และคุณมักจะอยากได้ GUI ควบคู่ไปกับฐานข้อมูล ไฟล์ `docker-compose.yml` เก็บการตั้งค่าทั้งหมดไว้ในไฟล์เดียวเพื่อให้คุณเริ่มทุกอย่างได้ด้วย `docker compose up` ไฟล์นี้รัน PostgreSQL บวกกับ **pgAdmin** ซึ่งเป็น web GUI ที่คุณจะได้ทัวร์ในบทเรียนถัดไป
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: appdb
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: secret
+    ports:
+      - '8080:80'
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
+```
+
+บันทึกมันเป็น `docker-compose.yml` และเริ่มทุกอย่างจาก directory นั้น:
+
+```bash
+docker compose up -d
+```
+
+ตอนนี้ PostgreSQL อยู่ที่ `localhost:5432` และ pgAdmin อยู่ที่ `http://localhost:8080` หากคุณอยากใช้ GUI ที่เบากว่า ให้สลับ service `pgadmin` ด้วย image `adminer` ซึ่งให้บริการหน้า admin แบบไฟล์เดียวบน port ของมันเอง ไม่ว่าทางใดก็ตาม service ฐานข้อมูลไม่เปลี่ยนแปลง
+
+## ชิ้นส่วนต่าง ๆ ประกอบกันอย่างไร
+
+container คือสำเนาที่รันอยู่ของ image, named volume คือที่ที่ไฟล์ข้อมูลจริงอยู่บนเครื่องของคุณ และ client เชื่อมต่อผ่าน port ที่ publish ไว้ volume ถูกแยกออกจาก container โดยตั้งใจเพื่อให้ข้อมูลอยู่รอดได้นานกว่า container ใด ๆ ตัวเดียว
+
+export const dockerDiagram = `flowchart LR
+  V[(pgdata named volume)] --> P[postgres container]
+  P -->|port 5432| H[Host machine]
+  H --> CLI[psql or driver]
+  H --> GUI[pgAdmin in browser]`;
+
+<Mermaid code={dockerDiagram} title="container, volume และ client" />
+
+## ตรวจสอบและเชื่อมต่อ
+
+ยืนยันว่า container ทำงานอยู่:
+
+```bash
+docker ps
+```
+
+คุณควรเห็น row สำหรับ image `postgres` ที่มีสถานะ `Up` และการแมป port `0.0.0.0:5432->5432/tcp` ตอนนี้เชื่อมต่อด้วย `psql` หากคุณมีมันอยู่บน host ของคุณ ให้ชี้มันไปยังฐานข้อมูลด้วย connection string:
+
+```bash
+psql "postgresql://postgres:secret@localhost:5432/postgres"
+```
+
+ไม่มี `psql` ในเครื่อง? image มาพร้อมมันอยู่แล้ว ดังนั้นคุณรันมันภายใน container แทนได้:
+
+```bash
+docker exec -it pg psql -U postgres
+```
+
+ไม่ว่าทางใดก็ตามคุณจะมาถึง prompt `postgres=#` พร้อมที่จะรัน SQL เมื่อคุณเสร็จงานสำหรับวันนี้ `docker compose down` จะหยุดทุกอย่าง เนื่องจากข้อมูลอยู่ใน volume `pgdata` มันจึงยังคงอยู่ตรงนั้นในครั้งถัดไปที่คุณนำ stack กลับขึ้นมา
+
+## เคล็ดลับ / จุดที่ต้องระวัง
+
+- named volume คือสิ่งที่ทำให้ข้อมูลของคุณคงอยู่ ลบ container แล้วข้อมูลยังอยู่ ลบ volume แล้วข้อมูลหายไปตลอดกาล
+- `5432` คือ port เริ่มต้นของ PostgreSQL และ `postgres` คือ superuser เริ่มต้น เครื่องมือต่าง ๆ สันนิษฐานเช่นนี้เว้นแต่จะถูกบอกเป็นอย่างอื่น
+- `POSTGRES_DB` สร้างฐานข้อมูลเพิ่มเติมในการเริ่มต้นครั้งแรก หากไม่มีมัน คุณก็ยังได้ฐานข้อมูล `postgres` ที่มีอยู่ในตัวให้ทำงานด้วย
+- `POSTGRES_PASSWORD` จำเป็นต้องมีสำหรับ image อย่างเป็นทางการ ใช้ secret จริงนอกการทดลองในเครื่อง ไม่ใช่ `secret`
+- ปักหมุดเวอร์ชันหลักอย่าง `postgres:17` แทน `postgres:latest` เพื่อให้การอัปเดต image ไม่ทำให้คุณประหลาดใจด้วยเวอร์ชันที่ต่างออกไป
+
+<Callout title="ฐานข้อมูลที่ทิ้งได้ ข้อมูลที่คงทน">
+container ถูกออกแบบมาให้โยนทิ้งและสร้างใหม่ได้อย่างอิสระ แต่ข้อมูลของคุณไม่ควรเป็นเช่นนั้น การเก็บข้อมูลไว้ใน named volume มอบสิ่งที่ดีที่สุดของทั้งสองอย่างให้คุณ: คุณทำลายและสร้าง container ใหม่ได้บ่อยเท่าที่คุณต้องการในขณะที่ row ต่าง ๆ ยังคงอยู่บน disk อย่างปลอดภัย
+</Callout>
+
+export const quizDocker = [
+  {
+    q: 'ทำไมต้อง mount named volume ที่ data directory ของ Postgres?',
+    options: [
+      'เพื่อให้ container เริ่มเร็วขึ้น',
+      'เพื่อให้ข้อมูลอยู่รอดเมื่อ container ถูกลบ',
+      'เพื่อเปลี่ยน port เริ่มต้น',
+      'มันจำเป็นต้องมีเพื่อให้ image รันได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ตัวแปร environment ใดที่ต้องตั้งค่าเพื่อให้ image postgres อย่างเป็นทางการเริ่มต้นได้?',
+    options: ['POSTGRES_DB', 'POSTGRES_PASSWORD', 'PGADMIN_DEFAULT_EMAIL', 'POSTGRES_PORT'],
+    answer: 1,
+  },
+  {
+    q: 'port เริ่มต้นของ PostgreSQL คืออะไร?',
+    options: ['80', '3306', '5432', '8080'],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="intro-and-setup/setup-with-docker" questions={quizDocker} />
+
+<ProgressTracker client:visible id="intro-and-setup/setup-with-docker" />

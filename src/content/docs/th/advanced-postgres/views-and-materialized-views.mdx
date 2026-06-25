@@ -1,0 +1,172 @@
+---
+title: Views และ materialized views
+description: ตั้งชื่อให้ query ด้วย CREATE VIEW เพื่อผลลัพธ์ที่สดใหม่เสมอ หรือแคช query ที่มีต้นทุนสูงด้วย CREATE MATERIALIZED VIEW แล้ว REFRESH เมื่อต้องการ — และรู้ว่าควรใช้อันไหนเมื่อใด
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+เมื่อ query ที่ซับซ้อนตัวเดิมโผล่มาเรื่อย ๆ ทั่วทั้งแอปพลิเคชันของคุณ การคัดลอก SQL ของมันไปทุกที่นั้นเปราะบาง PostgreSQL ให้คุณตั้งชื่อให้ query แล้วใช้ชื่อนั้นเหมือนตาราง มีสองแบบที่พฤติกรรมต่างกันมาก คือ **view** จะรัน query เบื้องหลังทุกครั้งที่คุณอ่านมัน ส่วน **materialized view** จะเก็บผลลัพธ์ไว้และคำนวณใหม่เฉพาะเมื่อคุณสั่ง
+
+เราใช้ตาราง `authors` และ `books` จากโมดูล CRUD ซ้ำสำหรับตัวอย่างด้านล่าง
+
+## view คือ query ที่ถูกเก็บไว้
+
+`CREATE VIEW` บันทึก `SELECT` ไว้ภายใต้ชื่อหนึ่ง การอ่าน view จะรัน query นั้นใหม่กับข้อมูลปัจจุบัน ดังนั้นผลลัพธ์ของมันจึงเป็นปัจจุบันเสมอ ไม่มีอะไรถูกเก็บไว้นอกจากตัวนิยาม (definition)
+
+```sql
+CREATE VIEW author_book_counts AS
+SELECT a.id,
+       a.name,
+       count(b.id) AS book_count,
+       coalesce(sum(b.copies_sold), 0) AS total_sold
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.id, a.name;
+```
+
+```text
+CREATE VIEW
+```
+
+ตอนนี้ query มันได้ราวกับว่ามันเป็นตาราง:
+
+```sql
+SELECT name, book_count, total_sold
+FROM author_book_counts
+WHERE book_count > 0
+ORDER BY total_sold DESC;
+```
+
+```text
+      name       | book_count | total_sold
+-----------------+------------+------------
+ Dana Whitfield  |          2 |       1800
+ Marcus Lindqvist|          1 |        950
+(2 rows)
+```
+
+เพราะ query รันทุกครั้ง การ insert หนังสือใหม่แล้วอ่าน view ซ้ำจะสะท้อนการเปลี่ยนแปลงทันที ต้นทุนคือทุกการอ่านต้องจ่ายราคาเต็มของ join และการ aggregate
+
+## materialized view แคชผลลัพธ์ไว้
+
+`CREATE MATERIALIZED VIEW` รัน query หนึ่งครั้งและเก็บแถวต่าง ๆ ไว้บนดิสก์ เหมือนภาพ snapshot การอ่านจึงถูกพอ ๆ กับการอ่านตาราง — แต่ข้อมูลถูกแช่แข็งไว้ ณ ขณะที่มันถูกสร้างหรือถูก refresh ครั้งล่าสุด
+
+```sql
+CREATE MATERIALIZED VIEW author_book_counts_cached AS
+SELECT a.id,
+       a.name,
+       count(b.id) AS book_count,
+       coalesce(sum(b.copies_sold), 0) AS total_sold
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.id, a.name;
+```
+
+```text
+SELECT 3
+```
+
+ถ้าตอนนี้คุณ insert หนังสือใหม่ materialized view จะ**ไม่**เปลี่ยน คุณทำให้มันเป็นปัจจุบันด้วย `REFRESH`:
+
+```sql
+REFRESH MATERIALIZED VIEW author_book_counts_cached;
+```
+
+```text
+REFRESH MATERIALIZED VIEW
+```
+
+`REFRESH` ธรรมดาจะจับ lock ที่บล็อกการอ่านขณะที่มันสร้างใหม่ หากต้องการให้ view ยังอ่านได้ระหว่าง refresh ให้เพิ่ม `CONCURRENTLY` — สิ่งนี้ต้องมี unique index บน materialized view ก่อน:
+
+```sql
+CREATE UNIQUE INDEX idx_abc_cached_id ON author_book_counts_cached (id);
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY author_book_counts_cached;
+```
+
+**ใน pgAdmin:** ทั้งสองอ็อบเจกต์จะปรากฏในแผนผัง browser — view อยู่ใต้ Views และ materialized view อยู่ใต้ Materialized Views การคลิกขวาที่ materialized view จะมีตัวเลือก Refresh ที่รันคำสั่งนั้นให้คุณ
+
+## ทั้งสองต่างกันอย่างไรตอนอ่าน
+
+ทั้งสองมีพฤติกรรมเหมือนกันตอนเขียน (`SELECT ... FROM name`) แต่ต่างกันที่เบื้องหลัง view ส่งต่อ query ของคุณไปยัง definition ที่เก็บไว้ ส่วน materialized view ตอบจากแถวที่เก็บไว้ของตัวเอง
+
+export const viewDiagram = `flowchart LR
+  subgraph View
+    Q1[SELECT from view] --> D1[Stored query definition]
+    D1 --> T1[(Live tables)]
+    T1 --> R1[Always-fresh result]
+  end
+  subgraph Materialized view
+    Q2[SELECT from matview] --> S2[(Stored result rows)]
+    S2 --> R2[Fast but possibly stale result]
+    RF[REFRESH] --> T2[(Live tables)]
+    T2 --> S2
+  end`;
+
+<Mermaid code={viewDiagram} title="view ส่งผ่านไปยังข้อมูลสด ส่วน matview อ่านแถวที่แคชไว้ของตัวเอง" />
+
+## การเลือกระหว่างทั้งสอง
+
+| คำถาม                                  | View                  | Materialized view              |
+|-------------------------------------------|-----------------------|--------------------------------|
+| ผลลัพธ์เป็นปัจจุบันเสมอหรือไม่?             | ใช่                   | เฉพาะหลัง refresh           |
+| การอ่านแต่ละครั้งมีต้นทุนแค่ไหน?               | ต้นทุน query เต็ม       | ถูก (อ่านแถวที่เก็บไว้)      |
+| มันใช้ดิสก์เก็บผลลัพธ์หรือไม่?             | ไม่                    | ใช่                            |
+| ทำ index ให้ผลลัพธ์โดยตรงได้หรือไม่?        | ไม่                    | ได้                            |
+| เหมาะเมื่อ                                 | ข้อมูลเปลี่ยนบ่อย    | query มีต้นทุนสูง และยอมรับความล้าสมัยได้  |
+
+ใช้ view ธรรมดาเพื่อจัดระเบียบและนำ query ที่มีต้นทุนยอมรับได้ในทุกการอ่านมาใช้ซ้ำ หยิบ materialized view มาใช้เมื่อ query มีต้นทุนสูงจริง ๆ (join หนัก ๆ การ aggregate บนตารางใหญ่) และแอปพลิเคชันของคุณทนกับผลลัพธ์ที่ตามหลังอยู่หลายนาทีหรือหลายชั่วโมงได้
+
+## Tips / ข้อควรระวัง
+
+- materialized view ล้าสมัยโดยนิยามจนกว่าคุณจะ refresh มัน จงตั้งเวลา refresh (cron job, scheduled task หรือ trigger) ให้สอดคล้องกับความสดใหม่ที่ข้อมูลต้องการ
+- `REFRESH MATERIALIZED VIEW CONCURRENTLY` ต้องมี unique index บน view และทำงานมากกว่า แต่มันปล่อยให้การอ่านดำเนินต่อระหว่างการสร้างใหม่ได้ การ refresh ธรรมดาเร็วกว่าแต่บล็อกผู้อ่าน
+- view ธรรมดาไม่เพิ่มพื้นที่จัดเก็บและไม่มีความล้าสมัย แต่มันก็ไม่เพิ่มความเร็วเช่นกัน — การอ่านแต่ละครั้งรัน query เต็มใหม่ มันเป็นเรื่องของการนำกลับมาใช้ซ้ำและความอ่านง่าย ไม่ใช่ประสิทธิภาพ
+- โดยทั่วไปคุณเขียนผ่าน view ที่ aggregate หรือ join ไม่ได้ view แบบตารางเดียวง่าย ๆ อาจ update ได้ แต่ทันทีที่คุณเพิ่ม `GROUP BY` หรือ join ให้ถือว่า view นั้นเป็นแบบอ่านอย่างเดียว
+
+<Callout title="สดใหม่ versus เร็ว">
+การตัดสินใจทั้งหมดสรุปลงที่การแลกเปลี่ยน view ให้ความถูกต้องฟรี ๆ และจ่ายในทุกการอ่าน materialized view ให้ความเร็วและขอให้คุณจัดการความล้าสมัยด้วยการ refresh เลือกข้างของการแลกเปลี่ยนที่ฟีเจอร์ของคุณต้องการจริง ๆ
+</Callout>
+
+export const quizViews = [
+  {
+    q: 'เกิดอะไรขึ้นเมื่อคุณ SELECT จาก view ธรรมดา (ไม่ใช่ materialized)?',
+    options: [
+      'มันคืนแถวที่เก็บไว้บนดิสก์จากการ refresh ครั้งล่าสุด',
+      'มันรัน query เบื้องหลังใหม่กับข้อมูลปัจจุบัน',
+      'มันคืนผลลัพธ์ว่างเสมอจนกว่าจะ refresh',
+      'มันแก้ไขตารางเบื้องหลัง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'หลังจาก insert แถวใหม่ลงในตารางพื้นฐาน materialized view สะท้อนมันอย่างไร?',
+    options: [
+      'โดยอัตโนมัติและทันที',
+      'ไม่เลย materialized view เป็น snapshot แบบอ่านอย่างเดียวตลอดไป',
+      'เฉพาะหลังจากที่คุณรัน REFRESH MATERIALIZED VIEW',
+      'เฉพาะหลังจากที่คุณ DROP และสร้างตารางใหม่',
+    ],
+    answer: 2,
+  },
+  {
+    q: 'REFRESH MATERIALIZED VIEW CONCURRENTLY ต้องการอะไร?',
+    options: [
+      'unique index บน materialized view',
+      'trigger บนตารางพื้นฐาน',
+      'การเชื่อมต่อแบบ superuser',
+      'view ต้องว่างเปล่า',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="advanced-postgres/views-and-materialized-views" questions={quizViews} />
+
+<ProgressTracker client:visible id="advanced-postgres/views-and-materialized-views" />

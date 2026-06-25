@@ -1,0 +1,177 @@
+---
+title: VACUUM and statistics
+description: MVCC leaves dead tuples behind — VACUUM reclaims them, ANALYZE refreshes planner statistics, autovacuum does both, bloat is what happens without it, and VACUUM FULL rewrites the table under a lock.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Indexes and good plans are only half the performance story. The other half is keeping the table itself healthy. PostgreSQL has an unusual way of handling updates and deletes, and if you understand it you will understand why two background tasks — `VACUUM` and `ANALYZE` — are essential to keeping queries fast.
+
+## MVCC leaves dead tuples behind
+
+PostgreSQL uses **MVCC**, multi-version concurrency control, so that readers never block writers. The consequence is that an `UPDATE` does not overwrite a row in place, and a `DELETE` does not immediately erase it. Instead:
+
+- An `UPDATE` writes a *new* version of the row and marks the old version as no longer current.
+- A `DELETE` marks the row as gone but leaves its bytes on disk.
+
+Those leftover, no-longer-visible row versions are called **dead tuples**. They are invisible to your queries, but they still occupy space and still have to be skipped over during scans.
+
+export const vacuumFlow = `flowchart LR
+  A[Row version v1] -->|UPDATE| B[Row version v2 live]
+  A -->|marked obsolete| D[Dead tuple]
+  D -->|VACUUM| R[Space reclaimed and reusable]
+  B --> Q[Visible to queries]`;
+
+<Mermaid code={vacuumFlow} title="An update creates a dead tuple that VACUUM later reclaims" />
+
+## VACUUM reclaims, ANALYZE informs
+
+Two maintenance operations clean up after MVCC:
+
+- **`VACUUM`** scans a table and marks the space used by dead tuples as free for reuse, so future inserts and updates can fill it instead of growing the file. A plain `VACUUM` does not return disk to the operating system; it makes the space reusable *within* the table.
+- **`ANALYZE`** samples the table and updates the **planner statistics** — row counts, value distributions, how many distinct values a column has. These are the numbers the planner relies on to choose between a seq scan and an index scan, as you saw in the EXPLAIN lesson.
+
+You can run them by hand, together or separately:
+
+```sql
+-- reclaim dead-tuple space in one table
+VACUUM books;
+
+-- refresh statistics so the planner estimates well
+ANALYZE books;
+
+-- do both at once
+VACUUM ANALYZE books;
+```
+
+From application code it is the same statement through any driver.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    VACUUM ANALYZE books;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('VACUUM ANALYZE books');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    # VACUUM cannot run inside a transaction block,
+    # so use autocommit for this statement
+    old = conn.autocommit
+    conn.autocommit = True
+    cur.execute("VACUUM ANALYZE books")
+    conn.autocommit = old
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "VACUUM ANALYZE books")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("VACUUM ANALYZE books")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+A note for drivers: `VACUUM` cannot run inside a transaction block, so issue it on a connection in autocommit mode rather than wrapped in `BEGIN ... COMMIT`.
+
+## Autovacuum does this for you
+
+You rarely run `VACUUM` by hand, because PostgreSQL ships with **autovacuum** — a background process that watches how many rows each table has changed and automatically runs `VACUUM` and `ANALYZE` when the churn crosses a threshold. It is on by default, and you should leave it on.
+
+Autovacuum keeps dead tuples from piling up and keeps statistics fresh without any effort on your part. When people complain that "Postgres got slow over time", the cause is very often autovacuum being disabled or unable to keep up.
+
+## Bloat
+
+When dead tuples accumulate faster than they are reclaimed — because autovacuum is off, too slow, or a long-running transaction is holding old versions visible — the table grows larger than the live data justifies. This is **bloat**. A bloated table has more pages to read for the same number of live rows, so even a seq scan or index scan does extra I/O. Bloat affects indexes too.
+
+You can see the rough state of a table with:
+
+```sql
+SELECT relname, n_live_tup, n_dead_tup, last_autovacuum
+FROM pg_stat_user_tables
+WHERE relname = 'books';
+```
+
+```text
+ relname | n_live_tup | n_dead_tup |        last_autovacuum
+---------+------------+------------+-------------------------------
+ books   |      48213 |       1502 | 2026-06-25 09:14:02.118431+00
+```
+
+A healthy `n_dead_tup` is small relative to `n_live_tup`; a large value that never falls means vacuuming is not keeping up.
+
+## VACUUM FULL rewrites the table
+
+Plain `VACUUM` makes space reusable but does not shrink the file. To actually return disk to the operating system and compact a badly bloated table, there is `VACUUM FULL`, which rewrites the entire table into a fresh, tightly packed file.
+
+```sql
+VACUUM FULL books;
+```
+
+The catch is severe: `VACUUM FULL` takes an **exclusive lock** on the table for the whole rewrite, blocking every read and write until it finishes. On a large table that can mean significant downtime. Use it only for one-off recovery from serious bloat, during a maintenance window — never as routine housekeeping. Routine cleanup is autovacuum's job.
+
+**In pgAdmin:** right-click a table and choose Maintenance to run `VACUUM`, `ANALYZE`, or `VACUUM FULL` from a dialog, with checkboxes for the options. The same Maintenance dialog can reindex a bloated index.
+
+## Tips / gotchas
+
+- Keep autovacuum enabled. Disabling it is the most common cause of a database that slowly degrades into bloat and bad plans.
+- Run `ANALYZE` (or `VACUUM ANALYZE`) manually after a large bulk load, import, or migration. Autovacuum may not fire immediately, and stale statistics right after a big change lead the planner astray.
+- Plain `VACUUM` is non-blocking and safe to run anytime; `VACUUM FULL` is blocking and disruptive — reserve it for maintenance windows.
+- A long-running transaction prevents vacuum from cleaning up tuples it might still need to see. Watch for forgotten open transactions when bloat grows despite healthy autovacuum.
+- Monitor `n_dead_tup` and `last_autovacuum` in `pg_stat_user_tables` to confirm vacuuming is actually keeping pace with your write volume.
+
+<Callout title="Let the database keep itself healthy">
+MVCC trades in-place updates for non-blocking reads, and the price is dead tuples that must be cleaned up. Autovacuum pays that price for you: it reclaims space and refreshes statistics in the background. Leave it on, `ANALYZE` after big loads, and save `VACUUM FULL` for emergencies — that is almost the entire maintenance story.
+</Callout>
+
+export const quizVacuum = [
+  {
+    q: 'Why does an UPDATE leave a dead tuple behind in PostgreSQL?',
+    options: [
+      'Because of a bug',
+      'Because MVCC writes a new row version and marks the old one obsolete rather than overwriting in place',
+      'Because indexes require it',
+      'Because the row is locked',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does ANALYZE do that VACUUM does not?',
+    options: [
+      'It reclaims dead-tuple space',
+      'It updates the planner statistics used to choose scan strategies',
+      'It rewrites the table file',
+      'It locks the table',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why should VACUUM FULL be reserved for maintenance windows?',
+    options: [
+      'It runs slowly but does not block anyone',
+      'It takes an exclusive lock that blocks all reads and writes while it rewrites the table',
+      'It deletes the index',
+      'It disables autovacuum',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/vacuum-and-statistics" questions={quizVacuum} />
+
+<ProgressTracker client:visible id="indexes-and-performance/vacuum-and-statistics" />

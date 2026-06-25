@@ -1,0 +1,158 @@
+---
+title: Joins & relationships
+description: Why relational databases shine when you combine tables — a tour of joins, aggregates, subqueries and CTEs, and window functions, all built on a tiny authors, books, and sales schema.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A single table can only answer questions about itself. The real power of a relational database shows up when you stop keeping everything in one giant table and instead split data into focused tables that point at each other through keys. An `authors` table holds people, a `books` table holds titles, and a foreign key links each book back to its author. Nothing is duplicated, and yet you can still ask questions that span both.
+
+This module is about answering those cross-table questions. You will learn to stitch tables back together with joins, to collapse many rows into summary numbers with aggregates, to nest one query inside another with subqueries and CTEs, and finally to compute per-row rankings and running totals with window functions.
+
+## The example schema
+
+Every lesson reuses three small tables. `authors` and `books` should look familiar from the CRUD module; we add a `sales` table so there is something to aggregate and rank.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE TABLE authors (
+      id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      name text NOT NULL,
+      born int
+    );
+
+    CREATE TABLE books (
+      id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      title     text NOT NULL,
+      author_id bigint REFERENCES authors (id),
+      published int
+    );
+
+    CREATE TABLE sales (
+      id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      book_id  bigint REFERENCES books (id),
+      region   text NOT NULL,
+      copies   int NOT NULL
+    );
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(`
+      CREATE TABLE sales (
+        id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        book_id bigint REFERENCES books (id),
+        region  text NOT NULL,
+        copies  int NOT NULL
+      )
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        CREATE TABLE sales (
+          id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          book_id bigint REFERENCES books (id),
+          region  text NOT NULL,
+          copies  int NOT NULL
+        )
+    """)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, `
+      CREATE TABLE sales (
+        id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        book_id bigint REFERENCES books (id),
+        region  text NOT NULL,
+        copies  int NOT NULL
+      )`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query(
+        "CREATE TABLE sales (
+           id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+           book_id bigint REFERENCES books (id),
+           region  text NOT NULL,
+           copies  int NOT NULL
+         )",
+    )
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** paste the three `CREATE TABLE` statements into the Query Tool and run them. The new tables appear under Schemas then Tables, and if you expand a table you can see the foreign-key constraint listed under Constraints.
+
+## How the tables relate
+
+Each table connects to the next through a key column. A book carries the `id` of its author, and a sale carries the `id` of its book. These links are what every query in this module follows.
+
+export const schemaDiagram = `flowchart LR
+  A[authors] -->|id referenced by books.author_id| B[books]
+  B -->|id referenced by sales.book_id| S[sales]`;
+
+<Mermaid code={schemaDiagram} title="Tables linked by keys" />
+
+Read the arrows as "is referenced by". One author can have many books, and one book can have many sales rows — a classic one-to-many shape that joins were designed to traverse.
+
+## What this module covers
+
+- **Joins** — combining rows from two or more tables on matching key columns, and choosing whether unmatched rows are kept or dropped.
+- **Aggregates and GROUP BY** — collapsing many rows into counts, sums, and averages, then filtering those groups with `HAVING`.
+- **Subqueries and CTEs** — using the result of one query inside another, and naming intermediate steps with `WITH` for readability.
+- **Window functions** — ranking rows and computing running totals without throwing away the individual rows.
+
+## Tips / gotchas
+
+- A foreign key documents a relationship and enforces it, but it is the join in your query that actually brings the related rows together.
+- The same question can often be written as a join, a subquery, or a window function; learning all three lets you pick the clearest one.
+- Keep a mental picture of the one-to-many links above; almost every query in this module walks one of those arrows.
+
+<Callout title="Why split tables at all?">
+It would be simpler to store the author's name directly on every book row, but then renaming an author means rewriting every one of their books, and a typo can leave two spellings of the same person. Splitting data into related tables removes that duplication. Joins are the price you pay — and they are cheap.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What makes a relational database more powerful than a single flat table?',
+    options: [
+      'It stores data in focused tables linked by keys, so you can combine them on demand',
+      'It compresses every column automatically',
+      'It forbids duplicate rows',
+      'It runs queries in parallel by default',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'In the example schema, how does a sales row connect to an author?',
+    options: [
+      'Directly, through an author_id column on sales',
+      'Through books: sales.book_id points at a book, whose author_id points at the author',
+      'They are not connected',
+      'Through a shared name column',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which technique keeps the individual rows while adding a ranking or running total?',
+    options: ['GROUP BY', 'A window function', 'DELETE', 'A foreign key'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="joins-and-relationships/index" />

@@ -1,0 +1,196 @@
+---
+title: Databases, schemas, and connecting
+description: How a PostgreSQL cluster nests databases, schemas, and tables — CREATE DATABASE and CREATE SCHEMA, the public schema, search_path, qualified names, and roles.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A single PostgreSQL server holds more than one set of tables, and it organizes them in layers. Understanding this nesting — cluster, database, schema, table — clears up where your data lives and how to name it. This lesson walks down through the layers and shows how to create them.
+
+## The layers
+
+One running server is called a **cluster**. A cluster contains one or more **databases**, which are fully isolated from each other: a connection talks to exactly one database at a time. Inside each database are **schemas**, which are named groupings of tables (and other objects). Inside each schema are the **tables** themselves. The diagram shows the nesting.
+
+export const layersDiagram = `flowchart TD
+  CL[Cluster: one server] --> DB1[Database: appdb]
+  CL --> DB2[Database: postgres]
+  DB1 --> S1[Schema: public]
+  DB1 --> S2[Schema: billing]
+  S1 --> T1[Table: customers]
+  S1 --> T2[Table: orders]
+  S2 --> T3[Table: invoices]`;
+
+<Mermaid code={layersDiagram} title="How a cluster nests databases, schemas, and tables" />
+
+## Creating a database
+
+A database is the unit of isolation. You give each application its own database so their tables never collide. Creating one is a single statement.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE DATABASE shop;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE DATABASE shop');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    conn.autocommit = True
+    cur.execute("CREATE DATABASE shop")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE DATABASE shop")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE DATABASE shop")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+To start using the new database you reconnect to it. In `psql` that is `\c shop`; in a driver you open a fresh connection with `shop` as the database in the connection string. You cannot run `CREATE DATABASE` inside a transaction, which is why the Python example turns on autocommit.
+
+## Creating a schema and the public schema
+
+Within a database, schemas let you group related tables and avoid name clashes. Every new database starts with one schema already present, named **public**, and unless you say otherwise your tables land there.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE SCHEMA billing;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE SCHEMA billing');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE SCHEMA billing")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE SCHEMA billing")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE SCHEMA billing")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** new schemas appear under Schemas in the browser tree once you refresh the database; you can also create one by right-clicking Schemas. DBeaver shows the same grouping in its own navigator.
+
+## Qualified names and search_path
+
+A table has a full, **qualified name** of the form `schema.table`, such as `billing.invoices`. You can always write the qualified name and PostgreSQL will know exactly which table you mean. When you write an unqualified name like `invoices`, PostgreSQL looks through the **search_path** — an ordered list of schemas — and uses the first match. By default the search path puts `public` first, which is why tables you create without a schema end up there and can be read back by their bare name.
+
+You can inspect and change the search path for your session.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SHOW search_path;
+    SET search_path TO billing, public;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('SET search_path TO billing, public');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("SET search_path TO billing, public")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "SET search_path TO billing, public")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("SET search_path TO billing, public")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+   search_path
+-----------------
+ "$user", public
+(1 row)
+```
+
+With `billing` first in the path, an unqualified `invoices` now resolves to `billing.invoices`. Writing the qualified name removes all doubt and is the safest habit in shared databases.
+
+## Roles versus databases
+
+It is easy to confuse the two main account ideas. A **database** is a container for your data. A **role** is an account that connects and is granted permission to act on that data — roles are both users and groups in PostgreSQL. They are independent: a single role can own and connect to many databases, and a database can be used by many roles. You logged in as the `postgres` role, a superuser, throughout this module. Real systems create limited roles per application, which the operations module covers.
+
+## Tips / gotchas
+
+- A connection always targets exactly one database; to switch, you reconnect.
+- New databases come with a `public` schema, so tables you create without naming a schema land in `public`.
+- Unqualified names are resolved through `search_path`; the qualified `schema.table` form is unambiguous and safest in shared databases.
+- `CREATE DATABASE` cannot run inside a transaction block, so tools must commit it on its own.
+- Roles (accounts) and databases (data containers) are separate concepts; do not treat one as the other.
+
+<Callout title="Cluster, database, schema, table">
+Picture the four layers as nested boxes: a server holds databases, a database holds schemas, a schema holds tables. Knowing which box you are in answers most "where is my table?" questions, and writing qualified `schema.table` names spares you from search_path surprises.
+</Callout>
+
+export const quizDatabasesSchemas = [
+  {
+    q: 'Which schema exists in every new database by default?',
+    options: ['billing', 'public', 'system', 'main'],
+    answer: 1,
+  },
+  {
+    q: 'What does search_path control?',
+    options: [
+      'Which schemas are searched to resolve an unqualified table name',
+      'The file path where data is stored',
+      'The order rows are returned in',
+      'Which database you connect to',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'How do roles and databases relate?',
+    options: [
+      'A role is just another name for a database',
+      'They are independent: a role is an account, a database is a data container',
+      'Each database can have only one role',
+      'Roles store data and databases store accounts',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-setup/databases-schemas-and-connecting" questions={quizDatabasesSchemas} />
+
+<ProgressTracker client:visible id="intro-and-setup/databases-schemas-and-connecting" />

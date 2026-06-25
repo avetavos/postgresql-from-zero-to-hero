@@ -1,0 +1,177 @@
+---
+title: Backup และ security
+description: ปกป้องข้อมูลของคุณด้วย backup แบบ logical และ physical และ point-in-time recovery และล็อกมันด้วย role, GRANT และ REVOKE, row-level security, TLS, และ pg_hba.conf
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+หน้าที่ด้าน operations สองอย่างสุดท้ายคือสิ่งที่คุณหวังว่าจะไม่ต้องใช้และไม่อาจมองข้ามได้ **Backup** ให้คุณสร้างใหม่ได้หลังจากดิสก์ล้มเหลว การ deploy ที่ผิดพลาด หรือ `DELETE` ที่พลาดไป **Security** ควบคุมว่าใครอาจเชื่อมต่อได้ ใครอาจเห็นอะไร และข้อมูลเดินทางผ่านเครือข่ายอย่างไร ฐานข้อมูลที่เร็วและพร้อมใช้งานสูงก็ยังเป็นภาระอยู่ดีถ้ามัน restore ไม่ได้ หรือถ้าใครก็ได้บนอินเทอร์เน็ตอ่านมันได้
+
+บทเรียนนี้ครอบคลุม backup ทั้งสองตระกูลที่ PostgreSQL มีให้ จากนั้นเดินลงไปทีละชั้นของการควบคุมการเข้าถึงจากขอบเครือข่ายไปจนถึงแถวแต่ละแถว
+
+## backup สองชนิด
+
+Backup ของ PostgreSQL มีสองสไตล์ที่เหมาะกับความต้องการที่ต่างกัน
+
+| ชนิด     | เครื่องมือ                     | สิ่งที่มันจับเก็บ                        | เหมาะที่สุดสำหรับ                  |
+|----------|-------------------------------|-----------------------------------------|-----------------------------------|
+| Logical  | `pg_dump` / `pg_restore`      | SQL หรือ archive ของฐานข้อมูลหนึ่ง       | ฐานข้อมูลเดี่ยว, การย้ายเวอร์ชัน    |
+| Physical | base backup + WAL archiving   | ไฟล์ทั้ง cluster แบบ byte-for-byte       | cluster ขนาดใหญ่, point-in-time recovery |
+
+### logical backup
+
+Logical backup รัน `pg_dump` ซึ่งอ่านฐานข้อมูลและเขียน statement ที่จำเป็นในการสร้างมันขึ้นมาใหม่ มันพกพาข้ามเครื่องได้และแม้กระทั่งข้าม major version ซึ่งทำให้มันเหมาะอย่างยิ่งสำหรับการย้ายหรือ clone ฐานข้อมูลเดี่ยว
+
+```bash
+# Dump one database to a compressed custom-format archive
+pg_dump --format=custom --file=shop.dump --dbname=shop
+
+# Restore that archive into a fresh database
+pg_restore --dbname=shop_restored --create shop.dump
+```
+
+รูปแบบ custom ที่ใช้ในที่นี้ให้ `pg_restore` restore บางส่วนแบบเลือกได้และรันแบบขนานได้ สำหรับฐานข้อมูลขนาดเล็ก ไฟล์ SQL ธรรมดาที่คุณ replay ด้วย `psql` ก็ใช้ได้เช่นกัน
+
+### physical backup และ point-in-time recovery
+
+สำหรับ cluster ขนาดใหญ่หรือยุ่ง การ dump แบบ logical ช้าเกินไป แทนที่จะทำเช่นนั้น คุณทำ **base backup** — สำเนาระดับ byte ของไฟล์ข้อมูล — และ archive write-ahead log อย่างต่อเนื่อง การ replay WAL ทับ base backup ให้คุณ restore กลับไปยังจังหวะเวลาใด ๆ ก็ได้ ซึ่งรู้จักกันในชื่อ **point-in-time recovery** (PITR)
+
+```bash
+# Take a base backup of the whole cluster
+pg_basebackup --pgdata=/backups/base --format=tar --gzip --progress
+```
+
+```conf
+# postgresql.conf: keep every WAL segment by archiving it
+archive_mode = on
+archive_command = 'test ! -f /archive/%f && cp %p /archive/%f'
+```
+
+ด้วย base backup บวกกับ WAL ที่ archive ไว้ การ recovery หมายถึงการ restore ไฟล์ base แล้วบอก PostgreSQL ให้ replay WAL ไปจนถึง timestamp ที่เลือก — คุณจึงสามารถย้อนกลับไปยังวินาทีก่อนที่ migration ที่ผิดพลาดจะรันได้
+
+export const backupDiagram = `flowchart LR
+  PG[(Primary cluster)] -->|pg_basebackup| Base[Base backup]
+  PG -->|archive_command| WAL[Archived WAL segments]
+  Base --> Restore[Restore]
+  WAL -->|replay to a chosen time| Restore
+  Restore --> Recovered[(Recovered cluster)]`;
+
+<Mermaid code={backupDiagram} title="base backup บวกกับ WAL ที่ archive ไว้ทำให้ point-in-time recovery เป็นไปได้" />
+
+## security เป็นชั้น ๆ
+
+การควบคุมการเข้าถึงใน PostgreSQL มองภาพได้ดีที่สุดเป็นชุดของประตูที่ request ผ่านไป: ก่อนอื่นคือเครือข่าย จากนั้น authentication แล้วก็ role privilege และสุดท้ายคือกฎระดับแถว แต่ละชั้นสามารถหยุด request ที่ชั้นก่อนหน้าปล่อยผ่านมาได้
+
+export const securityDiagram = `flowchart LR
+  Client[Client] -->|encrypted with TLS| HBA[pg_hba.conf - who may connect]
+  HBA --> Auth[Authenticate the role]
+  Auth --> Priv[Role privileges - GRANT and REVOKE]
+  Priv --> RLS[Row-level security policy]
+  RLS --> Data[(Table rows)]`;
+
+<Mermaid code={securityDiagram} title="connection ผ่านประตูเครือข่าย, auth, privilege, และแถว" />
+
+### ประตูเครือข่าย: pg_hba.conf และ TLS
+
+ประตูแรกคือ `pg_hba.conf` (host-based authentication) แต่ละบรรทัดบอกว่า role ใดอาจเชื่อมต่อกับฐานข้อมูลใดจาก address ใด และต้อง authenticate อย่างไร กฎถูกอ่านจากบนลงล่าง และการ match แรกชนะ
+
+```conf
+# TYPE  DATABASE  USER   ADDRESS         METHOD
+hostssl all       app    10.0.0.0/24     scram-sha-256
+host    all       all    127.0.0.1/32    scram-sha-256
+```
+
+คีย์เวิร์ด `hostssl` กำหนดให้ connection ต้องเข้ารหัสด้วย **TLS** ซึ่งคุณเปิดใช้ใน `postgresql.conf` ด้วยการชี้ไปที่ certificate และ key
+
+```conf
+# postgresql.conf
+ssl = on
+ssl_cert_file = '/etc/postgresql/server.crt'
+ssl_key_file  = '/etc/postgresql/server.key'
+```
+
+### role และ privilege: GRANT และ REVOKE
+
+เมื่อเชื่อมต่อแล้ว สิ่งที่ role อาจทำได้ถูกกำกับด้วย privilege คุณสร้าง role แล้ว `GRANT` สิทธิ์เฉพาะและ `REVOKE` มัน หลักการชี้นำคือ **least privilege**: ให้แต่ละ role เฉพาะสิ่งที่มันต้องการเท่านั้น
+
+```sql
+-- A read-only reporting role
+CREATE ROLE reporting LOGIN PASSWORD 'set-a-strong-one';
+GRANT CONNECT ON DATABASE shop TO reporting;
+GRANT USAGE ON SCHEMA public TO reporting;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO reporting;
+
+-- An application role that may also write to one table
+CREATE ROLE app LOGIN PASSWORD 'set-a-strong-one';
+GRANT SELECT, INSERT, UPDATE ON orders TO app;
+REVOKE DELETE ON orders FROM app;
+```
+
+### row-level security
+
+Privilege ควบคุมทั้งตาราง **Row-level security** (RLS) ลงลึกกว่านั้น โดยให้ policy ตัดสินว่า role อาจเห็นหรือเปลี่ยน *แถว* ใด — เป็นรากฐานของระบบ multi-tenant ที่แต่ละ tenant ต้องเห็นเฉพาะข้อมูลของตัวเองเท่านั้น
+
+```sql
+-- Turn on RLS and add a policy keyed to a session setting
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = current_setting('app.tenant_id')::bigint);
+```
+
+ด้วย policy นี้ query บน `orders` จะคืนค่าเฉพาะแถวที่ `tenant_id` ตรงกับค่าที่แอปพลิเคชันตั้งไว้สำหรับ session ปัจจุบันอย่างเงียบ ๆ `WHERE` ที่ลืมไปหนึ่งครั้งจะไม่ทำให้ข้อมูลของ tenant อื่นรั่วไหลอีกต่อไป
+
+## เคล็ดลับ / ข้อควรระวัง
+
+- Backup จะเป็นของจริงก็ต่อเมื่อคุณ restore มันสำเร็จแล้วเท่านั้น จัดตารางทดสอบ restore เป็นประจำลงในฐานข้อมูลแบบใช้แล้วทิ้ง และยืนยันว่าข้อมูลยังครบถ้วน
+- Logical dump พกพาได้และเยี่ยมสำหรับฐานข้อมูลเดี่ยว; physical base backup บวกกับ WAL archiving คือสิ่งที่คุณต้องการสำหรับ cluster ขนาดใหญ่และ point-in-time recovery
+- ใช้ least privilege ในทุกที่ application role ไม่ควรเป็นเจ้าของ schema หรือสามารถ drop ตารางได้ และ reporting ควรเป็นแบบอ่านอย่างเดียว
+- อย่าใช้ authentication แบบ `trust` บน address ใดก็ตามที่เข้าถึงได้จากภายนอกเครื่อง — มันให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password
+- กำหนดให้ใช้ TLS สำหรับ connection ที่ข้ามเครือข่ายด้วย `hostssl` และจำไว้ว่ากฎ `pg_hba.conf` ถูก match จากบนลงล่าง การ match แรกชนะ
+
+<Callout title="Defence in depth">
+ไม่มีการควบคุมเดียวที่เพียงพอ ประตูเครือข่ายกันคนแปลกหน้าออกไป authentication พิสูจน์ตัวตน role privilege จำกัดการกระทำ และ row-level security จำกัดการมองเห็น Backup อยู่ใต้ทั้งหมดนั้นในฐานะตาข่ายความปลอดภัยสุดท้าย ดำเนินการเสมือนว่าแต่ละชั้นจะล้มเหลวเป็นครั้งคราว และทำให้แน่ใจว่าชั้นถัดไปยังคงปกป้องคุณอยู่
+</Callout>
+
+export const quizBackupSecurity = [
+  {
+    q: 'แนวทาง backup ใดเหมาะที่สุดสำหรับ point-in-time recovery บน cluster ขนาดใหญ่?',
+    options: [
+      'การรัน pg_dump ครั้งเดียวต่อสัปดาห์',
+      'physical base backup ผสมกับ WAL ที่ archive อย่างต่อเนื่อง',
+      'การคัดลอกไฟล์ข้อมูลขณะที่เซิร์ฟเวอร์กำลังรันอยู่ โดยไม่มี WAL',
+      'การ export แต่ละตารางไปยัง spreadsheet',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'row-level security ให้คุณควบคุมอะไรที่ GRANT และ REVOKE ทำไม่ได้?',
+    options: [
+      'network address ใดอาจเชื่อมต่อได้',
+      'แถวแต่ละแถวใดที่ role อาจเห็นหรือแก้ไขได้',
+      'query รันเร็วแค่ไหน',
+      'connection ถูกเข้ารหัสหรือไม่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไมคุณจึงควรหลีกเลี่ยง authentication แบบ trust บน address ที่เข้าถึงได้แบบสาธารณะ?',
+    options: [
+      'มันเข้ารหัสข้อมูลช้าเกินไป',
+      'มันให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password',
+      'มันปิดใช้ backup',
+      'มันทำงานได้เฉพาะบน Windows เท่านั้น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="operations-and-scaling/backup-and-security" questions={quizBackupSecurity} />
+
+<ProgressTracker client:visible id="operations-and-scaling/backup-and-security" />

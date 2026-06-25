@@ -1,0 +1,162 @@
+---
+title: psql และ pgAdmin
+description: เรียนรู้ meta-command ที่จำเป็นของ psql, ทัวร์ GUI ของ pgAdmin แบบบรรยาย, รู้จัก DBeaver ในฐานะทางเลือก จากนั้นเชื่อมต่อกับ PostgreSQL จาก driver ทั้งสี่ตัว
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ตอนนี้ที่ PostgreSQL รันอยู่แล้ว คุณต้องมีวิธีสื่อสารกับมัน มีประตูสามบานที่พบบ่อย: shell บน command-line อย่าง `psql`, เครื่องมือแบบกราฟิกอย่าง pgAdmin และโค้ดแอปพลิเคชันของคุณเองผ่าน driver บทเรียนนี้ครอบคลุมทั้งสามอย่างเพื่อให้คุณเลือกอันที่เหมาะกับช่วงเวลานั้น ๆ ได้
+
+## พื้นฐาน psql
+
+`psql` คือ terminal client อย่างเป็นทางการ เมื่อเชื่อมต่อแล้ว คุณพิมพ์ SQL ได้โดยตรง แต่พลังพิเศษที่แท้จริงของมันคือ **meta-command** — คำสั่งสั้น ๆ ที่ขึ้นต้นด้วย backslash และตรวจสอบฐานข้อมูลให้คุณ ต่อไปนี้คือคำสั่งที่คุณจะใช้อยู่ตลอดเวลา
+
+| คำสั่ง | มันทำอะไร |
+|---------|--------------|
+| `\l` | แสดงรายการฐานข้อมูลทั้งหมดใน server |
+| `\c dbname` | เชื่อมต่อกับฐานข้อมูลอื่น |
+| `\dt` | แสดงรายการ table ในฐานข้อมูลปัจจุบัน |
+| `\d tablename` | อธิบาย column, type และ constraint ของ table |
+| `\q` | ออกจาก psql |
+
+session แรกทั่วไปจะมีลักษณะแบบนี้ คุณเชื่อมต่อ มองไปรอบ ๆ รัน query แล้วออก
+
+```text
+postgres=# \l
+                    List of databases
+   Name    |  Owner   | Encoding |   Collate   |  Ctype
+-----------+----------+----------+-------------+----------
+ appdb     | postgres | UTF8     | en_US.UTF-8 | en_US.UTF-8
+ postgres  | postgres | UTF8     | en_US.UTF-8 | en_US.UTF-8
+(2 rows)
+
+postgres=# \c appdb
+You are now connected to database "appdb" as user "postgres".
+appdb=# \dt
+Did not find any relations.
+appdb=# SELECT 1 + 1 AS answer;
+ answer
+--------
+      2
+(1 row)
+
+appdb=# \q
+```
+
+การรัน SQL ก็แค่พิมพ์ statement และจบมันด้วยเครื่องหมายอัฒภาค meta-command ช่วยให้คุณไม่ต้องท่องจำ system query ที่อยู่เบื้องหลัง `\l`, `\dt` และผองเพื่อน — มันรัน query เหล่านั้นให้คุณและจัดรูปแบบผลลัพธ์
+
+## ทัวร์ pgAdmin
+
+หากคุณชอบการคลิกมากกว่าการพิมพ์ **pgAdmin** คือเครื่องมือแบบกราฟิกอย่างเป็นทางการ และการตั้งค่า Docker จากบทเรียนก่อนหน้าก็มีมันรันอยู่ที่ `http://localhost:8080` แล้ว ต่อไปนี้คือวิธีหาทางไปรอบ ๆ
+
+เมื่อคุณเปิด pgAdmin ครั้งแรก ให้ล็อกอินด้วยอีเมลและรหัสผ่านที่คุณตั้งไว้ในไฟล์ compose ด้านซ้ายแสดง **browser tree** ที่มีกลุ่ม Servers อยู่ด้านบนสุด หากต้องการเชื่อมต่อกับฐานข้อมูลของคุณ ให้คลิกขวาที่ Servers และเลือกลงทะเบียน server ใหม่ ในกล่องโต้ตอบ ให้ตั้งชื่อการเชื่อมต่อในแท็บ General จากนั้นสลับไปยังแท็บ Connection และกรอก host, port, username และ password เนื่องจาก pgAdmin รันใน container ของตัวเอง host จึงเป็นชื่อ service `postgres` แทนที่จะเป็น `localhost` ส่วน port ยังคงเป็น `5432` และ user คือ `postgres`
+
+เมื่อเชื่อมต่อแล้ว tree จะขยายออก เปิด server ของคุณ จากนั้น **Databases** จากนั้นฐานข้อมูลหนึ่ง จากนั้น **Schemas** จากนั้น schema `public` และสุดท้าย **Tables** การซ้อนกันนี้สะท้อนวิธีที่ PostgreSQL จัดระเบียบข้อมูลจริง ๆ ซึ่งบทเรียนถัดไปจะอธิบายในรายละเอียด การคลิก object ใด ๆ จะแสดงรายละเอียดของมันใน panel หลัก
+
+ตัวหลักคือ **Query Tool** ที่เปิดจาก toolbar หรือโดยการคลิกขวาที่ฐานข้อมูล มันให้ SQL editor ที่คุณพิมพ์ statement และกดปุ่มรัน ผลลัพธ์ปรากฏใน grid ด้านล่าง และข้อความเช่นจำนวน row แสดงในแท็บแยกต่างหาก หากต้องการเรียกดูเนื้อหาของ table โดยไม่ต้องเขียน SQL ให้คลิกขวาที่ table และเลือกดู row ของมัน ซึ่งจะเปิด grid เดียวกันที่เติม `SELECT` ไว้ล่วงหน้า
+
+หาก pgAdmin รู้สึกหนักเกินไป **DBeaver** เป็นทางเลือกฟรียอดนิยม — แอปพลิเคชันบนเดสก์ท็อปที่เชื่อมต่อกับ PostgreSQL และฐานข้อมูลอื่น ๆ อีกมากมายด้วยเลย์เอาต์แบบ tree-and-editor ที่คล้ายกัน แนวคิดถ่ายโอนกันได้โดยตรง เพียงเมนูเท่านั้นที่ต่างกัน
+
+## การเชื่อมต่อจาก driver แต่ละตัว
+
+ในโค้ดแอปพลิเคชันคุณเชื่อมต่อผ่าน **driver** — library ที่พูดภาษา protocol ของ PostgreSQL รายละเอียดการเชื่อมต่อเป็นชุดเดียวกับที่คุณใช้ข้างต้น เพียง syntax เท่านั้นที่เปลี่ยนไป ต่อไปนี้คือวิธีที่ driver แต่ละตัวเปิดการเชื่อมต่อ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- psql takes the connection string on the command line:
+    -- psql "postgresql://postgres:secret@localhost:5432/appdb"
+    SELECT current_database();
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    import { Pool } from 'pg';
+
+    const pool = new Pool({
+      connectionString: 'postgresql://postgres:secret@localhost:5432/appdb',
+    });
+
+    const res = await pool.query('SELECT current_database()');
+    console.log(res.rows[0]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import psycopg
+
+    conn = psycopg.connect(
+        "postgresql://postgres:secret@localhost:5432/appdb"
+    )
+    cur = conn.cursor()
+    cur.execute("SELECT current_database()")
+    print(cur.fetchone())
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    conn, err := pgx.Connect(ctx,
+        "postgresql://postgres:secret@localhost:5432/appdb")
+    if err != nil {
+        return err
+    }
+    defer conn.Close(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect("postgresql://postgres:secret@localhost:5432/appdb")
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+สังเกตว่า driver ทุกตัวรับ connection string `postgresql://user:password@host:port/database` แบบเดียวกัน เรียนรู้รูปแบบนั้นเพียงรูปแบบเดียวแล้วคุณก็เชื่อมต่อจากที่ไหนก็ได้
+
+**ใน pgAdmin:** รายละเอียดการเชื่อมต่อเดียวกันนี้อยู่ในกล่องโต้ตอบลงทะเบียน server แทนที่จะเป็น string — host, port, user, password และ database ต่างมีช่องของตัวเอง
+
+## เคล็ดลับ / จุดที่ต้องระวัง
+
+- connection string เป็นไปตามรูปแบบ `postgresql://user:password@host:port/database` แต่ละส่วนเป็น optional เมื่อมีค่า default ใช้แทน
+- จากภายใน container อื่น (เช่น pgAdmin) host คือชื่อ service ไม่ใช่ `localhost` จากเครื่องของคุณเองมันคือ `localhost`
+- ใช้ `psql` สำหรับการตรวจสอบอย่างรวดเร็วและการเขียน script, GUI อย่าง pgAdmin หรือ DBeaver สำหรับการเรียกดูและสำรวจ และ driver สำหรับสิ่งใด ๆ ที่แอปพลิเคชันของคุณทำซ้ำ ๆ
+- อย่า hard-code รหัสผ่านในโค้ดที่ commit ไป อ่าน connection string จากตัวแปร environment ในโปรเจกต์จริง
+- กลุ่ม meta-command `\d` เป็นวิธีที่เร็วที่สุดในการจำรูปทรงที่แน่นอนของ table โดยไม่ต้องออกจาก shell
+
+<Callout title="สามประตู ฐานข้อมูลเดียว">
+psql, pgAdmin และ driver ของแอปพลิเคชันคุณ ล้วนเชื่อมต่อกับ PostgreSQL server ตัวเดียวกันด้วย credential เดียวกัน เลือกประตูที่เหมาะกับงาน — shell เพื่อความเร็ว, GUI เพื่อการสำรวจ, driver สำหรับแอปของคุณ — และจงรู้ไว้ว่าฐานข้อมูลที่อยู่ข้างใต้ไม่สนใจว่าคุณเดินผ่านบานไหนเข้ามา
+</Callout>
+
+export const quizPsqlPgadmin = [
+  {
+    q: 'meta-command ของ psql ตัวใดแสดงรายการ table ในฐานข้อมูลปัจจุบัน?',
+    options: ['\\l', '\\dt', '\\c', '\\q'],
+    answer: 1,
+  },
+  {
+    q: 'รูปแบบมาตรฐานของ connection string ของ PostgreSQL คืออะไร?',
+    options: [
+      'postgresql://user:password@host:port/database',
+      'pg://database/host/user',
+      'jdbc:host,port,user',
+      'connect host=... only',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'จาก container ของ pgAdmin คุณควรใช้ชื่อ host ใดในการเข้าถึง service ฐานข้อมูล?',
+    options: ['localhost', 'ชื่อ service ซึ่งคือ postgres', '127.0.0.1', 'pgadmin'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-setup/psql-and-pgadmin" questions={quizPsqlPgadmin} />
+
+<ProgressTracker client:visible id="intro-and-setup/psql-and-pgadmin" />

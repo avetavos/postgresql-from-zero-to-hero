@@ -1,0 +1,204 @@
+---
+title: Locking and deadlocks
+description: Take explicit row locks with SELECT ... FOR UPDATE and FOR SHARE, understand lock waits, see how two transactions deadlock, and use NOWAIT and SKIP LOCKED to control waiting.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+MVCC removes the need for read locks, but writes still have to be coordinated. When two transactions want to change the same row, one must wait for the other to finish. Most of the time PostgreSQL takes the necessary **row locks** for you during an `UPDATE` or `DELETE`. Sometimes, though, you want to lock a row at the moment you read it, so that nobody else can change it before you do.
+
+## Reserving a row with FOR UPDATE
+
+`SELECT ... FOR UPDATE` reads a row and locks it as if you were about to update it. Any other transaction that tries to update, delete, or also lock that row must wait until you commit or roll back. This is the standard pattern for "read a balance, decide, then write it back" without a lost update.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    SELECT balance FROM accounts WHERE id = 1 FOR UPDATE;
+    -- the row is now locked for this transaction
+    UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT balance FROM accounts WHERE id = $1 FOR UPDATE',
+      [1],
+    );
+    await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [100, 1]);
+    await client.query('COMMIT');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("SELECT balance FROM accounts WHERE id = %s FOR UPDATE", (1,))
+        balance = cur.fetchone()[0]
+        cur.execute("UPDATE accounts SET balance = balance - %s WHERE id = %s", (100, 1))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.Begin(ctx)
+    var balance float64
+    tx.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1 FOR UPDATE", 1).Scan(&balance)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1)
+    tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    let balance: f64 = sqlx::query_scalar("SELECT balance FROM accounts WHERE id = $1 FOR UPDATE")
+        .bind(1_i64)
+        .fetch_one(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE id = $2")
+        .bind(100_f64).bind(1_i64)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The companion lock is `FOR SHARE`: it lets others read and also take `FOR SHARE`, but blocks anyone wanting `FOR UPDATE` or a write. Use it when you must guarantee a row will not change underneath you, yet you do not intend to write it yourself.
+
+## Lock waits
+
+When a transaction asks for a lock another holds, it simply waits. The waiting query appears to hang; it resumes the instant the holder commits or rolls back. A short hold is invisible to users; a long hold turns into a queue.
+
+```text
+-- session 2 issues SELECT ... FOR UPDATE on a row session 1 already locked
+-- session 2 prints nothing and blocks here until session 1 ends its transaction
+```
+
+## When waiting becomes a deadlock
+
+A **deadlock** happens when two transactions each hold a lock the other needs. Transaction A locks row 1 and then wants row 2; transaction B locked row 2 and now wants row 1. Neither can proceed, and neither will ever release first.
+
+export const deadlockCycle = `flowchart LR
+  A["Txn A holds lock on row 1"] -->|waits for row 2| B["Txn B holds lock on row 2"]
+  B -->|waits for row 1| A`;
+
+<Mermaid code={deadlockCycle} title="A deadlock cycle: each transaction waits on a lock the other holds" />
+
+PostgreSQL runs a deadlock detector. After a short timeout it notices the cycle, picks one transaction as the victim, and aborts it with an error so the other can continue. The victim sees SQLSTATE `40P01` and should retry its whole transaction.
+
+```text
+ERROR:  deadlock detected
+DETAIL:  Process 12345 waits for ShareLock on transaction 678; blocked by process 12346.
+HINT:  See server log for query details.
+```
+
+## Choosing not to wait: NOWAIT and SKIP LOCKED
+
+Sometimes waiting is the wrong behaviour. Two modifiers change it. `NOWAIT` makes the statement fail immediately instead of queuing if the row is locked. `SKIP LOCKED` quietly steps over locked rows and returns only the ones it could lock, which is the backbone of work-queue patterns where many workers each grab the next free job.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- fail at once rather than wait:
+    SELECT * FROM accounts WHERE id = 1 FOR UPDATE NOWAIT;
+
+    -- a worker grabbing the next available job, ignoring locked ones:
+    SELECT id FROM jobs WHERE status = 'pending'
+    ORDER BY id
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const { rows } = await client.query(
+      `SELECT id FROM jobs WHERE status = 'pending'
+       ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`,
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT id FROM jobs WHERE status = 'pending' "
+        "ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"
+    )
+    job = cur.fetchone()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := tx.Query(ctx,
+        `SELECT id FROM jobs WHERE status = 'pending'
+         ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let job: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE status = 'pending' \
+         ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** to observe a live lock wait, run a `BEGIN; SELECT ... FOR UPDATE` in one Query Tool tab without committing, then run the same in a second tab and watch it hang. The `pg_locks` view shows who holds what while you experiment.
+
+## Tips / gotchas
+
+- Lock rows in a consistent order everywhere in your code. If every transaction touches row 1 before row 2, the cycle that causes a deadlock can never form.
+- Treat deadlock errors (`40P01`) and serialization failures (`40001`) the same way: roll back and retry the whole transaction. Both are expected under concurrency.
+- Keep the work between taking a lock and committing as short as possible. The longer you hold a lock, the longer others queue behind you.
+- `SKIP LOCKED` is ideal for queues but wrong for accounting; it deliberately ignores rows, so never use it where you must see every matching row.
+
+<Callout title="A consistent lock order prevents most deadlocks">
+Deadlocks are not caused by locking too much, but by locking in conflicting orders. Decide one global order for acquiring locks, for example always by ascending primary key, and apply it in every transaction. PostgreSQL will still detect any deadlock that slips through, but you will rarely hand it one to find.
+</Callout>
+
+export const quizLocks = [
+  {
+    q: 'What does SELECT ... FOR UPDATE do?',
+    options: [
+      'Returns rows faster by skipping the snapshot',
+      'Reads and locks the rows so others must wait to change them',
+      'Permanently prevents the rows from being deleted',
+      'Commits the current transaction',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does PostgreSQL resolve a deadlock between two transactions?',
+    options: [
+      'It waits forever until one client disconnects',
+      'It detects the cycle and aborts one transaction as the victim',
+      'It merges the two transactions',
+      'It lowers the isolation level automatically',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which practice most reliably prevents deadlocks?',
+    options: [
+      'Using SELECT without FOR UPDATE',
+      'Acquiring locks in a consistent order across all transactions',
+      'Setting the isolation level to Read Committed',
+      'Running VACUUM more often',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactions-and-concurrency/locking-and-deadlocks" questions={quizLocks} />
+
+<ProgressTracker client:visible id="transactions-and-concurrency/locking-and-deadlocks" />

@@ -1,0 +1,184 @@
+---
+title: Specialized index
+description: เหนือกว่า B-tree — GIN สำหรับ jsonb อาร์เรย์และ full-text, GiST สำหรับข้อมูลเชิงเรขาคณิตและช่วง, BRIN สำหรับตารางขนาดมหึมาแบบ append-only, Hash สำหรับ equality รวมถึง partial, expression และ covering INCLUDE index
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+B-tree จัดการ equality, range, การ sort และ prefix match ได้ — ซึ่งครอบคลุม query ส่วนใหญ่ แต่ข้อมูลบางอย่างและรูปแบบ query บางอย่างต้องการโครงสร้างที่ต่างออกไป PostgreSQL มาพร้อมกับ index access method อื่น ๆ อีกหลายแบบ และ *variant* ของ index อีกสองสามแบบที่ใช้ได้กับ access method ใด ๆ บทเรียนนี้คือการพาทัวร์ว่าควรหยิบแต่ละแบบมาใช้เมื่อใด
+
+## GIN — สำหรับค่าที่บรรจุหลายรายการ
+
+**Generalized Inverted Index** (GIN) สร้างขึ้นสำหรับคอลัมน์ที่แต่ละแถวบรรจุรายการที่ค้นหาได้ *หลายรายการ*: สมาชิกของอาร์เรย์, คีย์และค่าของเอกสาร `jsonb` หรือคำ ("lexemes") ของเอกสาร full-text GIN จับคู่แต่ละรายการเข้ากับแถวที่บรรจุมันอยู่ ดังนั้น "หาทุกแถวที่บรรจุรายการนี้" จึงรวดเร็ว
+
+```sql
+-- speed up containment queries on a jsonb column
+CREATE INDEX books_meta_gin ON books USING gin (metadata);
+
+-- now this uses the index
+SELECT * FROM books WHERE metadata @> '{"genre": "fiction"}';
+```
+
+ใช้ GIN เมื่อคุณ query *ภายใน* ค่าที่เป็นองค์ประกอบ (composite values): การหา containment ของ `jsonb` ด้วย `@>`, ความเป็นสมาชิกของอาร์เรย์ หรือ full-text search ด้วย `tsvector`
+
+## GiST — สำหรับข้อมูลเชิงเรขาคณิต ช่วง และเพื่อนบ้านที่ใกล้ที่สุด
+
+**Generalized Search Tree** (GiST) รองรับ query ที่ B-tree แสดงออกไม่ได้: รูปทรงสองรูปซ้อนทับกันไหม, จุดหนึ่งตกอยู่ในกล่องหรือไม่, แถวใดอยู่ใกล้ตำแหน่งนี้ที่สุด, ช่วงสองช่วงตัดกันไหม มันเป็นกระดูกสันหลังของชนิดข้อมูลเชิงเรขาคณิต, ชนิดข้อมูลแบบช่วง (range) และส่วนขยาย PostGIS
+
+```sql
+-- index a range column for overlap queries
+CREATE INDEX rooms_booking_gist ON rooms USING gist (booked_during);
+
+-- find bookings that overlap a given period
+SELECT * FROM rooms WHERE booked_during && '[2026-06-01,2026-06-08)'::tsrange;
+```
+
+ใช้ GiST สำหรับข้อมูลเชิงพื้นที่ (spatial), การซ้อนทับของช่วงด้วย `&&` และการเรียงลำดับตามเพื่อนบ้านที่ใกล้ที่สุด
+
+## BRIN — สำหรับตารางขนาดมหึมาที่เรียงลำดับโดยธรรมชาติ
+
+**Block Range Index** (BRIN) มีขนาดเล็กจิ๋ว แทนที่จะทำ index ให้ทุกแถว มันเก็บค่าต่ำสุดและสูงสุดของแต่ละช่วงบล็อก (block range) ของตาราง มันทำงานได้สวยงามเมื่อค่าของคอลัมน์เรียงตัวสอดคล้องกับลำดับการจัดเก็บทางกายภาพ — โดยทั่วไปคือคอลัมน์ timestamp บน log แบบ append-only หรือตาราง events ที่แถวใหม่จะมี timestamp มากกว่าเสมอ
+
+```sql
+-- a tiny index for a massive, time-ordered table
+CREATE INDEX events_created_brin ON events USING brin (created_at);
+
+SELECT * FROM events WHERE created_at >= '2026-06-01';
+```
+
+BRIN ใช้พื้นที่เพียงเศษเสี้ยวของ B-tree การแลกเปลี่ยนคือ: มันช่วยได้ก็ต่อเมื่อข้อมูลถูกเรียงลำดับทางกายภาพตามคอลัมน์ที่ทำ index บนค่าที่กระจายแบบสุ่ม มันแทบจะไร้ประโยชน์
+
+## Hash — สำหรับ equality เท่านั้น
+
+index แบบ **Hash** รองรับการดำเนินการเพียงอย่างเดียวเท่านั้น: equality (`=`) มันทำ range หรือการ sort ไม่ได้ การค้นหาแบบ equality ของ B-tree สมัยใหม่นั้นดีมากจน Hash แทบจะไม่ใช่ผู้ชนะที่ชัดเจน แต่มันสามารถใช้พื้นที่น้อยกว่าได้เล็กน้อยสำหรับคอลัมน์ขนาดใหญ่ที่ใช้ equality อย่างเดียว
+
+```sql
+CREATE INDEX books_isbn_hash ON books USING hash (isbn);
+
+SELECT * FROM books WHERE isbn = '978-0-00-000000-0';
+```
+
+จงหยิบ Hash มาใช้ก็ต่อเมื่อคุณได้วัดผลแล้วว่ามันชนะ B-tree สำหรับงานที่ใช้ equality ล้วน ๆ มิเช่นนั้นให้ใช้ B-tree เป็นค่าเริ่มต้น
+
+## partial index — ทำ index เฉพาะแถวที่คุณ query
+
+**partial** index ครอบคลุมเฉพาะแถวที่ตรงกับเงื่อนไข `WHERE` หาก query ของคุณมองเฉพาะชุดย่อยเล็ก ๆ อยู่เสมอ การทำ index ให้เฉพาะชุดย่อยนั้นจะทำให้ index เล็กลงและดูแลรักษาได้เร็วขึ้น
+
+```sql
+-- only books still in print get indexed
+CREATE INDEX books_active_idx ON books (title) WHERE in_print = true;
+```
+
+index นี้เหมาะที่สุดเมื่อ query ส่วนใหญ่มี `WHERE in_print = true`; planner สามารถใช้มันได้ และแถวที่ `in_print` เป็น false จะไม่เข้าไปอยู่ใน index เลย
+
+## expression index — ทำ index ให้ค่าที่คำนวณได้
+
+หากคุณกรองด้วย *ผลลัพธ์* ของ expression อยู่บ่อย ๆ จงทำ index ให้ expression นั้นโดยตรง index ธรรมดาบน `email` ไม่ช่วยการค้นหาแบบไม่สนตัวพิมพ์เล็กใหญ่ แต่ index บน `lower(email)` ช่วยได้
+
+```sql
+CREATE INDEX authors_lower_name_idx ON authors (lower(name));
+
+-- now this is an index scan, not a seq scan
+SELECT * FROM authors WHERE lower(name) = 'ada lovelace';
+```
+
+expression ใน query ต้องตรงกับ expression ที่ทำ index ไว้ทุกประการ planner จึงจะใช้มันได้
+
+## covering index — ตอบ query จาก index เพียงอย่างเดียว
+
+**covering** index ใช้ `INCLUDE` เพื่อเก็บคอลัมน์เพิ่มเติมไว้ใน index ที่ไม่ได้เป็นส่วนหนึ่งของคีย์การค้นหา หากทุกคอลัมน์ที่ query ต้องการอยู่ใน index PostgreSQL ก็สามารถตอบจาก index ได้โดยไม่ต้องแตะตารางเลย — เรียกว่า *index-only scan*
+
+```sql
+-- search on author_id, but also carry title and published along
+CREATE INDEX books_author_cover_idx
+  ON books (author_id) INCLUDE (title, published);
+
+-- can be answered from the index alone
+SELECT title, published FROM books WHERE author_id = 4;
+```
+
+คอลัมน์ใน `INCLUDE` ถูกเก็บไว้เฉพาะที่ใบ (leaves) ของ index เท่านั้น ไม่ได้ถูกใช้ในการเรียงลำดับ ดังนั้นมันจึงเพิ่มข้อมูลโดยไม่เปลี่ยนพฤติกรรมการค้นหา
+
+## การสร้าง index เหล่านี้จาก driver
+
+คำสั่ง `CREATE INDEX` ก็เป็นเพียง SQL ดังนั้น driver ใด ๆ ก็ส่งมันออกไปด้วยวิธีเดียวกัน นี่คือตัวอย่าง GIN ใน driver ต่าง ๆ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE INDEX books_meta_gin ON books USING gin (metadata);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE INDEX books_meta_gin ON books USING gin (metadata)');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE INDEX books_meta_gin ON books USING gin (metadata)")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE INDEX books_meta_gin ON books USING gin (metadata)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE INDEX books_meta_gin ON books USING gin (metadata)")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน pgAdmin:** กล่องโต้ตอบ Create Index มี dropdown ของ Access Method ที่แสดงรายการ btree, hash, gin, gist, brin และอื่น ๆ และมีตัวเลือกสำหรับคอลัมน์ `INCLUDE` ดังนั้นคุณจึงสร้าง index เหล่านี้ได้โดยไม่ต้องเขียน SQL ด้วยมือ
+
+## Tips / gotchas
+
+- จงจับคู่ access method ให้เข้ากับรูปแบบของ query: GIN สำหรับ "บรรจุรายการ", GiST สำหรับ "ซ้อนทับหรืออยู่ใกล้", BRIN สำหรับ "ขนาดมหึมาและเรียงลำดับทางกายภาพ", Hash สำหรับ "equality เท่านั้น" และ B-tree สำหรับทุกอย่างที่เหลือ
+- BRIN มีประสิทธิภาพก็ต่อเมื่อลำดับแถวทางกายภาพเป็นไปตามคอลัมน์ที่ทำ index บนข้อมูลที่ไม่เรียงลำดับ มันจะไม่ช่วยอะไร
+- partial และ expression index เป็น variant ที่คุณนำมาใช้ทับ access method ใด ๆ ได้ ไม่ใช่ชนิดที่แยกต่างหาก จงผสมพวกมัน: partial GIN index นั้นใช้ได้อย่างสมบูรณ์
+- สำหรับ covering index จงระบุคอลัมน์ค้นหาตามปกติ และวางคอลัมน์ที่เพียงแค่คืนค่ากลับไว้ใน `INCLUDE` เพื่อไม่ให้มันไปบวม (bloat) ในส่วนของ index ที่ใช้สำหรับการค้นหา
+
+<Callout title="เฉพาะทาง ไม่ใช่แปลกประหลาด">
+index ส่วนใหญ่ของคุณจะเป็น B-tree ธรรมดา แต่เมื่อคุณเก็บ `jsonb`, ค้นหาอาร์เรย์หรือ full text, ทำงานกับเรขาคณิตหรือช่วง หรือมีตาราง time-series พันล้านแถว access method เฉพาะทางจะเปลี่ยน query ที่เป็นไปไม่ได้ให้กลายเป็นเรื่องง่าย การรู้ว่าพวกมันมีอยู่คือคุณค่าครึ่งหนึ่ง จงหยิบมันมาใช้เมื่อ B-tree แสดงคำถามนั้นออกมาไม่ได้
+</Callout>
+
+export const quizSpecialized = [
+  {
+    q: 'index ชนิดใดถูกออกแบบมาสำหรับ containment ของ jsonb, ความเป็นสมาชิกของอาร์เรย์ และ full-text search?',
+    options: ['BRIN', 'GIN', 'Hash', 'B-tree'],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อใดที่ BRIN index เหมาะสม?',
+    options: [
+      'สำหรับค่าที่กระจายแบบสุ่ม',
+      'สำหรับตารางขนาดมหึมาที่ลำดับทางกายภาพเป็นไปตามคอลัมน์ที่ทำ index เช่น log ที่มี timestamp',
+      'สำหรับการบังคับความเป็น unique',
+      'สำหรับการค้นหาข้อความแบบไม่สนตัวพิมพ์เล็กใหญ่',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'INCLUDE เพิ่มอะไรให้กับ index?',
+    options: [
+      'คีย์การค้นหาเพิ่มเติมที่เปลี่ยนการเรียงลำดับ',
+      'คอลัมน์ที่ไม่ใช่คีย์ซึ่งถูกเก็บไว้ใน index เพื่อให้ตอบ query ได้โดยไม่ต้องอ่านตาราง',
+      'ข้อบังคับความเป็น unique',
+      'access method ตัวที่สอง',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/specialized-indexes" questions={quizSpecialized} />
+
+<ProgressTracker client:visible id="indexes-and-performance/specialized-indexes" />

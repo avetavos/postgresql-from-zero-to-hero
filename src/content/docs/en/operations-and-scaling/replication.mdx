@@ -1,0 +1,178 @@
+---
+title: Replication
+description: Copy a primary server's changes to read replicas with streaming replication, choose between synchronous and asynchronous modes, understand failover, and use logical replication to copy selected tables.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A single server is a single point of failure. If its disk dies or the machine reboots, your database is gone until someone fixes it. **Replication** removes that risk by keeping one or more copies of the data on other machines, continuously updated as the original changes. Those copies also let you spread read traffic across several servers.
+
+PostgreSQL offers two flavours: **streaming replication**, which copies the entire cluster byte-for-byte, and **logical replication**, which copies selected tables row-by-row. They solve different problems, so this lesson covers both.
+
+## The write-ahead log is the source of truth
+
+Before a change touches a table file, PostgreSQL records it in the **write-ahead log** (WAL): an append-only stream of every modification. This log exists for crash recovery, but it is also exactly what a replica needs. If a second server replays the same WAL records in the same order, it ends up with an identical copy of the data.
+
+Streaming replication does precisely that. The primary ships its WAL to each replica over a network connection, and each replica continuously applies those records to stay in step.
+
+export const streamDiagram = `flowchart LR
+  C[Client write] --> P[(Primary)]
+  P -->|append| W[Write-ahead log]
+  W -->|stream WAL| R1[(Replica 1 - read only)]
+  W -->|stream WAL| R2[(Replica 2 - read only)]
+  RC1[Read query] --> R1
+  RC2[Read query] --> R2`;
+
+<Mermaid code={streamDiagram} title="Primary ships its WAL to read replicas" />
+
+A replica is read-only: it applies the primary's changes and answers `SELECT` queries, but it rejects writes. This makes it perfect for offloading reporting, analytics, or any read-heavy workload from the primary.
+
+## Setting up streaming replication
+
+Streaming replication is configured on the primary with a handful of settings and an account the replicas use to connect. The exact files live in your data directory.
+
+```conf
+# postgresql.conf on the primary
+wal_level = replica
+max_wal_senders = 10
+wal_keep_size = 512MB
+```
+
+```conf
+# pg_hba.conf on the primary: allow the replication account to connect
+host    replication    replicator    10.0.0.0/24    scram-sha-256
+```
+
+A replica is created by taking a base backup of the primary and then pointing it at the primary to stream ongoing WAL. The tool that copies the starting state is `pg_basebackup`.
+
+```bash
+# Run on the new replica machine to clone the primary and start streaming
+pg_basebackup \
+  --host=primary.internal \
+  --username=replicator \
+  --pgdata=/var/lib/postgresql/data \
+  --wal-method=stream \
+  --write-recovery-conf
+```
+
+The `--write-recovery-conf` flag records the connection details so the replica knows to start streaming as soon as it boots. From then on it tracks the primary automatically.
+
+## Synchronous versus asynchronous
+
+The big choice in streaming replication is *when* the primary considers a write done.
+
+| Mode         | Primary confirms a commit when...                 | Trade-off                                  |
+|--------------|---------------------------------------------------|--------------------------------------------|
+| Asynchronous | The WAL is written locally                        | Fast, but a replica may lag behind         |
+| Synchronous  | At least one replica has also stored the WAL      | No data loss on failover, but slower writes|
+
+Asynchronous is the default and the common choice. Writes never wait for the network, so the primary stays fast — but a replica can fall a little behind, called **replication lag**. A query sent to a lagging replica may not yet see the most recent commit.
+
+Synchronous replication makes the primary wait for a replica to acknowledge each commit. You enable it by naming the replicas that must confirm.
+
+```conf
+# postgresql.conf on the primary
+synchronous_standby_names = 'replica1'
+```
+
+This guarantees that an acknowledged commit survives the loss of the primary, at the cost of higher write latency.
+
+## Failover
+
+If the primary dies, one replica must be **promoted** to become the new primary so writes can resume. Promotion tells a replica to stop following and start accepting writes.
+
+```bash
+# On the chosen replica, promote it to primary
+pg_ctl promote --pgdata=/var/lib/postgresql/data
+```
+
+In production this is usually handled by an automated tool that detects the failure and promotes a standby for you, but the underlying action is the same single step.
+
+## Logical replication: copy selected tables
+
+Streaming replication copies the *whole cluster* and only flows one way to read-only standbys. Sometimes you want less than that — just a few tables — or you want to copy between different PostgreSQL major versions, for example during an upgrade. That is **logical replication**, built on a publish-and-subscribe model.
+
+On the source you create a **publication** naming the tables to share. On the destination you create a **subscription** that connects and copies them.
+
+```sql
+-- On the source database: publish two tables
+CREATE PUBLICATION analytics_pub FOR TABLE orders, customers;
+```
+
+```sql
+-- On the destination database: subscribe to that publication
+CREATE SUBSCRIPTION analytics_sub
+  CONNECTION 'host=source.internal dbname=shop user=repl password=secret'
+  PUBLICATION analytics_pub;
+```
+
+The subscriber first copies the existing rows, then keeps applying new changes as they happen. Unlike a streaming replica, a logical subscriber is a fully writable database — it can have its own extra tables and indexes — which is what makes it useful for selective copies and for staging version upgrades.
+
+export const logicalDiagram = `flowchart LR
+  S[(Source database)] -->|CREATE PUBLICATION| Pub[Publication: orders, customers]
+  Pub -->|row changes| Sub[Subscription]
+  Sub --> D[(Destination database - writable)]`;
+
+<Mermaid code={logicalDiagram} title="Logical replication publishes selected tables to a subscriber" />
+
+Logical replication also needs `wal_level` raised, this time to `logical`, on the source.
+
+```conf
+# postgresql.conf on the source
+wal_level = logical
+```
+
+## Tips / gotchas
+
+- Replicas are for reads and availability. Send every write to the primary; a replica will reject it.
+- With asynchronous replication, expect some lag. If a read must reflect a write that just happened, send it to the primary or wait for the replica to catch up.
+- Synchronous replication trades latency for safety. Use it when losing even one acknowledged transaction is unacceptable, not as a blanket default.
+- Streaming replication copies the entire cluster and matches versions; logical replication copies chosen tables and can cross major versions, which is why it shines for upgrades.
+- Logical replication needs a replica identity — usually a primary key — on every published table so the subscriber can match rows for updates and deletes.
+
+<Callout title="One log, two uses">
+The write-ahead log was invented so PostgreSQL could recover after a crash by replaying recent changes. Replication reuses that same log: a replica is simply another server replaying the primary's WAL, forever and over the network. Understanding the WAL is understanding replication.
+</Callout>
+
+export const quizReplication = [
+  {
+    q: 'What does a streaming replica do with the WAL it receives from the primary?',
+    options: [
+      'It stores it as a backup but never reads it',
+      'It replays the records to keep an identical, read-only copy of the data',
+      'It converts it into logical row changes',
+      'It sends it back to the primary for confirmation',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the main trade-off of synchronous replication compared with asynchronous?',
+    options: [
+      'It loses more data but is faster',
+      'It is slower to commit but guarantees an acknowledged write survives the loss of the primary',
+      'It only works across major versions',
+      'It removes the need for a primary',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When would you choose logical replication over streaming replication?',
+    options: [
+      'When you need an exact byte-for-byte copy of the whole cluster',
+      'When you want to copy only selected tables or replicate across different major versions',
+      'When you want the fastest possible writes',
+      'When you never need to read from the copy',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="operations-and-scaling/replication" questions={quizReplication} />
+
+<ProgressTracker client:visible id="operations-and-scaling/replication" />

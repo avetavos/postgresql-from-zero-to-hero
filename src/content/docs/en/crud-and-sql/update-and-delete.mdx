@@ -1,0 +1,284 @@
+---
+title: Updating and deleting
+description: Change rows with UPDATE and remove them with DELETE — always with a WHERE clause, why a missing WHERE is dangerous, and using RETURNING to confirm.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The last two CRUD verbs change existing data. `UPDATE` sets new column values on rows that match a condition, and `DELETE` removes matching rows. Both lean heavily on the `WHERE` clause you learned for `SELECT` — and both become destructive mistakes if you forget it.
+
+We continue with the `authors` and `books` tables.
+
+## Updating columns
+
+`UPDATE` names the table, lists `SET column = value` pairs, and uses `WHERE` to pick the rows. Without `WHERE`, every row is changed.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    UPDATE books
+    SET copies_sold = copies_sold + 500
+    WHERE id = 1;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'UPDATE books SET copies_sold = copies_sold + $1 WHERE id = $2',
+      [500, 1],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "UPDATE books SET copies_sold = copies_sold + %s WHERE id = %s",
+        (500, 1),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx,
+        "UPDATE books SET copies_sold = copies_sold + $1 WHERE id = $2",
+        500, 1)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("UPDATE books SET copies_sold = copies_sold + $1 WHERE id = $2")
+        .bind(500_i32)
+        .bind(1_i64)
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The new value can reference the old one, as `copies_sold + 500` shows. You can set several columns at once by separating the assignments with commas.
+
+**In pgAdmin:** run this in the Query Tool; the message panel reports `UPDATE 1`, the count of rows changed.
+
+## Confirming a change with RETURNING
+
+Just like `INSERT`, both `UPDATE` and `DELETE` accept `RETURNING`. This is the cleanest way to see exactly which rows changed and what their new values are.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    UPDATE books
+    SET published = 2005
+    WHERE title = 'The Glass Orchard'
+    RETURNING id, title, published;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published',
+      [2005, 'The Glass Orchard'],
+    );
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "UPDATE books SET published = %s WHERE title = %s RETURNING id, title, published",
+        (2005, "The Glass Orchard"),
+    )
+    changed = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published",
+        2005, "The Glass Orchard")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published",
+    )
+    .bind(2005_i32)
+    .bind("The Glass Orchard")
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ id |       title       | published
+----+-------------------+-----------
+  1 | The Glass Orchard |      2005
+(1 row)
+```
+
+## Deleting rows
+
+`DELETE FROM` removes rows that match the `WHERE` clause. Like `UPDATE`, you can add `RETURNING` to see what was removed.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    DELETE FROM books
+    WHERE copies_sold = 0
+    RETURNING id, title;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'DELETE FROM books WHERE copies_sold = $1 RETURNING id, title',
+      [0],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "DELETE FROM books WHERE copies_sold = %s RETURNING id, title",
+        (0,),
+    )
+    removed = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "DELETE FROM books WHERE copies_sold = $1 RETURNING id, title",
+        0)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("DELETE FROM books WHERE copies_sold = $1 RETURNING id, title")
+        .bind(0_i32)
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ id |     title
+----+----------------
+  3 | Quiet Harbors
+(1 row)
+```
+
+## The danger of a missing WHERE
+
+`UPDATE` and `DELETE` apply to every row that matches the condition — and if there is no condition, every row matches. Running `DELETE FROM books;` empties the entire table, and `UPDATE books SET copies_sold = 0;` zeroes every record. There is no undo button.
+
+A safe habit is to run the same `WHERE` as a `SELECT` first, confirm the row count, then switch the verb. Wrapping risky changes in a transaction gives you an escape hatch.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    DELETE FROM books WHERE author_id = 4;
+    -- inspect the result, then decide:
+    ROLLBACK;  -- or COMMIT; to keep the change
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM books WHERE author_id = $1', [4]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("DELETE FROM books WHERE author_id = %s", (4,))
+    # commits if the block succeeds, rolls back on exception
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    if _, err := tx.Exec(ctx, "DELETE FROM books WHERE author_id = $1", 4); err != nil {
+        tx.Rollback(ctx)
+        return err
+    }
+    err = tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM books WHERE author_id = $1")
+        .bind(4_i64)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Inside a transaction, nothing is permanent until you `COMMIT`; a `ROLLBACK` throws the changes away. Transactions get a full lesson of their own later in the course.
+
+## Tips / gotchas
+
+- Always include a `WHERE` clause on `UPDATE` and `DELETE` unless you genuinely intend to touch every row. A forgotten `WHERE` rewrites or empties the whole table.
+- Preview destructive statements by running the matching `SELECT count(*) ... WHERE ...` first to confirm how many rows you are about to affect.
+- Wrap risky or multi-step changes in a transaction so you can `ROLLBACK` if the result is wrong.
+- Use `RETURNING` to verify exactly which rows changed instead of trusting the row count alone.
+- A `DELETE` may fail if other tables reference the row through a foreign key; you will revisit this in the joins and relationships module.
+
+<Callout title="WHERE is not optional in practice">
+The single most common production accident with SQL is an `UPDATE` or `DELETE` that ran without its `WHERE` clause. Build the muscle memory: type the `WHERE` first, the values second. When in doubt, do it inside a transaction you can roll back.
+</Callout>
+
+export const quizUpdateDelete = [
+  {
+    q: 'What happens if you run UPDATE books SET copies_sold = 0; with no WHERE clause?',
+    options: [
+      'Only the first row is updated',
+      'Every row in the table is set to 0',
+      'PostgreSQL refuses to run it',
+      'Nothing changes until you commit',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which clause lets an UPDATE or DELETE report exactly which rows it changed?',
+    options: ['SET', 'RETURNING', 'WHERE', 'LIMIT'],
+    answer: 1,
+  },
+  {
+    q: 'How can you make a risky DELETE reversible while you check the result?',
+    options: [
+      'Run it twice',
+      'Wrap it in a transaction and ROLLBACK if wrong',
+      'Add ORDER BY',
+      'Use DELETE ALL instead',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/update-and-delete" questions={quizUpdateDelete} />
+
+<ProgressTracker client:visible id="crud-and-sql/update-and-delete" />

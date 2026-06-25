@@ -1,0 +1,295 @@
+---
+title: Storing JSON with JSONB
+description: Use the jsonb type to store flexible documents, reach inside them with operators like ->, ->>, #>, @>, and ?, update them with jsonb_set, and index containment queries with GIN.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Sometimes a row needs to hold data whose shape is not fixed in advance: a product whose attributes differ by category, an event payload from a third party, or user preferences that grow over time. PostgreSQL lets a single column store a whole JSON document with the `jsonb` type, and then query inside it as if its keys were columns.
+
+For this lesson we use a table of products where each row carries a flexible `attributes` document.
+
+## Creating a JSONB column
+
+The `jsonb` type stores JSON in a decomposed binary form. Compared with the plain `json` type, it strips insignificant whitespace, removes duplicate keys, does not preserve key order, and — crucially — can be indexed.
+
+```sql
+CREATE TABLE products (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name       text NOT NULL,
+  attributes jsonb NOT NULL DEFAULT '{}'
+);
+```
+
+## Storing a document
+
+Inserting a row is ordinary `INSERT`; the document is just a JSON string that PostgreSQL parses into `jsonb`. From a driver you pass the JSON as a parameter rather than building strings by hand.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO products (name, attributes) VALUES
+      ('Trail Runner', '{"color": "teal", "sizes": [8, 9, 10], "waterproof": true}'),
+      ('City Loafer',  '{"color": "brown", "sizes": [9, 10, 11], "leather": "suede"}');
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'INSERT INTO products (name, attributes) VALUES ($1, $2)',
+      ['Trail Runner', { color: 'teal', sizes: [8, 9, 10], waterproof: true }],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import json
+
+    cur.execute(
+        "INSERT INTO products (name, attributes) VALUES (%s, %s)",
+        ("Trail Runner", json.dumps({"color": "teal", "sizes": [8, 9, 10], "waterproof": True})),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    attrs := map[string]any{"color": "teal", "sizes": []int{8, 9, 10}, "waterproof": true}
+    _, err := conn.Exec(ctx,
+        "INSERT INTO products (name, attributes) VALUES ($1, $2)",
+        "Trail Runner", attrs)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let attrs = serde_json::json!({ "color": "teal", "sizes": [8, 9, 10], "waterproof": true });
+    sqlx::query("INSERT INTO products (name, attributes) VALUES ($1, $2)")
+        .bind("Trail Runner")
+        .bind(attrs)
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** the `attributes` cell shows the JSON document; double-click it to open a larger editor view of the value.
+
+## Reaching inside a document
+
+A handful of operators pull values out of a `jsonb` value. The two you reach for most are `->` and `->>`.
+
+| Operator | Returns                          | Example                          |
+|----------|----------------------------------|----------------------------------|
+| `->`     | A `jsonb` value (object or array)| `attributes -> 'sizes'`          |
+| `->>`    | The value as `text`              | `attributes ->> 'color'`         |
+| `#>`     | A `jsonb` value at a path        | `attributes #> '{sizes,0}'`      |
+| `#>>`    | Text at a path                   | `attributes #>> '{sizes,0}'`     |
+
+The difference between `->` and `->>` matters: `->` keeps the result as `jsonb` (good for chaining further into nested data), while `->>` gives you plain `text` you can compare with strings or cast to a number.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name,
+           attributes ->> 'color'        AS color,
+           attributes -> 'sizes'         AS sizes,
+           attributes #>> '{sizes, 0}'   AS smallest_size
+    FROM products;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      `SELECT name,
+              attributes ->> 'color'      AS color,
+              attributes -> 'sizes'       AS sizes,
+              attributes #>> '{sizes, 0}' AS smallest_size
+       FROM products`,
+    );
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        """
+        SELECT name,
+               attributes ->> 'color'      AS color,
+               attributes -> 'sizes'       AS sizes,
+               attributes #>> '{sizes, 0}' AS smallest_size
+        FROM products
+        """
+    )
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+        SELECT name,
+               attributes ->> 'color'      AS color,
+               attributes -> 'sizes'       AS sizes,
+               attributes #>> '{sizes, 0}' AS smallest_size
+        FROM products`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT name, \
+                attributes ->> 'color'      AS color, \
+                attributes -> 'sizes'       AS sizes, \
+                attributes #>> '{sizes, 0}' AS smallest_size \
+         FROM products",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+     name     | color |   sizes    | smallest_size
+--------------+-------+------------+---------------
+ Trail Runner | teal  | [8, 9, 10] | 8
+ City Loafer  | brown | [9, 10, 11]| 9
+(2 rows)
+```
+
+## Filtering with containment and key tests
+
+Two operators are built for searching. The containment operator `@>` asks whether the left document contains the right one, and the existence operator `?` asks whether a top-level key is present.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- products whose document contains color = teal
+    SELECT name FROM products
+    WHERE attributes @> '{"color": "teal"}';
+
+    -- products that have a top-level "leather" key
+    SELECT name FROM products
+    WHERE attributes ? 'leather';
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const teal = await pool.query(
+      "SELECT name FROM products WHERE attributes @> $1",
+      [{ color: 'teal' }],
+    );
+    const leather = await pool.query(
+      "SELECT name FROM products WHERE attributes ? 'leather'",
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT name FROM products WHERE attributes @> %s",
+        (json.dumps({"color": "teal"}),),
+    )
+    teal = cur.fetchall()
+    cur.execute("SELECT name FROM products WHERE attributes ? 'leather'")
+    leather = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "SELECT name FROM products WHERE attributes @> $1",
+        map[string]any{"color": "teal"})
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let teal = sqlx::query("SELECT name FROM products WHERE attributes @> $1")
+        .bind(serde_json::json!({ "color": "teal" }))
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+     name
+--------------
+ Trail Runner
+(1 row)
+```
+
+## Updating part of a document
+
+To change one field without rewriting the whole document, use `jsonb_set`. It takes the column, a path as a text array, and the new value as `jsonb`.
+
+```sql
+UPDATE products
+SET attributes = jsonb_set(attributes, '{color}', '"midnight"')
+WHERE name = 'Trail Runner'
+RETURNING name, attributes ->> 'color' AS color;
+```
+
+```text
+     name     |  color
+--------------+----------
+ Trail Runner | midnight
+(1 row)
+```
+
+To add a brand-new field you can also use the concatenation operator: `attributes || '{"on_sale": true}'` merges the right document into the left.
+
+## Indexing for containment queries
+
+Without an index, a `@>` query scans every row and tests each document. A **GIN** index changes that: it indexes the keys and values inside the `jsonb`, so containment and key-existence lookups become fast.
+
+```sql
+CREATE INDEX idx_products_attributes ON products USING gin (attributes);
+```
+
+```text
+CREATE INDEX
+```
+
+After this, queries using `@>`, `?`, `?|`, and `?&` can use the index. If you only ever query one specific path, an expression index on that path can be smaller and faster than indexing the whole document.
+
+## Tips / gotchas
+
+- Prefer `jsonb` over `json` for almost everything. The `json` type stores the exact text you sent (preserving whitespace and order) but cannot be indexed and re-parses on every access.
+- Use `jsonb` for genuinely variable data, not as a way to dodge schema design. If a field is always present and always the same type, a real column gives you type checking, defaults, and constraints.
+- Add a GIN index only when you actually query inside the document. Indexing data you only ever read back whole is wasted space and write overhead.
+- Remember `->` returns `jsonb` and `->>` returns `text`. Comparing `attributes -> 'color' = 'teal'` fails because the left side is `jsonb`; use `->>` for text comparisons.
+
+<Callout title="Document store inside your relational database">
+A `jsonb` column lets one table mix rigid, well-typed columns with a flexible document field. That hybrid is often all the schema flexibility an application needs — no separate document database required. Just keep the truly stable parts in real columns where Postgres can enforce them.
+</Callout>
+
+export const quizJsonb = [
+  {
+    q: 'What is the key practical advantage of jsonb over the plain json type?',
+    options: [
+      'It preserves whitespace and key order',
+      'It can be indexed and is stored in a decomposed binary form',
+      'It allows duplicate keys',
+      'It is the only type that accepts arrays',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which operator tests whether a jsonb document contains a given key/value pair?',
+    options: ['->>', '#>', '@>', '||'],
+    answer: 2,
+  },
+  {
+    q: 'Which index type makes jsonb containment queries fast?',
+    options: ['B-tree', 'GIN', 'Hash', 'BRIN'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="advanced-postgres/jsonb" questions={quizJsonb} />
+
+<ProgressTracker client:visible id="advanced-postgres/jsonb" />

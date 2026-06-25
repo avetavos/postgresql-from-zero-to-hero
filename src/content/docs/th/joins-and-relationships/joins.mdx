@@ -1,0 +1,274 @@
+---
+title: Join
+description: รวมแถวจากสองตารางด้วย INNER JOIN แล้วเก็บแถวที่ไม่มีคู่ที่ตรงกันด้วย LEFT, RIGHT, และ FULL OUTER JOIN — ว่าด้วยสิ่งที่ ON clause จับคู่และความหมายของ NULL ใน outer join
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+join รับสองตารางมาแล้วจับคู่แถวของมันตามกฎที่คุณเขียนใน `ON` clause เพราะหนังสือเก็บ `id` ของผู้เขียนไว้ คุณจึงสั่งให้ PostgreSQL เดินตามการเชื่อมโยงนั้นและผลิตแถวที่บรรจุคอลัมน์จากทั้งสองตารางพร้อมกันได้ ทางเลือกเดียวที่คุณต้องตัดสินใจจริง ๆ คือจะทำอย่างไรกับแถวที่ไม่มีคู่ที่ตรงกันในอีกฝั่ง — และนั่นแหละคือสิ่งที่แยกประเภทของ join ออกจากกัน
+
+เรายังคงใช้ตาราง `authors`, `books`, และ `sales` ต่อไป
+
+## INNER JOIN: เฉพาะแถวที่ตรงกัน
+
+`INNER JOIN` คืนแถวที่รวมกันหนึ่งแถวสำหรับทุกคู่ที่เงื่อนไข `ON` เป็นจริง แถวฝั่งใดก็ตามที่ไม่เจอคู่จะถูกทิ้งไปเฉย ๆ นี่คือ join ที่คุณหยิบมาใช้บ่อยที่สุด
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT b.title, a.name AS author
+    FROM books AS b
+    INNER JOIN authors AS a ON a.id = b.author_id
+    ORDER BY b.title;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT b.title, a.name AS author
+      FROM books AS b
+      INNER JOIN authors AS a ON a.id = b.author_id
+      ORDER BY b.title
+    `);
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT b.title, a.name AS author
+        FROM books AS b
+        INNER JOIN authors AS a ON a.id = b.author_id
+        ORDER BY b.title
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT b.title, a.name AS author
+      FROM books AS b
+      INNER JOIN authors AS a ON a.id = b.author_id
+      ORDER BY b.title`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT b.title, a.name AS author
+         FROM books AS b
+         INNER JOIN authors AS a ON a.id = b.author_id
+         ORDER BY b.title",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+      title       |    author
+------------------+---------------
+ Quiet Harbors    | Mara Linde
+ The Glass Orchard| Mara Linde
+ Tidal Notes      | Owen Pryce
+(3 rows)
+```
+
+ผู้เขียนที่ไม่มีหนังสือ หรือหนังสือที่ `author_id` ไม่ตรงกับผู้เขียนคนใดเลย จะไม่มีวันปรากฏในผลลัพธ์นี้
+
+## LEFT JOIN: เก็บทุกแถวทางฝั่งซ้าย
+
+`LEFT OUTER JOIN` (คีย์เวิร์ด `OUTER` ใส่หรือไม่ก็ได้) เก็บทุกแถวจากตารางฝั่งซ้ายไว้แม้จะไม่มีคู่ที่ตรงกันในฝั่งขวา คอลัมน์ฝั่งขวาจะถูกเติมด้วย `NULL` สำหรับแถวที่ไม่มีคู่เหล่านั้น นี่คือวิธีที่คุณจะแสดงรายชื่อผู้เขียนและดูว่าใครยังไม่มีหนังสือเลย
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT a.name AS author, b.title
+    FROM authors AS a
+    LEFT JOIN books AS b ON b.author_id = a.id
+    ORDER BY a.name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT a.name AS author, b.title
+      FROM authors AS a
+      LEFT JOIN books AS b ON b.author_id = a.id
+      ORDER BY a.name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT a.name AS author, b.title
+        FROM authors AS a
+        LEFT JOIN books AS b ON b.author_id = a.id
+        ORDER BY a.name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT a.name AS author, b.title
+      FROM authors AS a
+      LEFT JOIN books AS b ON b.author_id = a.id
+      ORDER BY a.name`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT a.name AS author, b.title
+         FROM authors AS a
+         LEFT JOIN books AS b ON b.author_id = a.id
+         ORDER BY a.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    author     |       title
+---------------+-------------------
+ Mara Linde    | Quiet Harbors
+ Mara Linde    | The Glass Orchard
+ Owen Pryce    | Tidal Notes
+ Sela Vance    |
+(4 rows)
+```
+
+Sela Vance ยังไม่ได้เขียนหนังสือเลย แถวของเธอจึงยังอยู่รอดโดยมี `title` เป็น `NULL` เจ้า `NULL` นั้นคือ join ที่กำลังบอกว่า "แถวฝั่งซ้ายมีอยู่ แต่ไม่มีอะไรตรงกันในฝั่งขวา"
+
+## RIGHT และ FULL OUTER JOIN
+
+`RIGHT JOIN` เป็นภาพสะท้อนกลับด้าน: มันเก็บทุกแถวจากตารางฝั่งขวาและเติมฝั่งซ้ายด้วย `NULL` ตรงที่ไม่มีคู่ที่ตรงกัน `A RIGHT JOIN B` ผลิตแถวออกมาเหมือนกับ `B LEFT JOIN A` หลายคนจึงเขียนแต่ `LEFT JOIN` เท่านั้น ส่วน `FULL OUTER JOIN` เก็บแถวที่ไม่มีคู่จากทั้งสองฝั่งพร้อมกัน
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT a.name AS author, b.title
+    FROM authors AS a
+    FULL OUTER JOIN books AS b ON b.author_id = a.id
+    ORDER BY a.name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT a.name AS author, b.title
+      FROM authors AS a
+      FULL OUTER JOIN books AS b ON b.author_id = a.id
+      ORDER BY a.name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT a.name AS author, b.title
+        FROM authors AS a
+        FULL OUTER JOIN books AS b ON b.author_id = a.id
+        ORDER BY a.name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT a.name AS author, b.title
+      FROM authors AS a
+      FULL OUTER JOIN books AS b ON b.author_id = a.id
+      ORDER BY a.name`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT a.name AS author, b.title
+         FROM authors AS a
+         FULL OUTER JOIN books AS b ON b.author_id = a.id
+         ORDER BY a.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    author     |       title
+---------------+-------------------
+ Mara Linde    | Quiet Harbors
+ Mara Linde    | The Glass Orchard
+ Owen Pryce    | Tidal Notes
+ Sela Vance    |
+               | Unlinked Draft
+(5 rows)
+```
+
+แถวสุดท้ายคือหนังสือที่ `author_id` ไม่ได้ชี้ไปยังผู้เขียนคนใด ฝั่งผู้เขียนจึงเป็น `NULL` full join เป็น join เพียงแบบเดียวที่จะเผยมันออกมาควบคู่ไปกับผู้เขียนที่ไม่มีหนังสือ
+
+## แต่ละ join เก็บแถวไหนบ้าง
+
+join ทั้งสี่แบบต่างกันแค่วิธีจัดการกับแถวที่ไม่ผ่านการทดสอบ `ON` เท่านั้น ภาพนี้สรุปว่าใครรอด
+
+export const joinDiagram = `flowchart TD
+  M[Matching rows on both sides] --> INNER[INNER JOIN keeps these only]
+  M --> LEFT[LEFT JOIN keeps these plus unmatched left rows]
+  M --> RIGHT[RIGHT JOIN keeps these plus unmatched right rows]
+  M --> FULL[FULL OUTER JOIN keeps these plus unmatched rows from both sides]`;
+
+<Mermaid code={joinDiagram} title="join แต่ละแบบเก็บอะไรไว้บ้าง" />
+
+## ทิป / จุดพลาดที่พบบ่อย
+
+- การลืม `ON` clause จะเปลี่ยน join ให้กลายเป็น cross join (`CROSS JOIN`) ที่จับคู่ทุกแถวฝั่งซ้ายกับทุกแถวฝั่งขวา ด้วยสิบแถวกับอีกสิบแถวก็ได้ผลลัพธ์ออกมาหนึ่งร้อยแถว — ซึ่งแทบไม่ใช่สิ่งที่คุณต้องการเลย
+- ตั้ง alias สั้น ๆ ให้แต่ละตาราง เช่น `a` และ `b` แล้วใส่นำหน้าทุกคอลัมน์ มันทำให้คิวรีอ่านง่ายและเลี่ยงความกำกวมเมื่อทั้งสองตารางมีคอลัมน์ชื่อเดียวกันอย่าง `id`
+- `NULL` ในผลลัพธ์ของ outer join หมายถึง "ไม่พบแถวที่ตรงกัน" ไม่ได้หมายถึง "ค่าเป็นศูนย์หรือว่างเปล่า" ทดสอบมันด้วย `IS NULL` ห้ามใช้ `= NULL` เด็ดขาด
+- การใส่ตัวกรองให้ตารางฝั่งขวาใน `WHERE` แทนที่จะเป็น `ON` อาจเปลี่ยน `LEFT JOIN` กลับให้เป็น inner join อย่างเงียบ ๆ เพราะ `NULL` ไม่ผ่านการเปรียบเทียบใน `WHERE` ส่วนใหญ่
+
+<Callout title="เลือกฝั่งที่คุณอยากเก็บไว้">
+ตัดสินใจว่าตารางไหนต้องปรากฏในผลลัพธ์เสมอ ให้วางมันไว้ก่อน แล้ว `LEFT JOIN` ตารางอีกตัวเข้ากับมัน "ผู้เขียนทุกคน พร้อมหนังสือถ้ามี" คือ `LEFT JOIN` จาก `authors` ส่วน "เฉพาะผู้เขียนที่มีหนังสือ" คือ `INNER JOIN` วลีภาษาอังกฤษมักบอกประเภทของ join ให้คุณรู้
+</Callout>
+
+export const quizJoins = [
+  {
+    q: 'join แบบใดคืนเฉพาะแถวที่มีคู่ที่ตรงกันทั้งสองฝั่ง?',
+    options: ['LEFT JOIN', 'INNER JOIN', 'FULL OUTER JOIN', 'CROSS JOIN'],
+    answer: 1,
+  },
+  {
+    q: 'ใน LEFT JOIN อะไรปรากฏในคอลัมน์ฝั่งขวาเมื่อแถวฝั่งซ้ายไม่มีคู่ที่ตรงกัน?',
+    options: ['ศูนย์', 'สตริงว่าง', 'NULL', 'แถวนั้นถูกทิ้งไป'],
+    answer: 2,
+  },
+  {
+    q: 'จะเกิดอะไรขึ้นถ้าคุณเขียน join แต่ลืม ON clause?',
+    options: [
+      'PostgreSQL คืนผลลัพธ์เป็นศูนย์แถว',
+      'มันทำตัวเหมือน cross join ที่จับคู่ทุกแถวกับทุกแถว',
+      'มันโยน syntax error ออกมาทุกครั้ง',
+      'มันเปลี่ยนเป็น INNER JOIN บน primary key อย่างเงียบ ๆ',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/joins" questions={quizJoins} />
+
+<ProgressTracker client:visible id="joins-and-relationships/joins" />

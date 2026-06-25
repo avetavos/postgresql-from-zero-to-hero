@@ -1,0 +1,172 @@
+---
+title: Partitioning
+description: Split one enormous logical table into many physical partitions with declarative PARTITION BY RANGE, LIST, and HASH, let the planner prune partitions, and learn when partitioning actually helps.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Some tables grow without limit. A table of events, log lines, or sensor readings can reach billions of rows, and at that size everything gets harder: indexes balloon, maintenance jobs run for hours, and deleting old data locks the table for ages. **Partitioning** addresses this by splitting one huge logical table into many smaller physical ones, while your queries still see a single table.
+
+PostgreSQL's **declarative partitioning** lets you define the split rule once. You write to and read from the parent table as usual, and the server routes each row to the right partition behind the scenes.
+
+## One logical table, many partitions
+
+You declare a parent table as partitioned and give it a **partition key** — the column whose value decides which partition a row belongs to. The parent holds no data itself; it is a routing layer over its child partitions.
+
+export const partDiagram = `flowchart TD
+  Parent[events - logical parent table] --> P1[events_2024_q1]
+  Parent --> P2[events_2024_q2]
+  Parent --> P3[events_2024_q3]
+  Parent --> P4[events_2024_q4]`;
+
+<Mermaid code={partDiagram} title="One logical table routed across several partitions" />
+
+There are three partitioning strategies, chosen by how the key maps to partitions.
+
+| Strategy | Rows are assigned by...                          | Good for                                  |
+|----------|--------------------------------------------------|-------------------------------------------|
+| RANGE    | A value falling in a range, such as a date range | Time-series data partitioned by month     |
+| LIST     | The key matching one of a fixed set of values    | Splitting by region, status, or tenant    |
+| HASH     | A hash of the key spread evenly across buckets   | Even distribution with no natural ranges  |
+
+## Range partitioning a time-series table
+
+The most common case is range partitioning by time. You declare the parent with `PARTITION BY RANGE`, then create one child partition per period.
+
+```sql
+-- Parent table, partitioned by the created_at timestamp
+CREATE TABLE events (
+  id          bigint GENERATED ALWAYS AS IDENTITY,
+  created_at  timestamptz NOT NULL,
+  kind        text NOT NULL,
+  payload     jsonb
+) PARTITION BY RANGE (created_at);
+
+-- One partition per quarter; the bounds are inclusive lower, exclusive upper
+CREATE TABLE events_2024_q1 PARTITION OF events
+  FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
+
+CREATE TABLE events_2024_q2 PARTITION OF events
+  FOR VALUES FROM ('2024-04-01') TO ('2024-07-01');
+```
+
+Inserting into `events` automatically lands the row in the matching partition.
+
+```sql
+-- This row routes itself into events_2024_q1
+INSERT INTO events (created_at, kind, payload)
+VALUES ('2024-02-14', 'signup', '{"plan": "pro"}');
+```
+
+A note on the partition key: it must be part of the primary key on a partitioned table, which is why the example uses `GENERATED ALWAYS AS IDENTITY` without a standalone `PRIMARY KEY` on `id` alone.
+
+## List and hash partitioning
+
+`PARTITION BY LIST` assigns rows by exact key values — handy when a natural category exists.
+
+```sql
+CREATE TABLE customers (
+  id      bigint GENERATED ALWAYS AS IDENTITY,
+  region  text NOT NULL,
+  name    text NOT NULL
+) PARTITION BY LIST (region);
+
+CREATE TABLE customers_emea PARTITION OF customers
+  FOR VALUES IN ('eu', 'me', 'africa');
+
+CREATE TABLE customers_amer PARTITION OF customers
+  FOR VALUES IN ('us', 'ca', 'latam');
+```
+
+`PARTITION BY HASH` spreads rows evenly across a fixed number of buckets when no range or list makes sense.
+
+```sql
+CREATE TABLE sessions (
+  id       bigint NOT NULL,
+  token    text NOT NULL
+) PARTITION BY HASH (id);
+
+CREATE TABLE sessions_0 PARTITION OF sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+
+CREATE TABLE sessions_1 PARTITION OF sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+```
+
+## Partition pruning
+
+The real payoff is **partition pruning**: when a query's `WHERE` clause filters on the partition key, the planner skips every partition that cannot contain matching rows and scans only the relevant ones.
+
+```sql
+-- The planner reads only events_2024_q1, not the whole table
+EXPLAIN
+SELECT count(*) FROM events
+WHERE created_at >= '2024-02-01' AND created_at < '2024-03-01';
+```
+
+The plan shows just the single quarter's partition being scanned. If you instead query without mentioning `created_at`, the planner has no way to narrow down and must scan every partition — which is slower than a well-indexed single table. Pruning is the whole point, and pruning needs the partition key in the `WHERE` clause.
+
+## When partitioning helps
+
+Partitioning is not free: more tables to manage, a routing layer on every write, and queries that ignore the key can be slower. It pays off when:
+
+- A table is genuinely huge — think hundreds of millions of rows and up.
+- Most queries filter on a single dimension you can partition by, usually time.
+- You drop old data in bulk. Detaching or dropping a whole partition is near-instant, compared with a `DELETE` that scans and locks millions of rows.
+
+A few million rows with good indexes do not need partitioning. Adding it early just buys you complexity with no benefit.
+
+## Tips / gotchas
+
+- Choose the partition key to match your dominant query pattern. If you query by date, partition by date so pruning can kick in.
+- Pruning only happens when the partition key appears in the `WHERE` clause. A query that filters on something else scans all partitions.
+- Create future partitions ahead of time, or automate it. An insert with no matching partition fails unless you have a default partition.
+- Dropping old data by detaching or dropping a whole partition is dramatically faster and lighter than a row-by-row `DELETE`.
+- Index the partitions, not just the parent. An index defined on the partitioned parent is automatically created on each partition, which is the easy way to keep them consistent.
+
+<Callout title="Same table, smaller problems">
+Partitioning does not make a table smaller — your data is just as big. It makes each *operation* smaller by ensuring queries, indexes, and bulk deletes touch only the slice they need. The skill is picking a partition key that matches how you actually query, so the planner can prune everything else away.
+</Callout>
+
+export const quizPartitioning = [
+  {
+    q: 'What decides which partition a row is stored in?',
+    options: [
+      'The order in which rows were inserted',
+      'The value of the partition key',
+      'Which connection inserted the row',
+      'The size of the row in bytes',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Partition pruning lets the planner skip partitions only when...',
+    options: [
+      'The table has fewer than four partitions',
+      'The query filters on the partition key in its WHERE clause',
+      'You disable indexes',
+      'The query uses ORDER BY',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'For which workload is partitioning most clearly worthwhile?',
+    options: [
+      'A small lookup table of a few hundred rows',
+      'A huge time-series table queried by date where old data is dropped in bulk',
+      'A table that is only ever read one row at a time by primary key',
+      'Any table, since partitioning is always faster',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="operations-and-scaling/partitioning" questions={quizPartitioning} />
+
+<ProgressTracker client:visible id="operations-and-scaling/partitioning" />

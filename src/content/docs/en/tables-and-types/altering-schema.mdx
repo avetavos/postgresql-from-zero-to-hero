@@ -1,0 +1,218 @@
+---
+title: Altering schema
+description: Evolve a live table with ALTER TABLE — add and drop columns, change types, add and drop constraints, rename, and run safe migrations without losing data.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Schemas are never finished. New features need new columns, old ones become obsolete, and rules tighten as you learn what the data really looks like. The `ALTER TABLE` statement changes the shape of an existing table in place, keeping the rows you already have. Like `CREATE TABLE`, it is DDL and is usually applied through a migration step so the change is versioned and repeatable.
+
+We will continue evolving the `products` table from earlier in the module.
+
+## Adding and dropping columns
+
+`ADD COLUMN` appends a new column to every existing row. If you give it no default, existing rows get null in the new column. `DROP COLUMN` removes a column and its data for good.
+
+```sql
+ALTER TABLE products ADD COLUMN description text;
+
+ALTER TABLE products DROP COLUMN description;
+```
+
+You can combine several changes in one statement by separating them with commas, which keeps related edits in a single, atomic step.
+
+```sql
+ALTER TABLE products
+  ADD COLUMN sku text,
+  ADD COLUMN in_stock boolean NOT NULL DEFAULT true;
+```
+
+**In pgAdmin:** after altering a table, refresh its Columns node in the browser tree to see the change, or use the table's Properties dialog to add and remove columns through a form.
+
+## Changing a column's type
+
+`ALTER COLUMN ... TYPE` converts a column to a new type. PostgreSQL can do many conversions automatically, but when the change is not obvious you supply a `USING` expression that tells it how to transform each existing value.
+
+```sql
+ALTER TABLE products
+  ALTER COLUMN sku TYPE varchar(32);
+
+ALTER TABLE products
+  ALTER COLUMN price TYPE numeric(12, 2) USING price::numeric(12, 2);
+```
+
+The conversion runs over every row, so on a large table this can take a while and hold a lock. The final lesson section covers how to keep that safe.
+
+## Adding and dropping constraints
+
+You can attach a constraint to a table after it exists, or drop one by name. Naming constraints when you create them, as the previous lesson recommended, is what makes dropping them clean.
+
+```sql
+ALTER TABLE products
+  ADD CONSTRAINT products_price_positive CHECK (price > 0);
+
+ALTER TABLE products
+  DROP CONSTRAINT products_price_positive;
+```
+
+Adding a constraint scans existing rows to confirm they all satisfy it; if any row fails, the whole statement is rejected and nothing changes.
+
+## Renaming
+
+`RENAME` changes the name of a table or a single column without touching the data. It is instant, but anything that referenced the old name — views, application queries, saved reports — must be updated too.
+
+```sql
+ALTER TABLE products RENAME COLUMN sku TO product_code;
+
+ALTER TABLE products RENAME TO catalog_items;
+```
+
+## Safe migrations: the NOT NULL trap
+
+The most common migration accident is adding a `NOT NULL` column to a table that already has rows. Those existing rows have no value for the new column, so the constraint is immediately violated and the statement fails. There are two safe paths: give the column a `DEFAULT` so every existing row is filled at once, or add the column nullable, backfill the values, then tighten it to `NOT NULL`.
+
+```sql
+-- Path 1: a default fills every existing row in one step
+ALTER TABLE products
+  ADD COLUMN currency text NOT NULL DEFAULT 'USD';
+
+-- Path 2: add nullable, backfill, then enforce
+ALTER TABLE products ADD COLUMN region text;
+UPDATE products SET region = 'global' WHERE region IS NULL;
+ALTER TABLE products ALTER COLUMN region SET NOT NULL;
+```
+
+Path two is the standard choice when there is no single sensible default, because it lets you compute each row's value before locking the column down.
+
+## Running a migration in a transaction
+
+Most `ALTER TABLE` statements in PostgreSQL are transactional, so you can wrap a multi-step migration in a transaction and have it apply all-or-nothing. If any step fails, a `ROLLBACK` leaves the table exactly as it was.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    ALTER TABLE products ADD COLUMN region text;
+    UPDATE products SET region = 'global' WHERE region IS NULL;
+    ALTER TABLE products ALTER COLUMN region SET NOT NULL;
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('ALTER TABLE products ADD COLUMN region text');
+      await client.query("UPDATE products SET region = 'global' WHERE region IS NULL");
+      await client.query('ALTER TABLE products ALTER COLUMN region SET NOT NULL');
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("ALTER TABLE products ADD COLUMN region text")
+        cur.execute("UPDATE products SET region = 'global' WHERE region IS NULL")
+        cur.execute("ALTER TABLE products ALTER COLUMN region SET NOT NULL")
+    # commits if the block succeeds, rolls back on exception
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    steps := []string{
+        "ALTER TABLE products ADD COLUMN region text",
+        "UPDATE products SET region = 'global' WHERE region IS NULL",
+        "ALTER TABLE products ALTER COLUMN region SET NOT NULL",
+    }
+    for _, s := range steps {
+        if _, err := tx.Exec(ctx, s); err != nil {
+            tx.Rollback(ctx)
+            return err
+        }
+    }
+    err = tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE products ADD COLUMN region text")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE products SET region = 'global' WHERE region IS NULL")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE products ALTER COLUMN region SET NOT NULL")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Because the three steps run inside one transaction, the table is never seen by other sessions in a half-migrated state.
+
+## Tips / gotchas
+
+- `ALTER TABLE` takes a lock on the table. Many forms take a strong lock that briefly blocks reads and writes, so on a busy production table prefer short, targeted statements and run them during quiet periods.
+- Adding a `NOT NULL` column with a constant `DEFAULT` is fast in modern PostgreSQL because it does not rewrite every row, but changing a column's type still scans and rewrites the table.
+- Wrap multi-step migrations in a transaction so a failure halfway through rolls back cleanly and never leaves the schema partly changed.
+- Adding a constraint validates every existing row. On a large table this scan can be slow; investigate adding the constraint as `NOT VALID` first and validating it separately when you need to minimize lock time.
+- `DROP COLUMN` and `DROP CONSTRAINT` are irreversible once committed. Confirm nothing depends on what you are removing, and lean on a transaction you can roll back while you check.
+
+<Callout title="Migrate forward, never blindly">
+Treat every schema change as a migration: a small, named, reversible step you can test before it touches production. Add columns with defaults or backfill them, tighten constraints only after the data is clean, and run multi-step changes in a transaction. A careful migration is invisible to users; a careless one is an outage.
+</Callout>
+
+export const quizAltering = [
+  {
+    q: 'Why does adding a NOT NULL column without a default fail on a table that already has rows?',
+    options: [
+      'NOT NULL columns are not allowed after creation',
+      'The existing rows would have no value, violating the constraint',
+      'ALTER TABLE cannot add columns',
+      'It locks the table forever',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the safe pattern when there is no single sensible default for a new NOT NULL column?',
+    options: [
+      'Drop and recreate the table',
+      'Add it nullable, backfill the values, then set NOT NULL',
+      'Disable constraints temporarily',
+      'Use a CHECK instead',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why wrap a multi-step ALTER TABLE migration in a transaction?',
+    options: [
+      'To make it run faster',
+      'So a failure rolls back cleanly and the schema is never left half-changed',
+      'To avoid taking any locks',
+      'To skip validating existing rows',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tables-and-types/altering-schema" questions={quizAltering} />
+
+<ProgressTracker client:visible id="tables-and-types/altering-schema" />

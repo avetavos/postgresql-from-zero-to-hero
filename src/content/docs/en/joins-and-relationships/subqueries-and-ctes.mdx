@@ -1,0 +1,392 @@
+---
+title: Subqueries and CTEs
+description: Nest one query inside another with scalar, IN, and EXISTS subqueries, then name intermediate steps with WITH common table expressions — plus a quick taste of WITH RECURSIVE.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A subquery is a `SELECT` written inside another statement. The inner query runs first and hands its result to the outer one, which lets you answer questions in two steps: "find the average", then "show the rows above it". A common table expression, or CTE, takes the same idea and gives the intermediate result a name with `WITH`, so a long query reads like a short story instead of a tangle of nesting.
+
+We continue with the `authors`, `books`, and `sales` tables.
+
+## Scalar subqueries
+
+A scalar subquery returns exactly one value, so you can drop it anywhere a single value is expected — including a comparison. Here we list books published after the average publication year.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT title, published
+    FROM books
+    WHERE published > (SELECT avg(published) FROM books)
+    ORDER BY published;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT title, published
+      FROM books
+      WHERE published > (SELECT avg(published) FROM books)
+      ORDER BY published
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT title, published
+        FROM books
+        WHERE published > (SELECT avg(published) FROM books)
+        ORDER BY published
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT title, published
+      FROM books
+      WHERE published > (SELECT avg(published) FROM books)
+      ORDER BY published`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT title, published
+         FROM books
+         WHERE published > (SELECT avg(published) FROM books)
+         ORDER BY published",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+      title       | published
+------------------+-----------
+ Tidal Notes      |      2011
+ The Glass Orchard|      2018
+(2 rows)
+```
+
+The inner `SELECT avg(published)` produces a single number; the outer query then compares each book against it.
+
+## IN and EXISTS subqueries
+
+When the inner query returns a list of values, `IN` checks whether a column matches any of them. `EXISTS` is subtly different: it returns true as soon as the subquery produces at least one row, which makes it natural for "does any related row exist?" questions. Here we find authors who have at least one sale recorded.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT a.name
+    FROM authors AS a
+    WHERE EXISTS (
+      SELECT 1
+      FROM books AS b
+      JOIN sales AS s ON s.book_id = b.id
+      WHERE b.author_id = a.id
+    )
+    ORDER BY a.name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT a.name
+      FROM authors AS a
+      WHERE EXISTS (
+        SELECT 1 FROM books AS b
+        JOIN sales AS s ON s.book_id = b.id
+        WHERE b.author_id = a.id
+      )
+      ORDER BY a.name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT a.name
+        FROM authors AS a
+        WHERE EXISTS (
+          SELECT 1 FROM books AS b
+          JOIN sales AS s ON s.book_id = b.id
+          WHERE b.author_id = a.id
+        )
+        ORDER BY a.name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT a.name
+      FROM authors AS a
+      WHERE EXISTS (
+        SELECT 1 FROM books AS b
+        JOIN sales AS s ON s.book_id = b.id
+        WHERE b.author_id = a.id
+      )
+      ORDER BY a.name`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT a.name
+         FROM authors AS a
+         WHERE EXISTS (
+           SELECT 1 FROM books AS b
+           JOIN sales AS s ON s.book_id = b.id
+           WHERE b.author_id = a.id
+         )
+         ORDER BY a.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    name
+------------
+ Mara Linde
+ Owen Pryce
+(2 rows)
+```
+
+This is a *correlated* subquery: the inner query refers to `a.id` from the outer query, so it is conceptually re-evaluated for each author. The `SELECT 1` is a convention — with `EXISTS` only the presence of a row matters, never the values, so we select a constant.
+
+## CTEs: naming a step with WITH
+
+A CTE defines a named, temporary result at the top of your query using `WITH`, then lets you refer to it by name below. It does not change what is computed, but it untangles complex queries. Here we first total sales per book, then join those totals back to find each book's title and rank-ready figures.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    WITH book_sales AS (
+      SELECT book_id, sum(copies) AS total
+      FROM sales
+      GROUP BY book_id
+    )
+    SELECT b.title, bs.total
+    FROM book_sales AS bs
+    JOIN books AS b ON b.id = bs.book_id
+    ORDER BY bs.total DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      WITH book_sales AS (
+        SELECT book_id, sum(copies) AS total
+        FROM sales
+        GROUP BY book_id
+      )
+      SELECT b.title, bs.total
+      FROM book_sales AS bs
+      JOIN books AS b ON b.id = bs.book_id
+      ORDER BY bs.total DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        WITH book_sales AS (
+          SELECT book_id, sum(copies) AS total
+          FROM sales
+          GROUP BY book_id
+        )
+        SELECT b.title, bs.total
+        FROM book_sales AS bs
+        JOIN books AS b ON b.id = bs.book_id
+        ORDER BY bs.total DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      WITH book_sales AS (
+        SELECT book_id, sum(copies) AS total
+        FROM sales
+        GROUP BY book_id
+      )
+      SELECT b.title, bs.total
+      FROM book_sales AS bs
+      JOIN books AS b ON b.id = bs.book_id
+      ORDER BY bs.total DESC`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "WITH book_sales AS (
+           SELECT book_id, sum(copies) AS total
+           FROM sales
+           GROUP BY book_id
+         )
+         SELECT b.title, bs.total
+         FROM book_sales AS bs
+         JOIN books AS b ON b.id = bs.book_id
+         ORDER BY bs.total DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+      title       | total
+------------------+-------
+ The Glass Orchard|  1200
+ Tidal Notes      |   450
+ Quiet Harbors    |   200
+(3 rows)
+```
+
+The `book_sales` name reads like a variable holding the per-book totals. You can define several CTEs in one `WITH`, separated by commas, and each can reference the ones before it.
+
+## A taste of WITH RECURSIVE
+
+A `WITH RECURSIVE` CTE refers to itself, which lets it walk a chain or tree — an organization chart, a category hierarchy, or here a simple sequence of numbers. You do not need this often, but it is the tool for hierarchical data.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    WITH RECURSIVE counter AS (
+      SELECT 1 AS n
+      UNION ALL
+      SELECT n + 1 FROM counter WHERE n < 5
+    )
+    SELECT n FROM counter;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      WITH RECURSIVE counter AS (
+        SELECT 1 AS n
+        UNION ALL
+        SELECT n + 1 FROM counter WHERE n < 5
+      )
+      SELECT n FROM counter
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        WITH RECURSIVE counter AS (
+          SELECT 1 AS n
+          UNION ALL
+          SELECT n + 1 FROM counter WHERE n < 5
+        )
+        SELECT n FROM counter
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      WITH RECURSIVE counter AS (
+        SELECT 1 AS n
+        UNION ALL
+        SELECT n + 1 FROM counter WHERE n < 5
+      )
+      SELECT n FROM counter`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "WITH RECURSIVE counter AS (
+           SELECT 1 AS n
+           UNION ALL
+           SELECT n + 1 FROM counter WHERE n < 5
+         )
+         SELECT n FROM counter",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ n
+---
+ 1
+ 2
+ 3
+ 4
+ 5
+(5 rows)
+```
+
+The first `SELECT` is the starting point, and the part after `UNION ALL` feeds on the rows produced so far until its `WHERE` stops adding new ones. Recursive CTEs get their own deeper treatment later in the course.
+
+## Tips / gotchas
+
+- A scalar subquery must return exactly one row and one column; if it can return more, PostgreSQL raises an error at run time.
+- CTEs let you name each step, so a query that would be three levels of nesting becomes a readable top-to-bottom sequence.
+- A *correlated* subquery references a column from the outer query and is conceptually run once per outer row; an uncorrelated one runs a single time. `EXISTS` is almost always correlated.
+- Prefer `EXISTS` over `IN` when you only care whether a match exists, especially against large tables, because `EXISTS` can stop at the first matching row.
+- Always give a `WITH RECURSIVE` query a terminating condition, or it will loop forever building rows.
+
+<Callout title="Subquery or CTE?">
+They often compute the same thing. Choose a subquery for a small, one-off expression like `(SELECT avg(...))`, and a CTE when a step is reused or when naming it makes the whole query easier to read. Readability is a real feature — your future self maintaining the query will thank you.
+</Callout>
+
+export const quizSubqueries = [
+  {
+    q: 'What must a scalar subquery used in a comparison return?',
+    options: [
+      'A list of values',
+      'Exactly one row and one column',
+      'At least one row',
+      'A boolean true or false',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does a CTE defined with WITH give you?',
+    options: [
+      'A permanent table stored on disk',
+      'A named, temporary result you can reference within the same query',
+      'An index on the underlying table',
+      'A faster query in every case',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is EXISTS a particularly good fit?',
+    options: [
+      'When you need to sum a column',
+      'When you only care whether at least one matching row exists',
+      'When you want to return columns from the inner query',
+      'When the subquery must return many columns',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/subqueries-and-ctes" questions={quizSubqueries} />
+
+<ProgressTracker client:visible id="joins-and-relationships/subqueries-and-ctes" />

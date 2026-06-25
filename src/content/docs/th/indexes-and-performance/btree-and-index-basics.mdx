@@ -1,0 +1,223 @@
+---
+title: B-tree และพื้นฐานของ index
+description: สร้าง index ด้วย CREATE INDEX ทำความเข้าใจ B-tree ที่เป็นค่าเริ่มต้น ว่ามันช่วย query แบบไหน composite index และกฎ left-prefix รวมถึง unique index
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+บทเรียนก่อนหน้านี้แสดงให้เห็น *ว่าทำไม* index ถึงช่วยได้ บทนี้จะแสดงให้เห็น *ว่าทำอย่างไร* ในการสร้างมันขึ้นมา และชนิดไหนที่คุณแทบจะต้องใช้เสมอ PostgreSQL รองรับ index หลายชนิด แต่มีอยู่ชนิดหนึ่งที่เป็นค่าเริ่มต้นและเป็นคำตอบที่ถูกต้องสำหรับกรณีส่วนใหญ่อย่างท่วมท้น นั่นคือ **B-tree**
+
+เราจะใช้ตาราง `books` จากโมดูล CRUD ต่อไป
+
+## การสร้าง index
+
+รูปแบบพื้นฐานคือระบุชื่อตารางและคอลัมน์หรือหลาย ๆ คอลัมน์ที่จะทำ index PostgreSQL จะเลือกชื่อให้คุณ หรือคุณจะตั้งชื่อเองก็ได้
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- let PostgreSQL name it
+    CREATE INDEX ON books (title);
+
+    -- or name it yourself
+    CREATE INDEX books_title_idx ON books (title);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE INDEX books_title_idx ON books (title)');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE INDEX books_title_idx ON books (title)")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE INDEX books_title_idx ON books (title)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE INDEX books_title_idx ON books (title)")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+เนื่องจากไม่ได้ระบุชนิดของ index PostgreSQL จึงสร้าง B-tree การเขียน `CREATE INDEX ... USING btree (title)` ก็ให้ผลเทียบเท่ากันทุกประการ — `USING btree` คือค่าเริ่มต้นที่ถูกใช้อย่างเงียบ ๆ
+
+**ใน pgAdmin:** ขยายตารางในแผนผัง (browser tree) คลิกขวาที่ Indexes แล้วเลือก Create กล่องโต้ตอบจะให้คุณเลือกคอลัมน์และ access method และแสดง SQL ที่ถูกสร้างขึ้นบนแท็บ SQL
+
+## B-tree ทำอะไรได้บ้าง
+
+B-tree เก็บรายการของมันไว้ในลำดับที่เรียงแล้ว ซึ่งนั่นเองที่ทำให้มันใช้งานได้หลากหลาย เพราะค่าต่าง ๆ ถูกเรียงลำดับไว้ index จึงสามารถตอบ query ใด ๆ ที่ขึ้นอยู่กับลำดับนั้นได้:
+
+| รูปแบบ query                           | ตัวอย่าง                                 | B-tree ช่วยไหม? |
+|----------------------------------------|------------------------------------------|---------------|
+| Equality                               | `WHERE title = 'Quiet Harbors'`          | ใช่           |
+| Range                                  | `WHERE published > 2000`                 | ใช่           |
+| Between                                | `WHERE published BETWEEN 1990 AND 2000`  | ใช่           |
+| Sorting                                | `ORDER BY published`                     | ใช่           |
+| Prefix match                           | `WHERE title LIKE 'The %'`               | ใช่           |
+| Leading wildcard                       | `WHERE title LIKE '%orchard'`            | ไม่           |
+
+สองแถวสุดท้ายคือประเด็นสำคัญ B-tree สามารถจัดการ `LIKE 'The %'` ได้เพราะการค้นหายึดไว้ที่จุดเริ่มต้นของค่า แต่มันช่วย `LIKE '%orchard'` ไม่ได้ เพราะ leading wildcard หมายความว่าค่าที่ตรงเงื่อนไขกระจัดกระจายอยู่ทั่วทั้งลำดับที่เรียงไว้ ไม่ได้ถูกจัดกลุ่มไว้ด้วยกัน
+
+## composite index และกฎ left-prefix
+
+index หนึ่งตัวสามารถครอบคลุมได้มากกว่าหนึ่งคอลัมน์ index แบบ **composite** (หรือ *multicolumn*) เช่นนี้จะเรียงลำดับตามคอลัมน์แรก จากนั้นจึงเรียงตามคอลัมน์ที่สองภายในแต่ละค่าของคอลัมน์แรก ไล่ไปเรื่อย ๆ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE INDEX books_author_published_idx
+      ON books (author_id, published);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'CREATE INDEX books_author_published_idx ON books (author_id, published)',
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "CREATE INDEX books_author_published_idx ON books (author_id, published)"
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx,
+        "CREATE INDEX books_author_published_idx ON books (author_id, published)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query(
+        "CREATE INDEX books_author_published_idx ON books (author_id, published)",
+    )
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ลำดับของคอลัมน์มีความสำคัญเพราะ **กฎ left-prefix**: composite index สามารถถูกใช้ได้กับ query ที่กรองด้วย *prefix นำหน้า* ของคอลัมน์ในนั้น index บน `(author_id, published)` ช่วย query เหล่านี้:
+
+```sql
+-- uses the index: filters on the leading column
+SELECT * FROM books WHERE author_id = 4;
+
+-- uses the index: filters on both columns
+SELECT * FROM books WHERE author_id = 4 AND published > 2000;
+```
+
+แต่มัน **ไม่** ช่วย query นี้อย่างมีประสิทธิภาพ เพราะ `published` ไม่ใช่คอลัมน์นำหน้า:
+
+```sql
+-- the index cannot be used as a simple lookup here
+SELECT * FROM books WHERE published > 2000;
+```
+
+ลองนึกถึงสมุดโทรศัพท์ที่เรียงตามนามสกุล แล้วจึงตามด้วยชื่อ คุณสามารถหาทุกคนที่มีนามสกุลที่กำหนด หรือหาชื่อเต็มที่เจาะจงได้ แต่คุณไม่สามารถหาทุกคนที่มีชื่อต้นที่กำหนดโดยไม่สนนามสกุลได้อย่างรวดเร็ว จงวางคอลัมน์ที่คุณกรองบ่อยที่สุดไว้ก่อน
+
+## unique index
+
+การเพิ่ม `UNIQUE` ทำให้ index บังคับด้วยว่าจะไม่มีสองแถวที่มีค่าเดียวกัน นี่เป็นทั้งโครงสร้างเพื่อประสิทธิภาพและกฎความถูกต้องของข้อมูล (data integrity)
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE UNIQUE INDEX books_isbn_idx ON books (isbn);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+หลังจากนี้ `INSERT` หรือ `UPDATE` ที่จะสร้าง `isbn` ซ้ำกันจะล้มเหลวด้วย error การละเมิดความเป็น unique การกำหนดคอลัมน์เป็น `PRIMARY KEY` หรือ `UNIQUE` ในการนิยามตารางจะสร้าง index แบบนี้ขึ้นมาโดยอัตโนมัติพอดี ซึ่งเป็นเหตุที่ทำให้การค้นหาด้วย primary key นั้นรวดเร็วอยู่แล้วโดยที่คุณไม่ต้องทำอะไรเลย
+
+คุณสามารถยืนยันว่า index เหล่านี้มีอยู่ได้ด้วย `\d books` ใน psql ซึ่งจะแสดงรายการคอลัมน์ของตามด้วย index ของตาราง
+
+```text
+Indexes:
+    "books_pkey" PRIMARY KEY, btree (id)
+    "books_author_published_idx" btree (author_id, published)
+    "books_isbn_idx" UNIQUE, btree (isbn)
+    "books_title_idx" btree (title)
+```
+
+## Tips / gotchas
+
+- B-tree คือค่าเริ่มต้นและเป็นตัวเลือกที่ถูกต้องสำหรับเกือบทุกอย่าง ทั้ง equality, range, การ sort และ prefix match จงหันไปใช้ชนิดอื่นเฉพาะเมื่อ B-tree ทำงานนั้นไม่ได้จริง ๆ เท่านั้น
+- index ทุกตัวทำให้การเขียนช้าลงและใช้พื้นที่ดิสก์ เพราะแต่ละ `INSERT`, `UPDATE` และ `DELETE` ต้องคอยดูแลมัน อย่าสร้าง index ให้ทุกคอลัมน์
+- สำหรับ composite index จงวางคอลัมน์ที่เลือกเฉพาะเจาะจงที่สุดและถูกกรองบ่อยที่สุดไว้ก่อน และอย่าลืมกฎ left-prefix เมื่อตัดสินใจเรื่องลำดับของคอลัมน์
+- composite index ที่ถูกเลือกมาอย่างดีเพียงตัวเดียวสามารถแทนที่ index คอลัมน์เดียวหลาย ๆ ตัวได้ แต่มันไม่อาจทดแทนได้เมื่อ query ของคุณกรองด้วยคอลัมน์ที่ตามหลังเพียงอย่างเดียว
+- การสร้าง index บนตารางขนาดใหญ่ที่มีงานคึกคักจะล็อกมันไม่ให้เขียนได้ จงใช้ `CREATE INDEX CONCURRENTLY` ในงาน production เพื่อหลีกเลี่ยงการบล็อก โดยแลกกับการสร้างที่ช้าลง
+
+<Callout title="ทำ index ให้กับ query ที่คุณใช้งานจริง">
+อย่าทำ index แบบคาดเดา จงดูที่ส่วน `WHERE`, `JOIN` และ `ORDER BY` ที่แอปพลิเคชันของคุณใช้งานจริง ๆ แล้วจึงเพิ่ม B-tree index ที่รองรับสิ่งเหล่านั้น index ที่ไม่ถูกใช้งานคือภาระล้วน ๆ มันสร้างต้นทุนให้คุณทุกครั้งที่เขียน และไม่ได้ให้อะไรกับคุณเลยตอนอ่าน
+</Callout>
+
+export const quizBtree = [
+  {
+    q: 'CREATE INDEX สร้าง index ชนิดใดเมื่อคุณไม่ได้ระบุชนิด?',
+    options: ['Hash', 'GIN', 'B-tree', 'BRIN'],
+    answer: 2,
+  },
+  {
+    q: 'index บน (author_id, published) สามารถรองรับ query ใดได้อย่างมีประสิทธิภาพ?',
+    options: [
+      'WHERE published > 2000',
+      'WHERE author_id = 4',
+      'WHERE title LIKE \'%orchard\'',
+      'ไม่มีข้อใดเลย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'การเพิ่ม UNIQUE ให้ index ทำอะไรเพิ่มเติมนอกเหนือจากการเร่งความเร็วการค้นหา?',
+    options: [
+      'มันบีบอัด index',
+      'มันป้องกันไม่ให้สองแถวมีค่าที่ทำ index เดียวกัน',
+      'มันทำให้การเขียนเร็วขึ้น',
+      'มันอนุญาตให้ค้นหา LIKE แบบ leading-wildcard ได้',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/btree-and-index-basics" questions={quizBtree} />
+
+<ProgressTracker client:visible id="indexes-and-performance/btree-and-index-basics" />

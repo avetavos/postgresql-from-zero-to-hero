@@ -1,0 +1,147 @@
+---
+title: Transactions & Concurrency
+description: Group statements into all-or-nothing units with transactions, then learn how PostgreSQL lets many of them run at once through isolation, MVCC, and locking.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+So far every statement you wrote ran on its own. In real applications, though, a single business action often needs several statements that must all succeed together or not at all. Moving money between two accounts is the classic case: one row goes down, another goes up, and you can never afford to apply only half of that.
+
+A **transaction** is the tool for exactly this. It groups one or more statements into a single all-or-nothing unit of work. Either every statement takes effect, or none of them do. On top of that, a busy database has many transactions running at the same time, which is what we mean by **concurrency**. This module is about both: how to define units of work, and how PostgreSQL keeps them from corrupting each other's data.
+
+## The four guarantees: ACID
+
+A transaction in PostgreSQL gives you four guarantees, remembered by the acronym **ACID**.
+
+| Letter | Property    | What it promises                                                        |
+|--------|-------------|-------------------------------------------------------------------------|
+| A      | Atomicity   | All statements commit together or roll back together; never half-done   |
+| C      | Consistency | The database moves from one valid state to another, honouring constraints |
+| I      | Isolation   | Concurrent transactions do not see each other's unfinished work         |
+| D      | Durability  | Once committed, the change survives a crash or power loss               |
+
+Atomicity is the part you feel most directly when you type `COMMIT` or `ROLLBACK`. Isolation is the part that gets interesting once more than one client is connected, and it is where most of this module's depth lies.
+
+## How the pieces fit together
+
+The next four lessons build on each other. You start a transaction, you choose how isolated it should be, and underneath both of those PostgreSQL uses two mechanisms to make concurrency safe: keeping multiple versions of each row, and taking locks when it must.
+
+export const moduleMap = `flowchart TD
+  A[Transaction: BEGIN to COMMIT] --> B[Isolation level: how much it sees]
+  B --> C[MVCC: each transaction reads a snapshot]
+  B --> D[Locking: serialize conflicting writes]
+  C --> E[Safe concurrency for many clients]
+  D --> E`;
+
+<Mermaid code={moduleMap} title="From a single transaction to safe concurrency" />
+
+## What this module covers
+
+- **Transaction basics** — `BEGIN`, `COMMIT`, `ROLLBACK`, atomicity, and `SAVEPOINT` for partial rollbacks, demonstrated with an account transfer.
+- **Isolation levels** — Read Committed, Repeatable Read, and Serializable, and the read anomalies each one prevents.
+- **MVCC** — Multi-Version Concurrency Control, where writers do not block readers and readers do not block writers because each transaction reads a consistent snapshot.
+- **Locking and deadlocks** — explicit row locks with `SELECT ... FOR UPDATE`, why two transactions can deadlock, and how PostgreSQL breaks the tie.
+
+## A first look
+
+You will meet these commands properly in the next lesson, but here is the shape of a transaction so the rest of the module reads naturally.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+    UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [100, 1]);
+      await client.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [100, 2]);
+      await client.query('COMMIT');
+    } finally {
+      client.release();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("UPDATE accounts SET balance = balance - %s WHERE id = %s", (100, 1))
+        cur.execute("UPDATE accounts SET balance = balance + %s WHERE id = %s", (100, 2))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.Begin(ctx)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", 100, 2)
+    tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE id = $2")
+        .bind(100_i64).bind(1_i64).execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts SET balance = balance + $1 WHERE id = $2")
+        .bind(100_i64).bind(2_i64).execute(&mut *tx).await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** the Query Tool runs each statement in its own auto-committed transaction by default. To group statements, type `BEGIN;` yourself at the top and `COMMIT;` at the end, then run the whole block at once.
+
+## Tips / gotchas
+
+- A connection that is not inside an explicit transaction runs each statement in its own implicit transaction, committed immediately. This is called auto-commit.
+- Isolation is a spectrum, not a switch. Higher levels prevent more anomalies but make conflicts more likely to abort.
+- PostgreSQL never asks readers to wait for writers for ordinary `SELECT` queries; that is the headline benefit of MVCC.
+- Deadlocks are a normal possibility in any concurrent system, not a bug; well-written applications expect them and retry.
+
+<Callout title="The mental model for the module">
+Hold two ideas at once. A transaction is *your* boundary — you decide when work begins and ends. Concurrency control is *PostgreSQL's* job — it decides how your transaction coexists with everyone else's. The rest of this module shows where those two responsibilities meet.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'What does the "A" in ACID guarantee about a transaction?',
+    options: [
+      'It always runs faster than separate statements',
+      'All of its statements commit together or none do',
+      'It can never be rolled back once started',
+      'It locks the entire database while running',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does "concurrency" mean in the context of a database?',
+    options: [
+      'Running statements in alphabetical order',
+      'Many transactions executing at the same time',
+      'Storing data in more than one table',
+      'Committing only on weekends',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which ACID property describes that concurrent transactions do not see each other unfinished work?',
+    options: ['Atomicity', 'Consistency', 'Isolation', 'Durability'],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="transactions-and-concurrency/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="transactions-and-concurrency/index" />

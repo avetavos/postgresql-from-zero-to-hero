@@ -1,0 +1,205 @@
+---
+title: Functions และ triggers
+description: เขียน PL/pgSQL function เล็ก ๆ ที่คืนค่าด้วย CREATE FUNCTION ... LANGUAGE plpgsql แล้วต่อ trigger เพื่อให้มันรันโดยอัตโนมัติ — เพื่อให้ updated_at เป็นปัจจุบันหรือเพื่อ audit ทุกการ insert
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+จนถึงตอนนี้ตรรกะทุกชิ้นอยู่ในแอปพลิเคชันของคุณ PostgreSQL ก็รันตรรกะเองได้เช่นกัน คือ **function** เป็นบล็อกของโค้ดที่มีชื่อและนำกลับมาใช้ซ้ำได้ซึ่งถูกเก็บไว้ในฐานข้อมูล และ **trigger** เป็นกฎที่จุดชนวนให้ function ทำงานโดยอัตโนมัติทุกครั้งที่แถวเปลี่ยนแปลง เมื่อรวมกันแล้วมันทำให้คุณบังคับใช้พฤติกรรมในที่เดียวได้ ไม่ว่าแอปพลิเคชันหรือคนใดจะมาแตะตารางนั้น
+
+เราทำงานกับตาราง `products` ที่ติดตามว่าแต่ละแถวถูกเปลี่ยนครั้งล่าสุดเมื่อใด
+
+```sql
+CREATE TABLE products (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name       text NOT NULL,
+  price      numeric(10, 2) NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+## PL/pgSQL function เล็ก ๆ
+
+`CREATE FUNCTION` กับ `LANGUAGE plpgsql` นิยาม function ในภาษาเชิงกระบวนการ (procedural language) ของ PostgreSQL PL/pgSQL เพิ่มตัวแปร เงื่อนไข และลูปบนตัว SQL นี่คือ function ที่มุ่งเฉพาะเรื่องซึ่งคืนค่า: มันใช้ส่วนลดเป็นเปอร์เซ็นต์กับราคา
+
+```sql
+CREATE FUNCTION apply_discount(price numeric, percent numeric)
+RETURNS numeric
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF percent < 0 OR percent > 100 THEN
+    RAISE EXCEPTION 'percent must be between 0 and 100, got %', percent;
+  END IF;
+  RETURN round(price - (price * percent / 100), 2);
+END;
+$$;
+```
+
+```text
+CREATE FUNCTION
+```
+
+ตัว `$$` คือ dollar quoting — มันคั่นเนื้อหา (body) ของ function เพื่อให้คุณไม่ต้อง escape เครื่องหมายคำพูดข้างใน เรียก function เหมือนฟังก์ชันในตัวใด ๆ:
+
+```sql
+SELECT name, price, apply_discount(price, 15) AS sale_price
+FROM products;
+```
+
+```text
+    name     | price  | sale_price
+-------------+--------+------------
+ Trail Runner| 120.00 |     102.00
+ City Loafer |  95.00 |      80.75
+(2 rows)
+```
+
+## trigger function
+
+trigger ต้องการ function ที่คืนชนิดพิเศษ `trigger` ภายในมัน record โดยปริยาย `NEW` ถือแถวที่กำลังถูก insert หรือ update และ `OLD` ถือเวอร์ชันก่อนหน้าเมื่อเป็นการ update function นี้ประทับเวลาปัจจุบันลงบน `updated_at` ก่อนที่แถวจะถูกเขียน
+
+```sql
+CREATE FUNCTION set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+```
+
+```text
+CREATE FUNCTION
+```
+
+trigger แบบ `BEFORE` ต้อง `RETURN NEW` — แถวที่มันคืนคือแถวที่ถูกเก็บจริง ๆ ดังนั้นนี่คือวิธีที่ trigger แก้ไขข้อมูลขาเข้าได้
+
+## การต่อ trigger
+
+`CREATE TRIGGER` เชื่อม function เข้ากับตารางและเหตุการณ์ ตัวนี้จุดชนวน `BEFORE UPDATE` สำหรับแต่ละแถวที่ได้รับผลกระทบ
+
+```sql
+CREATE TRIGGER trg_set_updated_at
+BEFORE UPDATE ON products
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+```
+
+```text
+CREATE TRIGGER
+```
+
+ตอนนี้การ update ใด ๆ จะรีเฟรช timestamp โดยที่แอปพลิเคชันไม่ต้องคอยจำ:
+
+```sql
+UPDATE products SET price = 110.00 WHERE name = 'Trail Runner'
+RETURNING name, price, updated_at;
+```
+
+```text
+    name     | price  |          updated_at
+-------------+--------+-------------------------------
+ Trail Runner| 110.00 | 2026-06-25 09:14:02.118+00
+(1 row)
+```
+
+## การ audit ตอน insert
+
+แพตเทิร์นเดียวกันใช้ audit การเปลี่ยนแปลงได้ สร้างตาราง audit, trigger function ที่บันทึกแถวใหม่ และ trigger แบบ `AFTER INSERT` เพื่อให้ log ถูกเขียนเมื่อการ insert สำเร็จ
+
+```sql
+CREATE TABLE product_audit (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  product_id bigint NOT NULL,
+  action     text NOT NULL,
+  logged_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE FUNCTION audit_product_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  INSERT INTO product_audit (product_id, action)
+  VALUES (NEW.id, 'INSERT');
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_audit_product_insert
+AFTER INSERT ON products
+FOR EACH ROW
+EXECUTE FUNCTION audit_product_insert();
+```
+
+```text
+CREATE TRIGGER
+```
+
+trigger แบบ `AFTER` ทำงานเมื่อแถวถูกเขียนอย่างปลอดภัยแล้ว ซึ่งเหมาะกับการ logging — คุณต้องการรายการ audit เฉพาะสำหรับการ insert ที่เกิดขึ้นจริงเท่านั้น
+
+## trigger จุดชนวนอย่างไร
+
+ลำดับเป็นแบบเดียวกันเสมอ: คำสั่งเขียนมาถึง PostgreSQL ตรวจพบว่ามันตรงกับเหตุการณ์ของ trigger, trigger function ทำงาน และการดำเนินการเดินหน้าต่อด้วยสิ่งที่ function คืนกลับมา
+
+export const triggerDiagram = `flowchart TD
+  W[INSERT or UPDATE on products] --> E{Matches a trigger event}
+  E -->|BEFORE| B[set_updated_at runs, returns NEW]
+  B --> S[(Row written with new timestamp)]
+  E -->|AFTER| A[audit_product_insert runs]
+  S --> A
+  A --> L[(Row recorded in product_audit)]`;
+
+<Mermaid code={triggerDiagram} title="การเขียนจุดชนวน trigger ที่ตรงกัน ซึ่งรัน function" />
+
+## Tips / ข้อควรระวัง
+
+- trigger ซ่อนตรรกะจากใครก็ตามที่อ่านโค้ดแอปพลิเคชัน จงบันทึกเอกสารของทุก trigger — ว่ามันทำอะไรและอยู่บนตารางใด — เพื่อให้ timestamp ที่อัปเดต "อย่างมหัศจรรย์" ไม่เป็นปริศนา
+- ทำให้ function เล็กและมีหน้าที่เดียว function ที่ตรวจสอบ input นั้นทดสอบและนำกลับมาใช้ซ้ำได้ง่าย ส่วน function ที่ทำห้าอย่างไม่เกี่ยวกันจะกลายเป็นความยุ่งเหยิงแบบเดียวกับที่คุณพยายามหลีกเลี่ยง
+- เลือก `BEFORE` เพื่อแก้ไขหรือตรวจสอบแถวขาเข้า (คุณเปลี่ยน `NEW` ได้) และ `AFTER` สำหรับผลข้างเคียงอย่างการ logging ที่ควรเกิดขึ้นเฉพาะเมื่อการเขียนสำเร็จ
+- trigger function แบบ row-level ของ `BEFORE` ต้อง `RETURN NEW` เพื่อปล่อยให้แถวผ่าน การคืน `NULL` จะยกเลิกการดำเนินการสำหรับแถวนั้นอย่างเงียบ ๆ ซึ่งบางครั้งมีประโยชน์แต่ก็ชวนประหลาดใจ
+
+<Callout title="ตรรกะที่รันเสมอ">
+จุดแข็งของ trigger คือมันถูกข้ามไม่ได้ — ทุกการ insert หรือ update จะผ่านมัน ไม่ว่า client ใดเป็นคนเปลี่ยนแปลง จุดแข็งเดียวกันนั้นก็เป็นอันตรายของมัน คือพฤติกรรมไปอยู่ในที่ที่โค้ดแอปพลิเคชันไม่เคยกล่าวถึง จงใช้ trigger สำหรับ invariant ที่คุณต้องการบังคับใช้ทุกที่อย่างแท้จริง และจงเขียนมันบันทึกไว้
+</Callout>
+
+export const quizFunctions = [
+  {
+    q: 'function ต้องคืนค่าชนิดใดเพื่อให้ trigger ใช้ได้?',
+    options: ['void', 'trigger', 'record', 'boolean'],
+    answer: 1,
+  },
+  {
+    q: 'ภายใน trigger function แบบ BEFORE record NEW ถืออะไรไว้?',
+    options: [
+      'เฉพาะเวอร์ชันก่อนหน้าของแถวเท่านั้น',
+      'แถวที่กำลังถูก insert หรือ update',
+      'จำนวนแถวที่ได้รับผลกระทบ',
+      'นิยามของ trigger',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม trigger แบบ AFTER จึงเป็นทางเลือกที่ถูกต้องสำหรับการเขียน audit log?',
+    options: [
+      'มันรันก่อนการตรวจสอบจึงเร็วกว่า',
+      'มันแก้ไขแถวขาเข้าได้',
+      'มันรันเฉพาะเมื่อการเขียนสำเร็จแล้วเท่านั้น',
+      'มันยกเลิกการดำเนินการโดยค่าตั้งต้น',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="advanced-postgres/functions-and-triggers" questions={quizFunctions} />
+
+<ProgressTracker client:visible id="advanced-postgres/functions-and-triggers" />

@@ -1,0 +1,295 @@
+---
+title: เก็บ JSON ด้วย JSONB
+description: ใช้ชนิดข้อมูล jsonb เพื่อเก็บเอกสารที่ยืดหยุ่น เข้าถึงข้างในด้วย operator อย่าง ->, ->>, #>, @> และ ? แก้ไขด้วย jsonb_set และทำ index ให้ containment query ด้วย GIN
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+บางครั้งแถวหนึ่งต้องเก็บข้อมูลที่รูปร่างไม่ได้ถูกกำหนดไว้ล่วงหน้า เช่น สินค้าที่มีคุณสมบัติต่างกันไปตามหมวดหมู่ payload ของ event จากบุคคลที่สาม หรือการตั้งค่าของผู้ใช้ที่งอกเพิ่มขึ้นตามเวลา PostgreSQL ให้คอลัมน์เดียวเก็บเอกสาร JSON ทั้งก้อนด้วยชนิดข้อมูล `jsonb` แล้ว query เข้าไปข้างในได้ราวกับว่า key ของมันคือคอลัมน์
+
+ในบทนี้เราใช้ตารางของ products ที่แต่ละแถวพกเอกสาร `attributes` ที่ยืดหยุ่นไว้
+
+## การสร้างคอลัมน์ JSONB
+
+ชนิดข้อมูล `jsonb` เก็บ JSON ในรูปแบบไบนารีที่ถูกแยกย่อยแล้ว (decomposed binary form) เมื่อเทียบกับชนิด `json` ธรรมดา มันจะตัด whitespace ที่ไม่สำคัญทิ้ง ลบ key ซ้ำ ไม่รักษาลำดับของ key และ — ที่สำคัญที่สุด — สามารถทำ index ได้
+
+```sql
+CREATE TABLE products (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name       text NOT NULL,
+  attributes jsonb NOT NULL DEFAULT '{}'
+);
+```
+
+## การเก็บเอกสาร
+
+การ insert แถวก็เป็น `INSERT` ธรรมดา เอกสารเป็นเพียง JSON string ที่ PostgreSQL parse ให้เป็น `jsonb` จากฝั่ง driver คุณส่ง JSON เป็นพารามิเตอร์แทนการต่อ string ด้วยมือ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO products (name, attributes) VALUES
+      ('Trail Runner', '{"color": "teal", "sizes": [8, 9, 10], "waterproof": true}'),
+      ('City Loafer',  '{"color": "brown", "sizes": [9, 10, 11], "leather": "suede"}');
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'INSERT INTO products (name, attributes) VALUES ($1, $2)',
+      ['Trail Runner', { color: 'teal', sizes: [8, 9, 10], waterproof: true }],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import json
+
+    cur.execute(
+        "INSERT INTO products (name, attributes) VALUES (%s, %s)",
+        ("Trail Runner", json.dumps({"color": "teal", "sizes": [8, 9, 10], "waterproof": True})),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    attrs := map[string]any{"color": "teal", "sizes": []int{8, 9, 10}, "waterproof": true}
+    _, err := conn.Exec(ctx,
+        "INSERT INTO products (name, attributes) VALUES ($1, $2)",
+        "Trail Runner", attrs)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let attrs = serde_json::json!({ "color": "teal", "sizes": [8, 9, 10], "waterproof": true });
+    sqlx::query("INSERT INTO products (name, attributes) VALUES ($1, $2)")
+        .bind("Trail Runner")
+        .bind(attrs)
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน pgAdmin:** เซลล์ `attributes` จะแสดงเอกสาร JSON ดับเบิลคลิกที่มันเพื่อเปิดมุมมอง editor ที่ใหญ่ขึ้นสำหรับดูค่า
+
+## การเข้าถึงข้างในเอกสาร
+
+operator ไม่กี่ตัวช่วยดึงค่าออกมาจากค่า `jsonb` สองตัวที่คุณจะหยิบใช้บ่อยที่สุดคือ `->` และ `->>`
+
+| Operator | คืนค่า                          | ตัวอย่าง                          |
+|----------|----------------------------------|----------------------------------|
+| `->`     | ค่า `jsonb` (object หรือ array)| `attributes -> 'sizes'`          |
+| `->>`    | ค่าในรูปแบบ `text`              | `attributes ->> 'color'`         |
+| `#>`     | ค่า `jsonb` ที่ path หนึ่ง        | `attributes #> '{sizes,0}'`      |
+| `#>>`    | text ที่ path หนึ่ง                   | `attributes #>> '{sizes,0}'`     |
+
+ความต่างระหว่าง `->` กับ `->>` นั้นสำคัญ คือ `->` คงผลลัพธ์ไว้เป็น `jsonb` (ดีสำหรับการต่อลงไปในข้อมูลที่ซ้อนลึกขึ้น) ส่วน `->>` ให้ `text` ธรรมดาที่คุณนำไปเทียบกับ string หรือ cast เป็นตัวเลขได้
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT name,
+           attributes ->> 'color'        AS color,
+           attributes -> 'sizes'         AS sizes,
+           attributes #>> '{sizes, 0}'   AS smallest_size
+    FROM products;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      `SELECT name,
+              attributes ->> 'color'      AS color,
+              attributes -> 'sizes'       AS sizes,
+              attributes #>> '{sizes, 0}' AS smallest_size
+       FROM products`,
+    );
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        """
+        SELECT name,
+               attributes ->> 'color'      AS color,
+               attributes -> 'sizes'       AS sizes,
+               attributes #>> '{sizes, 0}' AS smallest_size
+        FROM products
+        """
+    )
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+        SELECT name,
+               attributes ->> 'color'      AS color,
+               attributes -> 'sizes'       AS sizes,
+               attributes #>> '{sizes, 0}' AS smallest_size
+        FROM products`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT name, \
+                attributes ->> 'color'      AS color, \
+                attributes -> 'sizes'       AS sizes, \
+                attributes #>> '{sizes, 0}' AS smallest_size \
+         FROM products",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+     name     | color |   sizes    | smallest_size
+--------------+-------+------------+---------------
+ Trail Runner | teal  | [8, 9, 10] | 8
+ City Loafer  | brown | [9, 10, 11]| 9
+(2 rows)
+```
+
+## การกรองด้วย containment และการทดสอบ key
+
+operator สองตัวถูกสร้างมาเพื่อการค้นหา containment operator `@>` ถามว่าเอกสารฝั่งซ้ายมีเอกสารฝั่งขวาอยู่หรือไม่ ส่วน existence operator `?` ถามว่า key ระดับบนสุดมีอยู่หรือไม่
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- products whose document contains color = teal
+    SELECT name FROM products
+    WHERE attributes @> '{"color": "teal"}';
+
+    -- products that have a top-level "leather" key
+    SELECT name FROM products
+    WHERE attributes ? 'leather';
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const teal = await pool.query(
+      "SELECT name FROM products WHERE attributes @> $1",
+      [{ color: 'teal' }],
+    );
+    const leather = await pool.query(
+      "SELECT name FROM products WHERE attributes ? 'leather'",
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT name FROM products WHERE attributes @> %s",
+        (json.dumps({"color": "teal"}),),
+    )
+    teal = cur.fetchall()
+    cur.execute("SELECT name FROM products WHERE attributes ? 'leather'")
+    leather = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "SELECT name FROM products WHERE attributes @> $1",
+        map[string]any{"color": "teal"})
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let teal = sqlx::query("SELECT name FROM products WHERE attributes @> $1")
+        .bind(serde_json::json!({ "color": "teal" }))
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+     name
+--------------
+ Trail Runner
+(1 row)
+```
+
+## การแก้ไขบางส่วนของเอกสาร
+
+หากต้องการเปลี่ยนฟิลด์เดียวโดยไม่ต้องเขียนเอกสารทั้งก้อนใหม่ ให้ใช้ `jsonb_set` มันรับคอลัมน์ path ในรูปแบบ text array และค่าใหม่ในรูปแบบ `jsonb`
+
+```sql
+UPDATE products
+SET attributes = jsonb_set(attributes, '{color}', '"midnight"')
+WHERE name = 'Trail Runner'
+RETURNING name, attributes ->> 'color' AS color;
+```
+
+```text
+     name     |  color
+--------------+----------
+ Trail Runner | midnight
+(1 row)
+```
+
+หากต้องการเพิ่มฟิลด์ใหม่เอี่ยม คุณยังใช้ concatenation operator ได้ด้วย: `attributes || '{"on_sale": true}'` จะรวมเอกสารฝั่งขวาเข้าไปในฝั่งซ้าย
+
+## การทำ index ให้ containment query
+
+หากไม่มี index คำสั่ง `@>` จะ scan ทุกแถวและทดสอบแต่ละเอกสาร **GIN** index เปลี่ยนเรื่องนั้น มันทำ index ให้กับ key และ value ภายใน `jsonb` ดังนั้นการค้นหาแบบ containment และ key-existence จึงเร็วขึ้น
+
+```sql
+CREATE INDEX idx_products_attributes ON products USING gin (attributes);
+```
+
+```text
+CREATE INDEX
+```
+
+หลังจากนี้ query ที่ใช้ `@>`, `?`, `?|` และ `?&` จะใช้ index ได้ ถ้าคุณ query เฉพาะ path ใดเพียง path เดียวเสมอ expression index บน path นั้นจะเล็กกว่าและเร็วกว่าการทำ index ให้ทั้งเอกสาร
+
+## Tips / ข้อควรระวัง
+
+- เลือก `jsonb` แทน `json` สำหรับเกือบทุกกรณี ชนิด `json` เก็บข้อความเป๊ะ ๆ ตามที่คุณส่งมา (รักษา whitespace และลำดับ) แต่ทำ index ไม่ได้ และ parse ใหม่ทุกครั้งที่เข้าถึง
+- ใช้ `jsonb` กับข้อมูลที่แปรผันจริง ๆ ไม่ใช่เป็นทางเลี่ยงการออกแบบ schema ถ้าฟิลด์หนึ่งมีอยู่เสมอและเป็นชนิดเดิมเสมอ คอลัมน์จริงจะให้คุณได้ทั้งการตรวจสอบชนิด ค่า default และ constraint
+- เพิ่ม GIN index เฉพาะเมื่อคุณ query เข้าไปข้างในเอกสารจริง ๆ การทำ index ให้ข้อมูลที่คุณอ่านกลับมาทั้งก้อนเท่านั้นเป็นการเปลืองพื้นที่และเพิ่มภาระตอนเขียน
+- จำไว้ว่า `->` คืน `jsonb` และ `->>` คืน `text` การเทียบ `attributes -> 'color' = 'teal'` จะล้มเหลวเพราะฝั่งซ้ายเป็น `jsonb` จงใช้ `->>` สำหรับการเทียบ text
+
+<Callout title="Document store ภายในฐานข้อมูลเชิงสัมพันธ์ของคุณ">
+คอลัมน์ `jsonb` ทำให้ตารางเดียวผสมคอลัมน์ที่เคร่งครัดและมีชนิดข้อมูลชัดเจน เข้ากับฟิลด์เอกสารที่ยืดหยุ่นได้ ความเป็นลูกผสมนั้นมักเป็นความยืดหยุ่นของ schema ทั้งหมดที่แอปพลิเคชันต้องการ — ไม่ต้องมี document database แยกต่างหาก เพียงแค่เก็บส่วนที่คงที่จริง ๆ ไว้ในคอลัมน์จริงที่ Postgres บังคับใช้ได้
+</Callout>
+
+export const quizJsonb = [
+  {
+    q: 'ข้อได้เปรียบเชิงปฏิบัติที่สำคัญของ jsonb เหนือชนิด json ธรรมดาคืออะไร?',
+    options: [
+      'มันรักษา whitespace และลำดับของ key',
+      'มันทำ index ได้และถูกเก็บในรูปแบบไบนารีที่แยกย่อยแล้ว',
+      'มันยอมให้มี key ซ้ำได้',
+      'มันเป็นชนิดเดียวที่รับ array ได้',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'operator ใดทดสอบว่าเอกสาร jsonb มีคู่ key/value ที่กำหนดอยู่หรือไม่?',
+    options: ['->>', '#>', '@>', '||'],
+    answer: 2,
+  },
+  {
+    q: 'index ชนิดใดทำให้ containment query ของ jsonb เร็วขึ้น?',
+    options: ['B-tree', 'GIN', 'Hash', 'BRIN'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="advanced-postgres/jsonb" questions={quizJsonb} />
+
+<ProgressTracker client:visible id="advanced-postgres/jsonb" />

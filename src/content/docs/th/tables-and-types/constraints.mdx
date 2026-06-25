@@ -1,0 +1,193 @@
+---
+title: Constraints
+description: รักษาความถูกต้องของข้อมูลด้วย constraints — primary key, foreign key พร้อมกฎ ON DELETE, ความไม่ซ้ำกัน, not-null, นิพจน์ check และ default ของ column
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ชนิดข้อมูลตัดสินว่า column สามารถเก็บค่าแบบใดได้ ส่วน **constraints** ตัดสินว่าค่าและชุดค่าผสมใดที่ได้รับอนุญาตจริง ๆ constraint คือกฎที่เซิร์ฟเวอร์ตรวจสอบในทุกการ insert และ update โดยปฏิเสธสิ่งใดก็ตามที่ละเมิดมัน เนื่องจากฐานข้อมูลบังคับใช้มัน constraints จึงยังคงอยู่ไม่ว่าแอปพลิเคชันหรือบุคคลใดจะเป็นผู้เขียนข้อมูล — มันเป็นกระดูกสันหลังของความสมบูรณ์ของข้อมูล
+
+เราจะจำลองร้านค้าจิ๋ว ๆ ที่มี `customers` และ `orders` เพื่อดู constraint แต่ละชนิดทำงาน
+
+## NOT NULL และ DEFAULT
+
+constraint แบบ `NOT NULL` ห้ามการไม่มีค่า ดังนั้น column นั้นต้องถูกเติมเสมอ ส่วน `DEFAULT` จัดหาค่าให้เมื่อการ insert ละเว้น column นั้นไป ทั้งคู่จับคู่กันได้อย่างเป็นธรรมชาติ: default ที่สมเหตุสมผลบวกกับ `NOT NULL` หมายความว่า column นั้นมีค่าอยู่เสมอโดยไม่บังคับให้ทุกการ insert ต้องระบุมันให้ชัดเจน
+
+```sql
+CREATE TABLE customers (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name       text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+ที่นี่ `name` ต้องถูกระบุเสมอ ขณะที่ `created_at` จะเติมตัวเองด้วยช่วงเวลาปัจจุบันเว้นแต่คุณจะจัดหาให้
+
+## PRIMARY KEY
+
+`PRIMARY KEY` ทำเครื่องหมาย column (หรือหลาย column) ที่ระบุแถวได้อย่างไม่ซ้ำกัน มันเป็นรูปแบบย่อของ `NOT NULL` บวก `UNIQUE` และตารางหนึ่งมีได้เพียงตัวเดียว column `id` ข้างบนคือ primary key ของ `customers`
+
+## UNIQUE
+
+constraint แบบ `UNIQUE` ห้ามค่าที่ซ้ำกันใน column ขณะที่ยังคงอนุญาต null ได้ มันเป็นวิธีแสดงกฎอย่าง "ลูกค้าสองคนใช้ email ร่วมกันไม่ได้" โดยไม่ทำให้ column นั้นเป็น primary key
+
+```sql
+ALTER TABLE customers
+  ADD COLUMN email text,
+  ADD CONSTRAINT customers_email_unique UNIQUE (email);
+```
+
+การตั้งชื่อ constraint ว่า `customers_email_unique` นั้นจะทำหรือไม่ก็ได้ แต่มันคุ้มค่า: ข้อความ error และคำสั่ง `ALTER TABLE` ในภายหลังสามารถอ้างถึงมันด้วยชื่อแทนที่จะเป็นป้ายที่สร้างขึ้นอัตโนมัติ
+
+## CHECK
+
+constraint แบบ `CHECK` ทดสอบนิพจน์กับแต่ละแถวและปฏิเสธการเขียนหากมันประเมินค่าได้เป็น false ใช้มันเพื่อเข้ารหัสกฎทางธุรกิจที่ชนิดเพียงอย่างเดียวแสดงไม่ได้ เช่น ราคาที่ต้องเป็นบวก
+
+```sql
+CREATE TABLE orders (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id bigint NOT NULL,
+  total       numeric(10, 2) NOT NULL,
+  CONSTRAINT orders_total_positive CHECK (total > 0)
+);
+```
+
+ความพยายามใด ๆ ที่จะ insert order ที่มี `total` เป็นศูนย์หรือค่าลบ จะล้มเหลวก่อนที่แถวนั้นจะถูกเก็บ
+
+## FOREIGN KEY
+
+`FOREIGN KEY` ผูก column เข้ากับคีย์ในอีกตารางหนึ่ง รับประกันว่าทุก `customer_id` ใน `orders` ชี้ไปยังแถวจริงใน `customers` นี่คือ **referential integrity**: ฐานข้อมูลจะไม่ยอมให้คุณสร้าง order สำหรับลูกค้าที่ไม่มีอยู่จริง และจะไม่ปล่อยให้ order ชี้ไปยังลูกค้าที่คุณลบไปแล้ว
+
+```sql
+ALTER TABLE orders
+  ADD CONSTRAINT orders_customer_fk
+  FOREIGN KEY (customer_id) REFERENCES customers (id)
+  ON DELETE CASCADE;
+```
+
+clause `ON DELETE` ตัดสินว่าจะเกิดอะไรขึ้นกับแถวที่ขึ้นต่อกันเมื่อแถวที่ถูกอ้างถึงถูกลบ `CASCADE` จะลบ order ที่ตรงกันไปพร้อมกับลูกค้า ขณะที่ `RESTRICT` จะปิดกั้นการลบตราบเท่าที่ยังมี order ใดอ้างถึงลูกค้ารายนั้นอยู่ เลือก `CASCADE` เมื่อแถวลูกไม่มีความหมายหากไม่มีแถวแม่ และเลือก `RESTRICT` เมื่อคุณต้องการการ์ดที่ตั้งใจไว้เพื่อกันการสูญหายโดยอุบัติเหตุ
+
+ตอนนี้ทั้งสองตารางสัมพันธ์กันแบบนี้ โดยแต่ละ order ชี้กลับไปยังลูกค้าหนึ่งรายพอดี
+
+export const fkDiagram = `flowchart LR
+  subgraph customers
+    C1[id PK]
+    C2[name]
+    C3[email UNIQUE]
+  end
+  subgraph orders
+    O1[id PK]
+    O2[customer_id FK]
+    O3[total]
+  end
+  O2 -->|REFERENCES| C1`;
+
+<Mermaid code={fkDiagram} title="orders.customer_id อ้างถึง customers.id" />
+
+## รันมันจาก driver
+
+constraints อยู่ใน DDL ดังนั้นแอปพลิเคชันจึงมักเพิ่มมันผ่าน migration คำสั่งนี้คือ SQL เดียวกับที่คุณจะพิมพ์ใน `psql` เพียงแต่ส่งผ่าน driver เท่านั้น
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    ALTER TABLE orders
+      ADD CONSTRAINT orders_customer_fk
+      FOREIGN KEY (customer_id) REFERENCES customers (id)
+      ON DELETE CASCADE;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(`
+      ALTER TABLE orders
+        ADD CONSTRAINT orders_customer_fk
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
+        ON DELETE CASCADE
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        ALTER TABLE orders
+          ADD CONSTRAINT orders_customer_fk
+          FOREIGN KEY (customer_id) REFERENCES customers (id)
+          ON DELETE CASCADE
+    """)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, `
+      ALTER TABLE orders
+        ADD CONSTRAINT orders_customer_fk
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
+        ON DELETE CASCADE`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query(
+        "ALTER TABLE orders
+           ADD CONSTRAINT orders_customer_fk
+           FOREIGN KEY (customer_id) REFERENCES customers (id)
+           ON DELETE CASCADE",
+    )
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน pgAdmin:** constraints ของตารางจะปรากฏใต้โหนด Constraints ของมันในแผนผัง browser และ dialog Properties มีแท็บสำหรับ primary key, foreign key, check และ unique constraint หากคุณชอบใช้ฟอร์มมากกว่า SQL
+
+## เคล็ดลับ / ข้อควรระวัง
+
+- foreign key บังคับใช้ referential integrity ให้คุณ ดังนั้นฐานข้อมูลจะไม่มีวันถือ order สำหรับลูกค้าที่ไม่มีอยู่จริง การพึ่งพาโค้ดของแอปพลิเคชันเพียงอย่างเดียวเพื่อรักษาความถูกต้องของการอ้างอิงจะล้มเหลวในที่สุด
+- ตั้งชื่อ constraints ของคุณให้ชัดเจน อย่าง `orders_total_positive` แทนที่จะยอมรับชื่อที่สร้างขึ้นอัตโนมัติ ชื่อที่ชัดเจนทำให้ข้อความ error อ่านได้และทำให้การเปลี่ยนแปลง `ALTER TABLE` ในภายหลังเป็นเรื่องตรงไปตรงมา
+- เลือกพฤติกรรม `ON DELETE` อย่างตั้งใจ `CASCADE` ทำความสะอาดแถวที่ขึ้นต่อกันโดยอัตโนมัติแต่อาจลบมากกว่าที่คุณคาด ส่วน `RESTRICT` คือค่าเริ่มต้นที่ปลอดภัยกว่าเมื่อคุณไม่แน่ใจ
+- constraint แบบ `CHECK` สามารถอ้างถึงหลาย column ของแถวเดียวกันได้ ดังนั้นคุณสามารถเข้ารหัสกฎอย่างส่วนลดที่ต้องไม่เกิน total แต่มันมองแถวหรือตารางอื่นไม่ได้
+- การเพิ่ม constraint ลงในตารางที่มีข้อมูลอยู่แล้วจะล้มเหลวหากแถวที่มีอยู่ละเมิดมัน ทำความสะอาดข้อมูลก่อน แล้วจึงเพิ่ม constraint
+
+<Callout title="ปล่อยให้ฐานข้อมูลเป็นคนปฏิเสธ">
+ทุก constraint ที่คุณเพิ่มคือกฎที่ฐานข้อมูลบังคับใช้แทนคุณ ทุกครั้ง สำหรับผู้เขียนทุกคน ผลักดันกฎความสมบูรณ์ลงไปใน schema แทนที่จะกระจายมันไปทั่วโค้ดของแอปพลิเคชัน แล้วข้อมูลเสีย ๆ ทั้งจำพวกก็จะกลายเป็นสิ่งที่เก็บไม่ได้เลย
+</Callout>
+
+export const quizConstraints = [
+  {
+    q: 'constraint แบบ FOREIGN KEY รับประกันอะไร?',
+    options: [
+      'ว่าค่าใน column ไม่ซ้ำกัน',
+      'ว่าทุกค่าชี้ไปยังแถวที่มีอยู่จริงในตารางที่ถูกอ้างถึง',
+      'ว่า column นั้นจะไม่มีวันเป็น null',
+      'ว่า column นั้นถูกทำ index เพื่อความเร็ว',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เมื่อใช้ ON DELETE CASCADE บน orders.customer_id จะเกิดอะไรขึ้นเมื่อลูกค้าที่ถูกอ้างถึงถูกลบ?',
+    options: [
+      'การลบถูกปิดกั้น',
+      'order ที่ตรงกันถูกลบไปด้วย',
+      'order ยังคงมี customer_id เป็น null',
+      'ไม่มีอะไรเปลี่ยนแปลง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'constraint ใดปฏิเสธแถวเมื่อนิพจน์ที่กำหนดเองประเมินค่าได้เป็น false?',
+    options: ['UNIQUE', 'CHECK', 'DEFAULT', 'PRIMARY KEY'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tables-and-types/constraints" questions={quizConstraints} />
+
+<ProgressTracker client:visible id="tables-and-types/constraints" />

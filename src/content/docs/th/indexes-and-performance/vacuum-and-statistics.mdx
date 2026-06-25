@@ -1,0 +1,177 @@
+---
+title: VACUUM และ statistics
+description: MVCC ทิ้ง dead tuple ไว้ข้างหลัง — VACUUM คืนพื้นที่เหล่านั้น, ANALYZE รีเฟรช planner statistics, autovacuum ทำทั้งสองอย่าง, bloat คือสิ่งที่เกิดขึ้นเมื่อไม่ทำ และ VACUUM FULL เขียนตารางใหม่ภายใต้การล็อก
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+index และแผนที่ดีเป็นเพียงครึ่งหนึ่งของเรื่องประสิทธิภาพ อีกครึ่งหนึ่งคือการรักษาตัวตารางเองให้แข็งแรง PostgreSQL มีวิธีจัดการการ update และ delete ที่ไม่ธรรมดา และหากคุณเข้าใจมัน คุณก็จะเข้าใจว่าทำไมงานเบื้องหลังสองอย่าง — `VACUUM` และ `ANALYZE` — จึงจำเป็นต่อการรักษา query ให้เร็ว
+
+## MVCC ทิ้ง dead tuple ไว้ข้างหลัง
+
+PostgreSQL ใช้ **MVCC** หรือ multi-version concurrency control เพื่อให้ผู้อ่านไม่เคยบล็อกผู้เขียน ผลที่ตามมาคือ `UPDATE` ไม่ได้เขียนทับแถวที่ตำแหน่งเดิม และ `DELETE` ก็ไม่ได้ลบมันทิ้งทันที แต่กลับเป็นว่า:
+
+- `UPDATE` เขียนเวอร์ชัน *ใหม่* ของแถวขึ้นมา และทำเครื่องหมายเวอร์ชันเก่าว่าไม่ใช่เวอร์ชันปัจจุบันอีกต่อไป
+- `DELETE` ทำเครื่องหมายแถวว่าหายไปแล้ว แต่ยังคงทิ้งไบต์ของมันไว้บนดิสก์
+
+เวอร์ชันแถวที่หลงเหลือและมองไม่เห็นแล้วเหล่านั้นเรียกว่า **dead tuple** พวกมันมองไม่เห็นจาก query ของคุณ แต่ยังคงครอบครองพื้นที่และยังต้องถูกข้ามไประหว่างการสแกน
+
+export const vacuumFlow = `flowchart LR
+  A[Row version v1] -->|UPDATE| B[Row version v2 live]
+  A -->|marked obsolete| D[Dead tuple]
+  D -->|VACUUM| R[Space reclaimed and reusable]
+  B --> Q[Visible to queries]`;
+
+<Mermaid code={vacuumFlow} title="การ update สร้าง dead tuple ที่ VACUUM จะมาคืนพื้นที่ในภายหลัง" />
+
+## VACUUM คืนพื้นที่ ANALYZE แจ้งข้อมูล
+
+การดำเนินการบำรุงรักษาสองอย่างทำความสะอาดหลัง MVCC:
+
+- **`VACUUM`** สแกนตารางและทำเครื่องหมายพื้นที่ที่ dead tuple ใช้อยู่ว่าว่างพร้อมนำกลับมาใช้ใหม่ได้ เพื่อให้การ insert และ update ในอนาคตเข้ามาเติมเต็มแทนที่จะทำให้ไฟล์ขยายตัว `VACUUM` แบบธรรมดาไม่ได้คืนดิสก์ให้ระบบปฏิบัติการ มันทำให้พื้นที่นำกลับมาใช้ใหม่ได้ *ภายใน* ตาราง
+- **`ANALYZE`** สุ่มตัวอย่างจากตารางและปรับปรุง **planner statistics** — จำนวนแถว, การกระจายของค่า, คอลัมน์หนึ่งมีค่าที่แตกต่างกันกี่ค่า ตัวเลขเหล่านี้คือสิ่งที่ planner พึ่งพาในการเลือกระหว่าง seq scan กับ index scan ดังที่คุณเห็นในบทเรียน EXPLAIN
+
+คุณสามารถรันมันด้วยมือ ทั้งร่วมกันหรือแยกกันก็ได้:
+
+```sql
+-- reclaim dead-tuple space in one table
+VACUUM books;
+
+-- refresh statistics so the planner estimates well
+ANALYZE books;
+
+-- do both at once
+VACUUM ANALYZE books;
+```
+
+จากโค้ดแอปพลิเคชันก็เป็นคำสั่งเดียวกันผ่าน driver ใด ๆ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    VACUUM ANALYZE books;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('VACUUM ANALYZE books');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    # VACUUM cannot run inside a transaction block,
+    # so use autocommit for this statement
+    old = conn.autocommit
+    conn.autocommit = True
+    cur.execute("VACUUM ANALYZE books")
+    conn.autocommit = old
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "VACUUM ANALYZE books")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("VACUUM ANALYZE books")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ข้อสังเกตสำหรับ driver: `VACUUM` ไม่สามารถรันภายใน transaction block ได้ ดังนั้นจงสั่งมันบน connection ในโหมด autocommit แทนที่จะห่อไว้ใน `BEGIN ... COMMIT`
+
+## autovacuum ทำสิ่งนี้ให้คุณ
+
+คุณแทบจะไม่ต้องรัน `VACUUM` ด้วยมือเลย เพราะ PostgreSQL มาพร้อมกับ **autovacuum** — กระบวนการเบื้องหลังที่คอยจับตาดูว่าแต่ละตารางมีแถวเปลี่ยนแปลงไปกี่แถว และรัน `VACUUM` และ `ANALYZE` โดยอัตโนมัติเมื่อความปั่นป่วน (churn) ข้ามค่า threshold มันเปิดอยู่โดยค่าเริ่มต้น และคุณควรปล่อยให้มันเปิดไว้
+
+autovacuum ป้องกันไม่ให้ dead tuple กองพะเนินและรักษา statistics ให้สดใหม่โดยที่คุณไม่ต้องลงแรงเลย เมื่อคนบ่นว่า "Postgres ช้าลงเมื่อเวลาผ่านไป" สาเหตุมักจะเป็นเพราะ autovacuum ถูกปิดไว้หรือตามไม่ทัน
+
+## bloat
+
+เมื่อ dead tuple สะสมเร็วกว่าที่ถูกคืนพื้นที่ — เพราะ autovacuum ถูกปิด, ช้าเกินไป หรือมี transaction ที่รันยาวคอยถือเวอร์ชันเก่าให้ยังมองเห็นได้ — ตารางจะขยายตัวใหญ่กว่าที่ข้อมูลที่มีชีวิตจริงสมควรจะเป็น นี่คือ **bloat** ตารางที่บวม (bloated) มีหน้าให้อ่านมากขึ้นสำหรับจำนวนแถวที่มีชีวิตเท่าเดิม ดังนั้นแม้แต่ seq scan หรือ index scan ก็ต้องทำ I/O เพิ่มขึ้น bloat ส่งผลต่อ index ด้วย
+
+คุณสามารถดูสถานะคร่าว ๆ ของตารางได้ด้วย:
+
+```sql
+SELECT relname, n_live_tup, n_dead_tup, last_autovacuum
+FROM pg_stat_user_tables
+WHERE relname = 'books';
+```
+
+```text
+ relname | n_live_tup | n_dead_tup |        last_autovacuum
+---------+------------+------------+-------------------------------
+ books   |      48213 |       1502 | 2026-06-25 09:14:02.118431+00
+```
+
+`n_dead_tup` ที่แข็งแรงคือค่าที่เล็กเมื่อเทียบกับ `n_live_tup`; ค่าที่ใหญ่และไม่เคยลดลงเลยหมายความว่าการ vacuum ตามไม่ทัน
+
+## VACUUM FULL เขียนตารางใหม่
+
+`VACUUM` แบบธรรมดาทำให้พื้นที่นำกลับมาใช้ใหม่ได้ แต่ไม่ได้ทำให้ไฟล์เล็กลง หากต้องการคืนดิสก์ให้ระบบปฏิบัติการจริง ๆ และอัดตารางที่บวมอย่างหนักให้กระชับ มี `VACUUM FULL` ซึ่งเขียนทั้งตารางใหม่ลงในไฟล์ที่สดใหม่และถูกอัดแน่น
+
+```sql
+VACUUM FULL books;
+```
+
+ข้อเสียนั้นรุนแรง: `VACUUM FULL` จับ **exclusive lock** บนตารางตลอดการเขียนใหม่ บล็อกการอ่านและเขียนทุกอย่างจนกว่าจะเสร็จ บนตารางขนาดใหญ่นั่นอาจหมายถึงช่วงดาวน์ไทม์ที่ยาวนาน จงใช้มันสำหรับการกู้คืนแบบครั้งเดียวจาก bloat ที่รุนแรงเท่านั้น ในช่วง maintenance window — อย่าใช้เป็นงานบ้านประจำ การทำความสะอาดประจำเป็นหน้าที่ของ autovacuum
+
+**ใน pgAdmin:** คลิกขวาที่ตารางแล้วเลือก Maintenance เพื่อรัน `VACUUM`, `ANALYZE` หรือ `VACUUM FULL` จากกล่องโต้ตอบ พร้อม checkbox สำหรับตัวเลือกต่าง ๆ กล่อง Maintenance เดียวกันนี้ยังสามารถ reindex index ที่บวมได้ด้วย
+
+## Tips / gotchas
+
+- จงเปิด autovacuum ไว้ การปิดมันเป็นสาเหตุที่พบบ่อยที่สุดของฐานข้อมูลที่ค่อย ๆ เสื่อมลงสู่ bloat และแผนที่ไม่ดี
+- จงรัน `ANALYZE` (หรือ `VACUUM ANALYZE`) ด้วยมือหลังจากการโหลดข้อมูลจำนวนมาก (bulk load), การ import หรือการ migration autovacuum อาจไม่ทำงานทันที และ statistics ที่เก่าล้าสมัยทันทีหลังการเปลี่ยนแปลงครั้งใหญ่จะนำ planner ไปผิดทาง
+- `VACUUM` แบบธรรมดาไม่บล็อกและปลอดภัยที่จะรันเมื่อใดก็ได้; `VACUUM FULL` บล็อกและก่อกวน — จงสงวนมันไว้สำหรับ maintenance window
+- transaction ที่รันยาวจะขัดขวาง vacuum ไม่ให้ทำความสะอาด tuple ที่มันอาจยังต้องเห็นอยู่ จงระวัง transaction ที่เปิดค้างไว้และถูกลืม เมื่อ bloat โตขึ้นทั้งที่ autovacuum แข็งแรง
+- จงเฝ้าดู `n_dead_tup` และ `last_autovacuum` ใน `pg_stat_user_tables` เพื่อยืนยันว่าการ vacuum ตามทันปริมาณการเขียนของคุณจริง ๆ
+
+<Callout title="ปล่อยให้ฐานข้อมูลรักษาสุขภาพตัวเอง">
+MVCC แลกการ update ที่ตำแหน่งเดิมกับการอ่านที่ไม่บล็อก และราคาที่จ่ายคือ dead tuple ที่ต้องถูกทำความสะอาด autovacuum จ่ายราคานั้นแทนคุณ: มันคืนพื้นที่และรีเฟรช statistics ในเบื้องหลัง จงปล่อยให้มันเปิดไว้, `ANALYZE` หลังการโหลดครั้งใหญ่ และเก็บ `VACUUM FULL` ไว้สำหรับเหตุฉุกเฉิน — นั่นคือเรื่องการบำรุงรักษาเกือบทั้งหมด
+</Callout>
+
+export const quizVacuum = [
+  {
+    q: 'ทำไม UPDATE จึงทิ้ง dead tuple ไว้ข้างหลังใน PostgreSQL?',
+    options: [
+      'เพราะบั๊ก',
+      'เพราะ MVCC เขียนเวอร์ชันแถวใหม่และทำเครื่องหมายเวอร์ชันเก่าว่าล้าสมัย แทนที่จะเขียนทับที่ตำแหน่งเดิม',
+      'เพราะ index ต้องการมัน',
+      'เพราะแถวถูกล็อก',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ANALYZE ทำอะไรที่ VACUUM ไม่ทำ?',
+    options: [
+      'มันคืนพื้นที่ของ dead tuple',
+      'มันปรับปรุง planner statistics ที่ใช้ในการเลือกกลยุทธ์ของ scan',
+      'มันเขียนไฟล์ตารางใหม่',
+      'มันล็อกตาราง',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'ทำไม VACUUM FULL จึงควรถูกสงวนไว้สำหรับ maintenance window?',
+    options: [
+      'มันทำงานช้าแต่ไม่บล็อกใครเลย',
+      'มันจับ exclusive lock ที่บล็อกการอ่านและเขียนทั้งหมดขณะที่เขียนตารางใหม่',
+      'มันลบ index',
+      'มันปิด autovacuum',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/vacuum-and-statistics" questions={quizVacuum} />
+
+<ProgressTracker client:visible id="indexes-and-performance/vacuum-and-statistics" />

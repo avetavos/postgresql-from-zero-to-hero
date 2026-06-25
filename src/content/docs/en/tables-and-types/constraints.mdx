@@ -1,0 +1,193 @@
+---
+title: Constraints
+description: Keep data honest with constraints — primary keys, foreign keys with ON DELETE rules, uniqueness, not-null, check expressions, and column defaults.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Types decide what kind of value a column can hold; **constraints** decide which values and combinations are actually allowed. A constraint is a rule the server checks on every insert and update, rejecting anything that breaks it. Because the database enforces them, constraints hold no matter which application or person writes the data — they are the backbone of data integrity.
+
+We will model a tiny store with `customers` and `orders` to see each kind of constraint at work.
+
+## NOT NULL and DEFAULT
+
+A `NOT NULL` constraint forbids the absence of a value, so the column must always be filled. A `DEFAULT` supplies a value when an insert leaves the column out. They pair naturally: a sensible default plus `NOT NULL` means the column is always present without forcing every insert to spell it out.
+
+```sql
+CREATE TABLE customers (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name       text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+Here `name` must always be provided, while `created_at` fills itself with the current moment unless you supply one.
+
+## PRIMARY KEY
+
+A `PRIMARY KEY` marks the column (or columns) that uniquely identify a row. It is shorthand for `NOT NULL` plus `UNIQUE`, and a table may have only one. The `id` column above is the primary key for `customers`.
+
+## UNIQUE
+
+A `UNIQUE` constraint forbids duplicate values in a column while still allowing nulls. It is how you express rules like "no two customers may share an email address" without making that column the primary key.
+
+```sql
+ALTER TABLE customers
+  ADD COLUMN email text,
+  ADD CONSTRAINT customers_email_unique UNIQUE (email);
+```
+
+Naming the constraint `customers_email_unique` is optional but pays off: error messages and later `ALTER TABLE` statements can refer to it by name instead of an auto-generated label.
+
+## CHECK
+
+A `CHECK` constraint tests an expression against each row and rejects the write if it evaluates to false. Use it to encode business rules the type alone cannot express, such as a price that must be positive.
+
+```sql
+CREATE TABLE orders (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id bigint NOT NULL,
+  total       numeric(10, 2) NOT NULL,
+  CONSTRAINT orders_total_positive CHECK (total > 0)
+);
+```
+
+Any attempt to insert an order with a zero or negative `total` now fails before the row is stored.
+
+## FOREIGN KEY
+
+A `FOREIGN KEY` ties a column to a key in another table, guaranteeing that every `customer_id` in `orders` points at a real row in `customers`. This is **referential integrity**: the database will not let you create an order for a customer that does not exist, nor leave an order pointing at a customer you delete.
+
+```sql
+ALTER TABLE orders
+  ADD CONSTRAINT orders_customer_fk
+  FOREIGN KEY (customer_id) REFERENCES customers (id)
+  ON DELETE CASCADE;
+```
+
+The `ON DELETE` clause decides what happens to dependent rows when the referenced row is removed. `CASCADE` deletes the matching orders along with the customer, while `RESTRICT` blocks the deletion as long as any order still references that customer. Choose `CASCADE` when child rows have no meaning without their parent, and `RESTRICT` when you want a deliberate guard against accidental loss.
+
+The two tables now relate like this, with each order pointing back at exactly one customer.
+
+export const fkDiagram = `flowchart LR
+  subgraph customers
+    C1[id PK]
+    C2[name]
+    C3[email UNIQUE]
+  end
+  subgraph orders
+    O1[id PK]
+    O2[customer_id FK]
+    O3[total]
+  end
+  O2 -->|REFERENCES| C1`;
+
+<Mermaid code={fkDiagram} title="orders.customer_id references customers.id" />
+
+## Running it from a driver
+
+Constraints live in DDL, so applications usually add them through a migration. The statement is the same SQL you would type in `psql`, just handed over by the driver.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    ALTER TABLE orders
+      ADD CONSTRAINT orders_customer_fk
+      FOREIGN KEY (customer_id) REFERENCES customers (id)
+      ON DELETE CASCADE;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(`
+      ALTER TABLE orders
+        ADD CONSTRAINT orders_customer_fk
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
+        ON DELETE CASCADE
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        ALTER TABLE orders
+          ADD CONSTRAINT orders_customer_fk
+          FOREIGN KEY (customer_id) REFERENCES customers (id)
+          ON DELETE CASCADE
+    """)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, `
+      ALTER TABLE orders
+        ADD CONSTRAINT orders_customer_fk
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
+        ON DELETE CASCADE`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query(
+        "ALTER TABLE orders
+           ADD CONSTRAINT orders_customer_fk
+           FOREIGN KEY (customer_id) REFERENCES customers (id)
+           ON DELETE CASCADE",
+    )
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**In pgAdmin:** a table's constraints appear under its Constraints node in the browser tree, and the Properties dialog has tabs for primary key, foreign key, check, and unique constraints if you prefer a form over SQL.
+
+## Tips / gotchas
+
+- Foreign keys enforce referential integrity for you, so the database never holds an order for a customer that does not exist. Relying on application code alone to keep references valid eventually fails.
+- Name your constraints explicitly, like `orders_total_positive`, instead of accepting auto-generated names. Clear names make error messages readable and make later `ALTER TABLE` changes straightforward.
+- Choose `ON DELETE` behavior deliberately. `CASCADE` cleans up dependents automatically but can delete more than you expect; `RESTRICT` is the safer default when you are unsure.
+- A `CHECK` constraint can reference several columns of the same row, so you can encode rules like a discount that must not exceed the total, but it cannot look at other rows or tables.
+- Adding a constraint to a table that already holds data will fail if existing rows violate it. Clean up the data first, then add the constraint.
+
+<Callout title="Let the database say no">
+Every constraint you add is a rule the database enforces on your behalf, every time, for every writer. Push integrity rules down into the schema rather than scattering them across application code, and a whole class of bad data simply becomes impossible to store.
+</Callout>
+
+export const quizConstraints = [
+  {
+    q: 'What does a FOREIGN KEY constraint guarantee?',
+    options: [
+      'That the column values are unique',
+      'That every value points at an existing row in the referenced table',
+      'That the column can never be null',
+      'That the column is indexed for speed',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'With ON DELETE CASCADE on orders.customer_id, what happens when a referenced customer is deleted?',
+    options: [
+      'The deletion is blocked',
+      'The matching orders are deleted too',
+      'The orders keep a null customer_id',
+      'Nothing changes',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which constraint rejects a row when a custom expression evaluates to false?',
+    options: ['UNIQUE', 'CHECK', 'DEFAULT', 'PRIMARY KEY'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="tables-and-types/constraints" questions={quizConstraints} />
+
+<ProgressTracker client:visible id="tables-and-types/constraints" />

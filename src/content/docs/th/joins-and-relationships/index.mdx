@@ -1,0 +1,158 @@
+---
+title: Join และความสัมพันธ์
+description: ทำไมฐานข้อมูลเชิงสัมพันธ์ถึงเปล่งประกายเมื่อคุณนำตารางมารวมกัน — ทัวร์ของ join, aggregate, subquery และ CTE, และ window function ทั้งหมดสร้างบนสคีมาเล็ก ๆ ของ authors, books, และ sales
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+ตารางเพียงตารางเดียวตอบได้แค่คำถามเกี่ยวกับตัวมันเองเท่านั้น พลังที่แท้จริงของฐานข้อมูลเชิงสัมพันธ์จะปรากฏเมื่อคุณเลิกเก็บทุกอย่างไว้ในตารางใหญ่ตารางเดียว แล้วหันมาแบ่งข้อมูลออกเป็นตารางที่มีจุดโฟกัสชัดเจนซึ่งชี้ถึงกันและกันผ่าน key แทน ตาราง `authors` เก็บข้อมูลคน ตาราง `books` เก็บชื่อหนังสือ และ foreign key เชื่อมแต่ละหนังสือกลับไปยังผู้เขียนของมัน ไม่มีอะไรซ้ำซ้อน แต่คุณก็ยังถามคำถามที่ครอบคลุมทั้งสองตารางได้
+
+โมดูลนี้ว่าด้วยการตอบคำถามข้ามตารางเหล่านั้น คุณจะได้เรียนรู้การเย็บตารางกลับเข้าด้วยกันด้วย join, การยุบหลายแถวให้กลายเป็นตัวเลขสรุปด้วย aggregate, การซ้อนคิวรีหนึ่งไว้ในอีกคิวรีหนึ่งด้วย subquery และ CTE, และสุดท้ายการคำนวณการจัดอันดับรายแถวและยอดสะสมด้วย window function
+
+## สคีมาตัวอย่าง
+
+ทุกบทเรียนจะใช้ตารางเล็ก ๆ สามตารางซ้ำกัน `authors` และ `books` น่าจะดูคุ้นเคยจากโมดูล CRUD เราเพิ่มตาราง `sales` เข้ามาเพื่อให้มีอะไรไว้ aggregate และจัดอันดับ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE TABLE authors (
+      id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      name text NOT NULL,
+      born int
+    );
+
+    CREATE TABLE books (
+      id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      title     text NOT NULL,
+      author_id bigint REFERENCES authors (id),
+      published int
+    );
+
+    CREATE TABLE sales (
+      id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      book_id  bigint REFERENCES books (id),
+      region   text NOT NULL,
+      copies   int NOT NULL
+    );
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(`
+      CREATE TABLE sales (
+        id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        book_id bigint REFERENCES books (id),
+        region  text NOT NULL,
+        copies  int NOT NULL
+      )
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        CREATE TABLE sales (
+          id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          book_id bigint REFERENCES books (id),
+          region  text NOT NULL,
+          copies  int NOT NULL
+        )
+    """)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, `
+      CREATE TABLE sales (
+        id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        book_id bigint REFERENCES books (id),
+        region  text NOT NULL,
+        copies  int NOT NULL
+      )`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query(
+        "CREATE TABLE sales (
+           id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+           book_id bigint REFERENCES books (id),
+           region  text NOT NULL,
+           copies  int NOT NULL
+         )",
+    )
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน pgAdmin:** วางคำสั่ง `CREATE TABLE` ทั้งสามคำสั่งลงใน Query Tool แล้วรัน ตารางใหม่จะปรากฏใต้ Schemas แล้วก็ Tables และถ้าคุณขยายตารางออกมา จะเห็น constraint แบบ foreign key แสดงรายการอยู่ใต้ Constraints
+
+## ตารางสัมพันธ์กันอย่างไร
+
+แต่ละตารางเชื่อมต่อกับตารางถัดไปผ่านคอลัมน์ key หนังสือพก `id` ของผู้เขียนเอาไว้ และยอดขายก็พก `id` ของหนังสือเอาไว้ การเชื่อมโยงเหล่านี้คือสิ่งที่ทุกคิวรีในโมดูลนี้เดินตาม
+
+export const schemaDiagram = `flowchart LR
+  A[authors] -->|id referenced by books.author_id| B[books]
+  B -->|id referenced by sales.book_id| S[sales]`;
+
+<Mermaid code={schemaDiagram} title="ตารางเชื่อมโยงกันด้วย key" />
+
+อ่านลูกศรว่า "ถูกอ้างอิงโดย" ผู้เขียนหนึ่งคนมีหนังสือได้หลายเล่ม และหนังสือหนึ่งเล่มมีแถวยอดขายได้หลายแถว — รูปแบบ one-to-many คลาสสิกที่ join ถูกออกแบบมาเพื่อท่องผ่าน
+
+## โมดูลนี้ครอบคลุมอะไรบ้าง
+
+- **Joins** — รวมแถวจากสองตารางขึ้นไปบนคอลัมน์ key ที่ตรงกัน และเลือกว่าจะเก็บหรือทิ้งแถวที่ไม่มีคู่ที่ตรงกัน
+- **Aggregate และ GROUP BY** — ยุบหลายแถวให้กลายเป็น count, sum, และค่าเฉลี่ย แล้วกรองกลุ่มเหล่านั้นด้วย `HAVING`
+- **Subquery และ CTE** — ใช้ผลลัพธ์ของคิวรีหนึ่งภายในอีกคิวรีหนึ่ง และตั้งชื่อขั้นตอนระหว่างทางด้วย `WITH` เพื่อให้อ่านง่าย
+- **Window function** — จัดอันดับแถวและคำนวณยอดสะสมโดยไม่ทิ้งแถวแต่ละแถวไป
+
+## ทิป / จุดพลาดที่พบบ่อย
+
+- foreign key เป็นเอกสารบันทึกความสัมพันธ์และบังคับใช้มัน แต่ join ในคิวรีของคุณต่างหากที่นำแถวที่เกี่ยวข้องมารวมกันจริง ๆ
+- คำถามเดียวกันมักเขียนได้ทั้งเป็น join, subquery, หรือ window function การเรียนรู้ทั้งสามแบบทำให้คุณเลือกแบบที่ชัดเจนที่สุดได้
+- ให้นึกภาพการเชื่อมโยงแบบ one-to-many ข้างต้นไว้ในใจ เพราะเกือบทุกคิวรีในโมดูลนี้เดินตามลูกศรเหล่านั้นเส้นใดเส้นหนึ่ง
+
+<Callout title="ทำไมต้องแยกตารางตั้งแต่แรก?">
+มันจะง่ายกว่าถ้าเก็บชื่อผู้เขียนไว้ตรง ๆ ในทุกแถวของหนังสือ แต่อย่างนั้นการเปลี่ยนชื่อผู้เขียนก็หมายถึงต้องเขียนทับหนังสือของเขาใหม่ทุกเล่ม และการพิมพ์ผิดเพียงครั้งเดียวก็อาจทำให้คน ๆ เดียวมีชื่อสะกดได้สองแบบ การแบ่งข้อมูลออกเป็นตารางที่สัมพันธ์กันช่วยขจัดความซ้ำซ้อนนั้น join คือราคาที่คุณต้องจ่าย — และมันถูกมาก
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'อะไรทำให้ฐานข้อมูลเชิงสัมพันธ์ทรงพลังกว่าตารางแบนตารางเดียว?',
+    options: [
+      'มันเก็บข้อมูลในตารางที่มีจุดโฟกัสชัดเจนซึ่งเชื่อมโยงกันด้วย key คุณจึงรวมมันได้ตามต้องการ',
+      'มันบีบอัดทุกคอลัมน์โดยอัตโนมัติ',
+      'มันห้ามไม่ให้มีแถวซ้ำกัน',
+      'มันรันคิวรีแบบขนานโดยปริยาย',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'ในสคีมาตัวอย่าง แถวของยอดขายเชื่อมต่อกับผู้เขียนได้อย่างไร?',
+    options: [
+      'โดยตรง ผ่านคอลัมน์ author_id บน sales',
+      'ผ่าน books: sales.book_id ชี้ไปยังหนังสือ ซึ่ง author_id ของหนังสือนั้นชี้ไปยังผู้เขียน',
+      'มันไม่ได้เชื่อมต่อกัน',
+      'ผ่านคอลัมน์ชื่อที่ใช้ร่วมกัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'เทคนิคใดเก็บแถวแต่ละแถวไว้ในขณะที่เพิ่มการจัดอันดับหรือยอดสะสม?',
+    options: ['GROUP BY', 'window function', 'DELETE', 'foreign key'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="joins-and-relationships/index" />

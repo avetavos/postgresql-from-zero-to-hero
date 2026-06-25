@@ -1,0 +1,290 @@
+---
+title: Window functions
+description: Rank rows and compute running totals with OVER, PARTITION BY, and ORDER BY using ROW_NUMBER, RANK, DENSE_RANK, and SUM() OVER — and see why windows keep rows where GROUP BY collapses them.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A `GROUP BY` collapses many rows into one summary row, and that is sometimes exactly wrong: you want the summary *and* the original detail side by side. Window functions do that. A window function looks at a set of rows related to the current row — its *window* — and computes a value, but it leaves every row in the output. That is how you add a rank, a running total, or a per-group average as an extra column without losing any detail.
+
+We continue with the `authors`, `books`, and `sales` tables.
+
+## The OVER clause
+
+You turn an ordinary function into a window function by adding an `OVER` clause. Inside it, `PARTITION BY` divides the rows into groups (like `GROUP BY`, but without collapsing them), and `ORDER BY` sets the order within each partition. Here we number the sales within each region, biggest first.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT region, copies,
+           ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
+    FROM sales
+    ORDER BY region, seq;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT region, copies,
+             ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
+      FROM sales
+      ORDER BY region, seq
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT region, copies,
+               ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
+        FROM sales
+        ORDER BY region, seq
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT region, copies,
+             ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
+      FROM sales
+      ORDER BY region, seq`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT region, copies,
+                ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
+         FROM sales
+         ORDER BY region, seq",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ region | copies | seq
+--------+--------+-----
+ East   |    900 |   1
+ East   |    200 |   2
+ West   |    400 |   1
+ West   |    350 |   2
+```
+
+The numbering restarts at 1 inside each region because of `PARTITION BY region`. Every sales row is still present — nothing was collapsed, in contrast to a `GROUP BY` that would leave just one row per region.
+
+## ROW_NUMBER, RANK, and DENSE_RANK
+
+These three ranking functions all order rows within a partition but differ in how they handle ties. `ROW_NUMBER` always gives a unique number. `RANK` gives tied rows the same number and then skips ahead. `DENSE_RANK` gives tied rows the same number but does not skip.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT copies,
+           ROW_NUMBER()  OVER (ORDER BY copies DESC) AS row_num,
+           RANK()        OVER (ORDER BY copies DESC) AS rnk,
+           DENSE_RANK()  OVER (ORDER BY copies DESC) AS dense
+    FROM sales
+    ORDER BY copies DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT copies,
+             ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
+             RANK()       OVER (ORDER BY copies DESC) AS rnk,
+             DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
+      FROM sales
+      ORDER BY copies DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT copies,
+               ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
+               RANK()       OVER (ORDER BY copies DESC) AS rnk,
+               DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
+        FROM sales
+        ORDER BY copies DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT copies,
+             ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
+             RANK()       OVER (ORDER BY copies DESC) AS rnk,
+             DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
+      FROM sales
+      ORDER BY copies DESC`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT copies,
+                ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
+                RANK()       OVER (ORDER BY copies DESC) AS rnk,
+                DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
+         FROM sales
+         ORDER BY copies DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ copies | row_num | rnk | dense
+--------+---------+-----+-------
+    900 |       1 |   1 |     1
+    400 |       2 |   2 |     2
+    400 |       3 |   2 |     2
+    200 |       4 |   4 |     3
+    150 |       5 |   5 |     4
+    50  |       6 |   6 |     5
+```
+
+Look at the two rows of 400. `ROW_NUMBER` calls them 2 and 3, `RANK` calls both 2 and then jumps to 4, while `DENSE_RANK` calls both 2 and continues at 3. Pick the one whose tie behavior matches what you need.
+
+## Running totals with SUM() OVER
+
+Add `ORDER BY` inside `OVER` to an aggregate and it becomes a running calculation: each row sees itself plus everything before it in the order. This is the standard way to produce a running total.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT region, copies,
+           SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
+    FROM sales
+    ORDER BY region, copies DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT region, copies,
+             SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
+      FROM sales
+      ORDER BY region, copies DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT region, copies,
+               SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
+        FROM sales
+        ORDER BY region, copies DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT region, copies,
+             SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
+      FROM sales
+      ORDER BY region, copies DESC`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT region, copies,
+                SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
+         FROM sales
+         ORDER BY region, copies DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ region | copies | running
+--------+--------+---------
+ East   |    900 |     900
+ East   |    200 |    1100
+ West   |    400 |     400
+ West   |    350 |     750
+```
+
+The `running` column accumulates down each region and resets at the partition boundary. Without the `ORDER BY` inside `OVER`, `SUM(copies) OVER (PARTITION BY region)` would instead repeat the region's grand total on every row — a useful trick for showing each sale next to its region total.
+
+## Windows keep rows; GROUP BY collapses them
+
+The picture below contrasts the two. A `GROUP BY region` would return two rows, one per region. A window function partitions the same rows but returns all of them, each carrying its per-partition value.
+
+export const windowDiagram = `flowchart TD
+  R[All sales rows] --> P1[Partition East]
+  R --> P2[Partition West]
+  P1 --> E1[East row keeps itself plus its window value]
+  P1 --> E2[East row keeps itself plus its window value]
+  P2 --> W1[West row keeps itself plus its window value]
+  P2 --> W2[West row keeps itself plus its window value]`;
+
+<Mermaid code={windowDiagram} title="A window partitions rows but keeps every one" />
+
+## Tips / gotchas
+
+- A window function never reduces the number of rows. If you want one row per group, use `GROUP BY`; if you want every row plus a per-group figure, use a window.
+- `PARTITION BY` is optional. Leave it out and the whole result is one partition, so a ranking runs across all rows.
+- The `ORDER BY` inside `OVER` controls the window frame and is independent of the query's final `ORDER BY`. Add the outer one too if you care about the order rows are returned in.
+- You cannot use a window function in a `WHERE` clause, because windows are computed after `WHERE`. Wrap the query in a CTE or subquery and filter on the computed column outside.
+- Choose `ROW_NUMBER` for a strict sequence, `RANK` when ties should share a rank and leave gaps, and `DENSE_RANK` when ties share a rank without gaps.
+
+<Callout title="The mental switch">
+When a request says "for each row, also show its rank / running total / share of the group", that phrase "for each row" is your cue: you need a window function, not a `GROUP BY`. Keep the rows, add a column.
+</Callout>
+
+export const quizWindows = [
+  {
+    q: 'How does a window function differ from GROUP BY?',
+    options: [
+      'It collapses rows into one summary row',
+      'It computes a value per row while keeping every row in the output',
+      'It can only count rows',
+      'It requires a foreign key',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'For two tied values, which function gives them the same number WITHOUT leaving a gap afterward?',
+    options: ['ROW_NUMBER', 'RANK', 'DENSE_RANK', 'COUNT'],
+    answer: 2,
+  },
+  {
+    q: 'What does PARTITION BY region inside an OVER clause do?',
+    options: [
+      'Filters out rows from other regions',
+      'Restarts the window calculation separately for each region',
+      'Sorts the final result by region',
+      'Deletes duplicate regions',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/window-functions" questions={quizWindows} />
+
+<ProgressTracker client:visible id="joins-and-relationships/window-functions" />

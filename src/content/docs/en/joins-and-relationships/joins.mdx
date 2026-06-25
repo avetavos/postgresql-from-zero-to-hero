@@ -1,0 +1,274 @@
+---
+title: Joins
+description: Combine rows from two tables with INNER JOIN, then keep unmatched rows with LEFT, RIGHT, and FULL OUTER JOIN — what the ON clause matches and what NULLs mean in an outer join.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+A join takes two tables and pairs up their rows according to a rule you write in the `ON` clause. Because a book stores its author's `id`, you can ask PostgreSQL to walk that link and produce rows that contain columns from both tables at once. The only real choice you make is what to do with rows that have no match on the other side — and that is exactly what distinguishes the join types.
+
+We continue with the `authors`, `books`, and `sales` tables.
+
+## INNER JOIN: only matching rows
+
+An `INNER JOIN` returns one combined row for every pair where the `ON` condition is true. Rows on either side that find no partner are simply dropped. This is the join you reach for most often.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT b.title, a.name AS author
+    FROM books AS b
+    INNER JOIN authors AS a ON a.id = b.author_id
+    ORDER BY b.title;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT b.title, a.name AS author
+      FROM books AS b
+      INNER JOIN authors AS a ON a.id = b.author_id
+      ORDER BY b.title
+    `);
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT b.title, a.name AS author
+        FROM books AS b
+        INNER JOIN authors AS a ON a.id = b.author_id
+        ORDER BY b.title
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT b.title, a.name AS author
+      FROM books AS b
+      INNER JOIN authors AS a ON a.id = b.author_id
+      ORDER BY b.title`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT b.title, a.name AS author
+         FROM books AS b
+         INNER JOIN authors AS a ON a.id = b.author_id
+         ORDER BY b.title",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+      title       |    author
+------------------+---------------
+ Quiet Harbors    | Mara Linde
+ The Glass Orchard| Mara Linde
+ Tidal Notes      | Owen Pryce
+(3 rows)
+```
+
+An author with no books, or a book whose `author_id` does not match any author, never appears in this result.
+
+## LEFT JOIN: keep every row on the left
+
+A `LEFT OUTER JOIN` (the `OUTER` keyword is optional) keeps every row from the left-hand table even when no match exists on the right. The right-hand columns are filled with `NULL` for those unmatched rows. This is how you list authors and see which ones have no books yet.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT a.name AS author, b.title
+    FROM authors AS a
+    LEFT JOIN books AS b ON b.author_id = a.id
+    ORDER BY a.name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT a.name AS author, b.title
+      FROM authors AS a
+      LEFT JOIN books AS b ON b.author_id = a.id
+      ORDER BY a.name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT a.name AS author, b.title
+        FROM authors AS a
+        LEFT JOIN books AS b ON b.author_id = a.id
+        ORDER BY a.name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT a.name AS author, b.title
+      FROM authors AS a
+      LEFT JOIN books AS b ON b.author_id = a.id
+      ORDER BY a.name`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT a.name AS author, b.title
+         FROM authors AS a
+         LEFT JOIN books AS b ON b.author_id = a.id
+         ORDER BY a.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    author     |       title
+---------------+-------------------
+ Mara Linde    | Quiet Harbors
+ Mara Linde    | The Glass Orchard
+ Owen Pryce    | Tidal Notes
+ Sela Vance    |
+(4 rows)
+```
+
+Sela Vance has written no books, so her row survives with a `NULL` title. That `NULL` is the join saying "the left row exists, but nothing matched on the right".
+
+## RIGHT and FULL OUTER JOIN
+
+A `RIGHT JOIN` is the mirror image: it keeps every row from the right-hand table and fills the left with `NULL` where there is no match. `A RIGHT JOIN B` produces the same rows as `B LEFT JOIN A`, so many people only ever write `LEFT JOIN`. A `FULL OUTER JOIN` keeps unmatched rows from both sides at once.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT a.name AS author, b.title
+    FROM authors AS a
+    FULL OUTER JOIN books AS b ON b.author_id = a.id
+    ORDER BY a.name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT a.name AS author, b.title
+      FROM authors AS a
+      FULL OUTER JOIN books AS b ON b.author_id = a.id
+      ORDER BY a.name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT a.name AS author, b.title
+        FROM authors AS a
+        FULL OUTER JOIN books AS b ON b.author_id = a.id
+        ORDER BY a.name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT a.name AS author, b.title
+      FROM authors AS a
+      FULL OUTER JOIN books AS b ON b.author_id = a.id
+      ORDER BY a.name`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT a.name AS author, b.title
+         FROM authors AS a
+         FULL OUTER JOIN books AS b ON b.author_id = a.id
+         ORDER BY a.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    author     |       title
+---------------+-------------------
+ Mara Linde    | Quiet Harbors
+ Mara Linde    | The Glass Orchard
+ Owen Pryce    | Tidal Notes
+ Sela Vance    |
+               | Unlinked Draft
+(5 rows)
+```
+
+The last row is a book whose `author_id` points at no author, so the author side is `NULL`. A full join is the only join that would reveal it alongside the author with no books.
+
+## Which rows each join keeps
+
+The four join types differ only in how they treat rows that fail the `ON` test. This picture summarizes who survives.
+
+export const joinDiagram = `flowchart TD
+  M[Matching rows on both sides] --> INNER[INNER JOIN keeps these only]
+  M --> LEFT[LEFT JOIN keeps these plus unmatched left rows]
+  M --> RIGHT[RIGHT JOIN keeps these plus unmatched right rows]
+  M --> FULL[FULL OUTER JOIN keeps these plus unmatched rows from both sides]`;
+
+<Mermaid code={joinDiagram} title="What each join type keeps" />
+
+## Tips / gotchas
+
+- Forgetting the `ON` clause turns a join into a cross join (`CROSS JOIN`), pairing every left row with every right row. With ten and ten rows that is one hundred output rows — almost never what you want.
+- Give each table a short alias such as `a` and `b`, then prefix every column. It keeps queries readable and avoids ambiguity when both tables share a column name like `id`.
+- A `NULL` in an outer-join result means "no matching row was found", not "the value is zero or empty". Test for it with `IS NULL`, never `= NULL`.
+- Putting a filter on the right table in `WHERE` instead of `ON` can quietly turn a `LEFT JOIN` back into an inner one, because `NULL` fails most `WHERE` comparisons.
+
+<Callout title="Pick the side you want to keep">
+Decide which table must always appear in the output, put it first, and `LEFT JOIN` the other onto it. "Every author, with their books if any" is a `LEFT JOIN` from `authors`. "Only authors who have books" is an `INNER JOIN`. The English phrasing usually tells you the join type.
+</Callout>
+
+export const quizJoins = [
+  {
+    q: 'Which join returns only the rows that have a match on both sides?',
+    options: ['LEFT JOIN', 'INNER JOIN', 'FULL OUTER JOIN', 'CROSS JOIN'],
+    answer: 1,
+  },
+  {
+    q: 'In a LEFT JOIN, what appears in the right-hand columns when a left row has no match?',
+    options: ['Zero', 'An empty string', 'NULL', 'The row is dropped'],
+    answer: 2,
+  },
+  {
+    q: 'What happens if you write a join but forget the ON clause?',
+    options: [
+      'PostgreSQL returns no rows',
+      'It behaves like a cross join, pairing every row with every row',
+      'It raises a syntax error every time',
+      'It silently becomes an INNER JOIN on the primary keys',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/joins" questions={quizJoins} />
+
+<ProgressTracker client:visible id="joins-and-relationships/joins" />

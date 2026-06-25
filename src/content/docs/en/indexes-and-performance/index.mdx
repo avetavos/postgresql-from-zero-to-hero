@@ -1,0 +1,147 @@
+---
+title: Why indexes matter
+description: Without an index PostgreSQL reads every row with a Sequential Scan; an index turns that into a fast targeted lookup — what this module covers.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+You can write perfectly correct SQL that still runs slowly. The query returns the right rows, but it takes seconds instead of milliseconds because PostgreSQL has to do far more work than necessary. Most of the time the cure is an **index** — a separate, sorted data structure that lets the server jump straight to the rows you asked for instead of inspecting the whole table.
+
+This module is about making queries fast and understanding *why* they are fast or slow. We start with the single most important idea: what PostgreSQL does when there is no index, and what changes when there is one.
+
+## The Sequential Scan
+
+Imagine a `books` table with ten million rows and this query:
+
+```sql
+SELECT * FROM books WHERE title = 'The Glass Orchard';
+```
+
+With no index on `title`, PostgreSQL has no way to know where that row lives. So it reads the table from the first row to the last, checking the title of every single one. This is a **Sequential Scan** (often shortened to *seq scan*). It is simple and reliable, but its cost grows with the size of the table: double the rows, roughly double the time.
+
+A seq scan is not always bad. If you are reading most of the table anyway, scanning straight through is the fastest approach. The problem is using it to find a needle in a haystack.
+
+## What an index changes
+
+An index on `title` is a pre-sorted structure that maps each title to the location of its row on disk. Instead of reading ten million rows, PostgreSQL walks the index — a handful of steps — lands on the entry for `'The Glass Orchard'`, and fetches just that row. This is an **Index Scan**.
+
+The difference is the difference between flipping through every page of a book looking for a word, and using the index at the back to jump straight to the right page.
+
+export const scanCompare = `flowchart TB
+  subgraph NoIndex[No index on title]
+    direction TB
+    Q1[Query: title equals a value] --> S1[Read row 1]
+    S1 --> S2[Read row 2]
+    S2 --> S3[... read every row ...]
+    S3 --> S4[Read row N]
+    S4 --> R1[Matching rows]
+  end
+  subgraph WithIndex[Index on title]
+    direction TB
+    Q2[Query: title equals a value] --> I1[Look up value in sorted index]
+    I1 --> I2[Jump to matching row location]
+    I2 --> R2[Matching rows]
+  end`;
+
+<Mermaid code={scanCompare} title="Sequential Scan versus Index Scan" />
+
+The left path touches every row and grows with the table. The right path touches a tiny number of index entries no matter how large the table gets. That is the whole reason indexes exist.
+
+## A quick demonstration
+
+You do not have to take this on faith. PostgreSQL can tell you exactly which strategy it chose for any query using `EXPLAIN`, which you will learn in detail in this module. For now, just notice the difference in the plan before and after adding an index.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- before: no index exists yet
+    EXPLAIN SELECT * FROM books WHERE title = 'The Glass Orchard';
+
+    -- create an index, then ask again
+    CREATE INDEX ON books (title);
+    EXPLAIN SELECT * FROM books WHERE title = 'The Glass Orchard';
+    ```
+  </TabItem>
+</Tabs>
+
+The first plan reports a `Seq Scan`; the second reports an `Index Scan`. The output looks like this:
+
+```text
+                          QUERY PLAN
+---------------------------------------------------------------
+ Seq Scan on books  (cost=0.00..18584.00 rows=1 width=64)
+   Filter: (title = 'The Glass Orchard'::text)
+```
+
+and after the index:
+
+```text
+                              QUERY PLAN
+---------------------------------------------------------------------
+ Index Scan using books_title_idx on books  (cost=0.42..8.44 rows=1 width=64)
+   Index Cond: (title = 'The Glass Orchard'::text)
+```
+
+Notice how the estimated cost drops from thousands to single digits. That cost estimate is what the planner uses to decide.
+
+**In pgAdmin:** open the Query Tool, type a `SELECT`, and press the Explain button (or use the Explain menu). pgAdmin draws the plan as a visual diagram so you can see the scan node at a glance.
+
+## What this module covers
+
+- **B-tree and index basics** — `CREATE INDEX`, the default B-tree, which queries it speeds up, composite indexes, and unique indexes.
+- **EXPLAIN and query plans** — reading the planner's output, telling scan types apart, and why an index is sometimes ignored on purpose.
+- **Specialized indexes** — GIN, GiST, BRIN, and Hash, plus partial, expression, and covering indexes for specific jobs.
+- **VACUUM and statistics** — how PostgreSQL reclaims space from deleted rows and keeps the planner's estimates accurate.
+
+## Tips / gotchas
+
+- An index helps reads but adds work to writes, because every `INSERT`, `UPDATE`, and `DELETE` must also keep the index current. Index deliberately, not reflexively.
+- A seq scan on a small table is perfectly fine and often faster than an index lookup. Indexes earn their keep on large tables and selective queries.
+- The planner, not you, decides whether to use an index. Your job is to provide a useful index and accurate statistics; the rest is the planner's call.
+
+<Callout title="The core idea">
+Without a helpful index, PostgreSQL reads every row to answer a query — a Sequential Scan whose cost grows with the table. A well-chosen index turns that linear search into a fast, near-constant lookup. Everything else in this module builds on that single trade-off.
+</Callout>
+
+export const quizIndexIntro = [
+  {
+    q: 'What does PostgreSQL do to find matching rows when no useful index exists?',
+    options: [
+      'It refuses to run the query',
+      'It reads every row in the table (a Sequential Scan)',
+      'It guesses based on the first row',
+      'It always returns an error',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why can an index dramatically speed up a lookup on a large table?',
+    options: [
+      'It compresses the table so there is less to read',
+      'It is a sorted structure that lets the server jump straight to matching rows',
+      'It caches the entire table in memory',
+      'It deletes rows that do not match',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is a Sequential Scan actually a reasonable choice?',
+    options: [
+      'When the query returns most of the table anyway',
+      'Never — it is always the wrong choice',
+      'Only on tables with a primary key',
+      'Only inside a transaction',
+    ],
+    answer: 0,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/index" questions={quizIndexIntro} />
+
+<ProgressTracker client:visible id="indexes-and-performance/index" />

@@ -1,0 +1,392 @@
+---
+title: Subquery และ CTE
+description: ซ้อนคิวรีหนึ่งไว้ในอีกคิวรีหนึ่งด้วย scalar, IN, และ EXISTS subquery แล้วตั้งชื่อขั้นตอนระหว่างทางด้วย WITH common table expression — พร้อมชิมลางของ WITH RECURSIVE
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+subquery คือ `SELECT` ที่เขียนไว้ภายในอีกคำสั่งหนึ่ง คิวรีชั้นในรันก่อนแล้วส่งผลลัพธ์ให้คิวรีชั้นนอก ซึ่งทำให้คุณตอบคำถามได้เป็นสองขั้นตอน: "หาค่าเฉลี่ย" แล้วก็ "แสดงแถวที่อยู่เหนือค่านั้น" common table expression หรือ CTE หยิบแนวคิดเดียวกันมาแล้วตั้งชื่อให้ผลลัพธ์ระหว่างทางด้วย `WITH` คิวรียาว ๆ จึงอ่านเหมือนเรื่องสั้น แทนที่จะเป็นปมการซ้อนที่ยุ่งเหยิง
+
+เรายังคงใช้ตาราง `authors`, `books`, และ `sales` ต่อไป
+
+## Scalar subquery
+
+scalar subquery คืนค่าเพียงค่าเดียวเป๊ะ ๆ คุณจึงวางมันได้ทุกที่ที่ต้องการค่าเดียว — รวมถึงในการเปรียบเทียบ ที่นี่เราแสดงรายการหนังสือที่ตีพิมพ์หลังจากปีที่ตีพิมพ์โดยเฉลี่ย
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT title, published
+    FROM books
+    WHERE published > (SELECT avg(published) FROM books)
+    ORDER BY published;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT title, published
+      FROM books
+      WHERE published > (SELECT avg(published) FROM books)
+      ORDER BY published
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT title, published
+        FROM books
+        WHERE published > (SELECT avg(published) FROM books)
+        ORDER BY published
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT title, published
+      FROM books
+      WHERE published > (SELECT avg(published) FROM books)
+      ORDER BY published`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT title, published
+         FROM books
+         WHERE published > (SELECT avg(published) FROM books)
+         ORDER BY published",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+      title       | published
+------------------+-----------
+ Tidal Notes      |      2011
+ The Glass Orchard|      2018
+(2 rows)
+```
+
+`SELECT avg(published)` ชั้นในผลิตตัวเลขออกมาตัวเดียว จากนั้นคิวรีชั้นนอกก็เปรียบเทียบหนังสือแต่ละเล่มกับมัน
+
+## IN และ EXISTS subquery
+
+เมื่อคิวรีชั้นในคืนรายการของค่ากลับมา `IN` จะตรวจว่าคอลัมน์ตรงกับค่าใดในรายการนั้นหรือไม่ `EXISTS` ต่างออกไปอย่างละเอียดอ่อน: มันคืนค่าจริงทันทีที่ subquery ผลิตแถวออกมาอย่างน้อยหนึ่งแถว ซึ่งทำให้มันเป็นธรรมชาติสำหรับคำถามแบบ "มีแถวที่เกี่ยวข้องอยู่ไหม?" ที่นี่เราหาผู้เขียนที่มียอดขายบันทึกไว้อย่างน้อยหนึ่งรายการ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT a.name
+    FROM authors AS a
+    WHERE EXISTS (
+      SELECT 1
+      FROM books AS b
+      JOIN sales AS s ON s.book_id = b.id
+      WHERE b.author_id = a.id
+    )
+    ORDER BY a.name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT a.name
+      FROM authors AS a
+      WHERE EXISTS (
+        SELECT 1 FROM books AS b
+        JOIN sales AS s ON s.book_id = b.id
+        WHERE b.author_id = a.id
+      )
+      ORDER BY a.name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT a.name
+        FROM authors AS a
+        WHERE EXISTS (
+          SELECT 1 FROM books AS b
+          JOIN sales AS s ON s.book_id = b.id
+          WHERE b.author_id = a.id
+        )
+        ORDER BY a.name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT a.name
+      FROM authors AS a
+      WHERE EXISTS (
+        SELECT 1 FROM books AS b
+        JOIN sales AS s ON s.book_id = b.id
+        WHERE b.author_id = a.id
+      )
+      ORDER BY a.name`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT a.name
+         FROM authors AS a
+         WHERE EXISTS (
+           SELECT 1 FROM books AS b
+           JOIN sales AS s ON s.book_id = b.id
+           WHERE b.author_id = a.id
+         )
+         ORDER BY a.name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+    name
+------------
+ Mara Linde
+ Owen Pryce
+(2 rows)
+```
+
+นี่คือ subquery แบบ *correlated*: คิวรีชั้นในอ้างถึง `a.id` จากคิวรีชั้นนอก จึงเปรียบเสมือนถูกประเมินใหม่สำหรับผู้เขียนแต่ละคน `SELECT 1` เป็นธรรมเนียมปฏิบัติ — กับ `EXISTS` มีแค่การมีอยู่ของแถวเท่านั้นที่สำคัญ ไม่ใช่ค่าของมัน เราจึง select ค่าคงที่ตัวหนึ่งออกมา
+
+## CTE: ตั้งชื่อขั้นตอนด้วย WITH
+
+CTE นิยามผลลัพธ์ชั่วคราวที่มีชื่ออยู่ด้านบนสุดของคิวรีของคุณด้วย `WITH` แล้วให้คุณอ้างถึงมันด้วยชื่อในส่วนล่าง มันไม่เปลี่ยนสิ่งที่ถูกคำนวณ แต่ช่วยคลายปมของคิวรีที่ซับซ้อน ที่นี่เรารวมยอดขายต่อหนังสือก่อน แล้วจึง join ยอดรวมเหล่านั้นกลับเข้าไปเพื่อหาชื่อของหนังสือแต่ละเล่มและตัวเลขที่พร้อมจัดอันดับ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    WITH book_sales AS (
+      SELECT book_id, sum(copies) AS total
+      FROM sales
+      GROUP BY book_id
+    )
+    SELECT b.title, bs.total
+    FROM book_sales AS bs
+    JOIN books AS b ON b.id = bs.book_id
+    ORDER BY bs.total DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      WITH book_sales AS (
+        SELECT book_id, sum(copies) AS total
+        FROM sales
+        GROUP BY book_id
+      )
+      SELECT b.title, bs.total
+      FROM book_sales AS bs
+      JOIN books AS b ON b.id = bs.book_id
+      ORDER BY bs.total DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        WITH book_sales AS (
+          SELECT book_id, sum(copies) AS total
+          FROM sales
+          GROUP BY book_id
+        )
+        SELECT b.title, bs.total
+        FROM book_sales AS bs
+        JOIN books AS b ON b.id = bs.book_id
+        ORDER BY bs.total DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      WITH book_sales AS (
+        SELECT book_id, sum(copies) AS total
+        FROM sales
+        GROUP BY book_id
+      )
+      SELECT b.title, bs.total
+      FROM book_sales AS bs
+      JOIN books AS b ON b.id = bs.book_id
+      ORDER BY bs.total DESC`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "WITH book_sales AS (
+           SELECT book_id, sum(copies) AS total
+           FROM sales
+           GROUP BY book_id
+         )
+         SELECT b.title, bs.total
+         FROM book_sales AS bs
+         JOIN books AS b ON b.id = bs.book_id
+         ORDER BY bs.total DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+      title       | total
+------------------+-------
+ The Glass Orchard|  1200
+ Tidal Notes      |   450
+ Quiet Harbors    |   200
+(3 rows)
+```
+
+ชื่อ `book_sales` อ่านเหมือนตัวแปรที่เก็บยอดรวมต่อหนังสือเอาไว้ คุณนิยาม CTE ได้หลายตัวใน `WITH` เดียว โดยคั่นด้วยจุลภาค และแต่ละตัวอ้างถึงตัวก่อนหน้าได้
+
+## ชิมลาง WITH RECURSIVE
+
+CTE แบบ `WITH RECURSIVE` อ้างถึงตัวมันเอง ซึ่งทำให้มันเดินตามโซ่หรือต้นไม้ได้ — แผนผังองค์กร, ลำดับชั้นของหมวดหมู่, หรือในที่นี้คือลำดับตัวเลขง่าย ๆ คุณไม่ต้องใช้มันบ่อยนัก แต่มันคือเครื่องมือสำหรับข้อมูลแบบลำดับชั้น
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    WITH RECURSIVE counter AS (
+      SELECT 1 AS n
+      UNION ALL
+      SELECT n + 1 FROM counter WHERE n < 5
+    )
+    SELECT n FROM counter;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      WITH RECURSIVE counter AS (
+        SELECT 1 AS n
+        UNION ALL
+        SELECT n + 1 FROM counter WHERE n < 5
+      )
+      SELECT n FROM counter
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        WITH RECURSIVE counter AS (
+          SELECT 1 AS n
+          UNION ALL
+          SELECT n + 1 FROM counter WHERE n < 5
+        )
+        SELECT n FROM counter
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      WITH RECURSIVE counter AS (
+        SELECT 1 AS n
+        UNION ALL
+        SELECT n + 1 FROM counter WHERE n < 5
+      )
+      SELECT n FROM counter`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "WITH RECURSIVE counter AS (
+           SELECT 1 AS n
+           UNION ALL
+           SELECT n + 1 FROM counter WHERE n < 5
+         )
+         SELECT n FROM counter",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ n
+---
+ 1
+ 2
+ 3
+ 4
+ 5
+(5 rows)
+```
+
+`SELECT` แรกคือจุดเริ่มต้น และส่วนที่อยู่หลัง `UNION ALL` ก็กินแถวที่ผลิตมาแล้วจนถึงตอนนี้ ไปเรื่อย ๆ จนกระทั่ง `WHERE` ของมันหยุดเพิ่มแถวใหม่ recursive CTE มีบทเจาะลึกเป็นของตัวเองในคอร์สนี้ในภายหลัง
+
+## ทิป / จุดพลาดที่พบบ่อย
+
+- scalar subquery ต้องคืนค่าเพียงหนึ่งแถวหนึ่งคอลัมน์เป๊ะ ๆ ถ้ามันคืนได้มากกว่านั้น PostgreSQL จะโยน error ออกมาตอนรันไทม์
+- CTE ให้คุณตั้งชื่อแต่ละขั้นตอน คิวรีที่ปกติจะซ้อนกันสามชั้นจึงกลายเป็นลำดับจากบนลงล่างที่อ่านง่าย
+- subquery แบบ *correlated* อ้างถึงคอลัมน์จากคิวรีชั้นนอกและเปรียบเสมือนถูกรันครั้งหนึ่งต่อหนึ่งแถวชั้นนอก ส่วนแบบ uncorrelated รันเพียงครั้งเดียว `EXISTS` มักเป็นแบบ correlated เกือบทุกครั้ง
+- เลือก `EXISTS` แทน `IN` เมื่อคุณสนใจแค่ว่ามีคู่ที่ตรงกันอยู่หรือไม่ โดยเฉพาะกับตารางขนาดใหญ่ เพราะ `EXISTS` หยุดได้ที่แถวแรกที่ตรงกัน
+- ให้คิวรี `WITH RECURSIVE` มีเงื่อนไขสิ้นสุดเสมอ มิฉะนั้นมันจะวนสร้างแถวไปตลอดกาล
+
+<Callout title="subquery หรือ CTE?">
+ทั้งสองมักคำนวณสิ่งเดียวกัน เลือก subquery สำหรับ expression เล็ก ๆ ที่ใช้ครั้งเดียวอย่าง `(SELECT avg(...))` และเลือก CTE เมื่อขั้นตอนนั้นถูกใช้ซ้ำ หรือเมื่อการตั้งชื่อมันทำให้ทั้งคิวรีอ่านง่ายขึ้น ความอ่านง่ายเป็นฟีเจอร์จริง ๆ — ตัวคุณในอนาคตที่ต้องดูแลคิวรีนี้จะขอบคุณคุณ
+</Callout>
+
+export const quizSubqueries = [
+  {
+    q: 'scalar subquery ที่ใช้ในการเปรียบเทียบต้องคืนค่าอะไร?',
+    options: [
+      'รายการของค่า',
+      'หนึ่งแถวหนึ่งคอลัมน์เป๊ะ ๆ',
+      'อย่างน้อยหนึ่งแถว',
+      'ค่า boolean จริงหรือเท็จ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'CTE ที่นิยามด้วย WITH ให้อะไรกับคุณ?',
+    options: [
+      'ตารางถาวรที่เก็บไว้บนดิสก์',
+      'ผลลัพธ์ชั่วคราวที่มีชื่อซึ่งคุณอ้างถึงได้ภายในคิวรีเดียวกัน',
+      'index บนตารางที่อยู่เบื้องล่าง',
+      'คิวรีที่เร็วขึ้นในทุกกรณี',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'EXISTS เหมาะเป็นพิเศษเมื่อใด?',
+    options: [
+      'เมื่อคุณต้องการรวมค่าของคอลัมน์',
+      'เมื่อคุณสนใจแค่ว่ามีแถวที่ตรงกันอย่างน้อยหนึ่งแถวอยู่หรือไม่',
+      'เมื่อคุณต้องการคืนคอลัมน์จากคิวรีชั้นใน',
+      'เมื่อ subquery ต้องคืนหลายคอลัมน์',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="joins-and-relationships/subqueries-and-ctes" questions={quizSubqueries} />
+
+<ProgressTracker client:visible id="joins-and-relationships/subqueries-and-ctes" />

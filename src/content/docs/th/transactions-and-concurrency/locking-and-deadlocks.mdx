@@ -1,0 +1,204 @@
+---
+title: Locking and deadlocks
+description: จับ row lock แบบชัดเจนด้วย SELECT ... FOR UPDATE และ FOR SHARE, เข้าใจ lock wait, ดูว่าสอง transaction เกิด deadlock อย่างไร และใช้ NOWAIT กับ SKIP LOCKED เพื่อควบคุมการรอ
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+MVCC ขจัดความจำเป็นในการ lock เพื่ออ่าน แต่การเขียนยังต้องถูกประสานงานอยู่ดี เมื่อสอง transaction ต้องการเปลี่ยนแถวเดียวกัน ตัวหนึ่งต้องรอให้อีกตัวทำเสร็จ ส่วนใหญ่แล้ว PostgreSQL จับ **row lock** ที่จำเป็นให้คุณในระหว่าง `UPDATE` หรือ `DELETE` แต่บางครั้งคุณก็อยาก lock แถวในขณะที่อ่านมัน เพื่อให้ไม่มีใครเปลี่ยนมันได้ก่อนที่คุณจะเปลี่ยน
+
+## จองแถวด้วย FOR UPDATE
+
+`SELECT ... FOR UPDATE` อ่านแถวและ lock มันราวกับว่าคุณกำลังจะ update มัน transaction อื่นใดที่พยายาม update, delete หรือ lock แถวนั้นด้วยจะต้องรอจนกว่าคุณจะ commit หรือ roll back นี่คือรูปแบบมาตรฐานสำหรับ "อ่านยอดเงิน ตัดสินใจ แล้วเขียนกลับ" โดยไม่เกิด lost update
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    SELECT balance FROM accounts WHERE id = 1 FOR UPDATE;
+    -- the row is now locked for this transaction
+    UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT balance FROM accounts WHERE id = $1 FOR UPDATE',
+      [1],
+    );
+    await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [100, 1]);
+    await client.query('COMMIT');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("SELECT balance FROM accounts WHERE id = %s FOR UPDATE", (1,))
+        balance = cur.fetchone()[0]
+        cur.execute("UPDATE accounts SET balance = balance - %s WHERE id = %s", (100, 1))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.Begin(ctx)
+    var balance float64
+    tx.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1 FOR UPDATE", 1).Scan(&balance)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1)
+    tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    let balance: f64 = sqlx::query_scalar("SELECT balance FROM accounts WHERE id = $1 FOR UPDATE")
+        .bind(1_i64)
+        .fetch_one(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE id = $2")
+        .bind(100_f64).bind(1_i64)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+lock คู่หูคือ `FOR SHARE` มันยอมให้คนอื่นอ่านและจับ `FOR SHARE` ได้ด้วย แต่ block ใครก็ตามที่ต้องการ `FOR UPDATE` หรือการเขียน ใช้มันเมื่อคุณต้องรับประกันว่าแถวจะไม่เปลี่ยนใต้มือคุณ แต่คุณไม่ได้ตั้งใจจะเขียนมันเอง
+
+## lock wait
+
+เมื่อ transaction ขอ lock ที่อีกตัวถืออยู่ มันก็แค่รอ query ที่กำลังรอจะดูเหมือนค้าง มันจะกลับมาทำงานทันทีที่ผู้ถือ commit หรือ roll back การถือสั้น ๆ มองไม่เห็นจากผู้ใช้ ส่วนการถือนาน ๆ กลายเป็นคิว
+
+```text
+-- session 2 issues SELECT ... FOR UPDATE on a row session 1 already locked
+-- session 2 prints nothing and blocks here until session 1 ends its transaction
+```
+
+## เมื่อการรอกลายเป็น deadlock
+
+**deadlock** เกิดขึ้นเมื่อสอง transaction ต่างก็ถือ lock ที่อีกตัวต้องการ Transaction A lock แถว 1 แล้วต้องการแถว 2 ส่วน transaction B lock แถว 2 แล้วตอนนี้ต้องการแถว 1 ไม่มีตัวใดเดินหน้าต่อได้ และไม่มีตัวใดยอมปล่อยก่อน
+
+export const deadlockCycle = `flowchart LR
+  A["Txn A holds lock on row 1"] -->|waits for row 2| B["Txn B holds lock on row 2"]
+  B -->|waits for row 1| A`;
+
+<Mermaid code={deadlockCycle} title="วงจร deadlock: แต่ละ transaction รอ lock ที่อีกตัวถืออยู่" />
+
+PostgreSQL รัน deadlock detector อยู่ หลังจาก timeout สั้น ๆ มันจะสังเกตเห็นวงจร เลือก transaction หนึ่งเป็นเหยื่อ และ abort มันด้วย error เพื่อให้อีกตัวทำงานต่อได้ เหยื่อจะเห็น SQLSTATE `40P01` และควร retry ทั้ง transaction ของมัน
+
+```text
+ERROR:  deadlock detected
+DETAIL:  Process 12345 waits for ShareLock on transaction 678; blocked by process 12346.
+HINT:  See server log for query details.
+```
+
+## เลือกที่จะไม่รอ: NOWAIT และ SKIP LOCKED
+
+บางครั้งการรอเป็นพฤติกรรมที่ผิด ตัวขยายสองตัวเปลี่ยนมันได้ `NOWAIT` ทำให้คำสั่ง fail ทันทีแทนที่จะเข้าคิวหากแถวถูก lock อยู่ ส่วน `SKIP LOCKED` ก้าวข้ามแถวที่ถูก lock อย่างเงียบ ๆ และคืนเฉพาะแถวที่มันสามารถ lock ได้ ซึ่งเป็นแกนหลักของรูปแบบ work-queue ที่ worker หลายตัวต่างก็คว้างานว่างตัวถัดไป
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- fail at once rather than wait:
+    SELECT * FROM accounts WHERE id = 1 FOR UPDATE NOWAIT;
+
+    -- a worker grabbing the next available job, ignoring locked ones:
+    SELECT id FROM jobs WHERE status = 'pending'
+    ORDER BY id
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const { rows } = await client.query(
+      `SELECT id FROM jobs WHERE status = 'pending'
+       ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`,
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT id FROM jobs WHERE status = 'pending' "
+        "ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"
+    )
+    job = cur.fetchone()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := tx.Query(ctx,
+        `SELECT id FROM jobs WHERE status = 'pending'
+         ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let job: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE status = 'pending' \
+         ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+**ใน pgAdmin:** เพื่อสังเกต lock wait สด ๆ ให้รัน `BEGIN; SELECT ... FOR UPDATE` ในแท็บ Query Tool หนึ่งโดยไม่ commit แล้วรันอันเดียวกันในแท็บที่สองและดูมันค้าง view `pg_locks` แสดงว่าใครถืออะไรอยู่ในขณะที่คุณทดลอง
+
+## Tips / gotchas
+
+- lock แถวในลำดับที่สอดคล้องกันทุกที่ในโค้ดของคุณ ถ้าทุก transaction แตะแถว 1 ก่อนแถว 2 วงจรที่ก่อให้เกิด deadlock ก็จะไม่มีวันก่อตัวขึ้นได้
+- ปฏิบัติต่อ deadlock error (`40P01`) และ serialization failure (`40001`) แบบเดียวกัน คือ roll back แล้ว retry ทั้ง transaction ทั้งสองเป็นเรื่องที่คาดหมายได้ภายใต้ concurrency
+- ทำให้งานระหว่างการจับ lock กับการ commit สั้นที่สุดเท่าที่จะทำได้ ยิ่งคุณถือ lock นานเท่าใด คนอื่นก็เข้าคิวต่อท้ายคุณนานขึ้นเท่านั้น
+- `SKIP LOCKED` เหมาะอย่างยิ่งสำหรับคิว แต่ผิดสำหรับงานบัญชี มันจงใจเพิกเฉยต่อแถว ดังนั้นอย่าใช้มันในที่ที่คุณต้องเห็นทุกแถวที่ตรงกัน
+
+<Callout title="ลำดับ lock ที่สอดคล้องกันป้องกัน deadlock ส่วนใหญ่ได้">
+deadlock ไม่ได้เกิดจากการ lock มากเกินไป แต่เกิดจากการ lock ในลำดับที่ขัดแย้งกัน จงตัดสินใจลำดับสากลหนึ่งลำดับสำหรับการจับ lock เช่นเรียงตาม primary key จากน้อยไปมากเสมอ และนำไปใช้ในทุก transaction PostgreSQL จะยังตรวจจับ deadlock ใด ๆ ที่หลุดรอดมาได้ แต่คุณจะแทบไม่ส่งมันให้ไปค้นเจอเลย
+</Callout>
+
+export const quizLocks = [
+  {
+    q: 'What does SELECT ... FOR UPDATE do?',
+    options: [
+      'คืนแถวเร็วขึ้นด้วยการข้าม snapshot',
+      'อ่านและ lock แถวเพื่อให้คนอื่นต้องรอที่จะเปลี่ยนพวกมัน',
+      'กันแถวไม่ให้ถูกลบอย่างถาวร',
+      'commit transaction ปัจจุบัน',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'How does PostgreSQL resolve a deadlock between two transactions?',
+    options: [
+      'มันรอตลอดไปจนกว่าไคลเอนต์ตัวหนึ่งจะตัดการเชื่อมต่อ',
+      'มันตรวจจับวงจรและ abort transaction หนึ่งเป็นเหยื่อ',
+      'มันรวมสอง transaction เข้าด้วยกัน',
+      'มันลด isolation level ลงโดยอัตโนมัติ',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which practice most reliably prevents deadlocks?',
+    options: [
+      'ใช้ SELECT โดยไม่มี FOR UPDATE',
+      'จับ lock ในลำดับที่สอดคล้องกันข้ามทุก transaction',
+      'ตั้ง isolation level เป็น Read Committed',
+      'รัน VACUUM บ่อยขึ้น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactions-and-concurrency/locking-and-deadlocks" questions={quizLocks} />
+
+<ProgressTracker client:visible id="transactions-and-concurrency/locking-and-deadlocks" />

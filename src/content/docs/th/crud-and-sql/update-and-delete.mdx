@@ -1,0 +1,284 @@
+---
+title: การ update และ delete
+description: เปลี่ยน row ด้วย UPDATE และลบมันด้วย DELETE — ใช้ WHERE clause เสมอ, ทำไม WHERE ที่หายไปจึงอันตราย และการใช้ RETURNING เพื่อยืนยัน
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+สองคำกริยา CRUD สุดท้ายเปลี่ยนแปลงข้อมูลที่มีอยู่ `UPDATE` ตั้งค่า column ใหม่บน row ที่ตรงกับเงื่อนไข และ `DELETE` ลบ row ที่ตรงกัน ทั้งคู่พึ่งพา `WHERE` clause ที่คุณเรียนมาสำหรับ `SELECT` อย่างมาก — และทั้งคู่กลายเป็นความผิดพลาดที่สร้างความเสียหายหากคุณลืมมัน
+
+เราใช้ table `authors` และ `books` กันต่อไป
+
+## การ update column
+
+`UPDATE` ระบุชื่อ table แสดงรายการคู่ `SET column = value` และใช้ `WHERE` เพื่อเลือก row หากไม่มี `WHERE` ทุก row จะถูกเปลี่ยน
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    UPDATE books
+    SET copies_sold = copies_sold + 500
+    WHERE id = 1;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'UPDATE books SET copies_sold = copies_sold + $1 WHERE id = $2',
+      [500, 1],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "UPDATE books SET copies_sold = copies_sold + %s WHERE id = %s",
+        (500, 1),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx,
+        "UPDATE books SET copies_sold = copies_sold + $1 WHERE id = $2",
+        500, 1)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("UPDATE books SET copies_sold = copies_sold + $1 WHERE id = $2")
+        .bind(500_i32)
+        .bind(1_i64)
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ค่าใหม่สามารถอ้างถึงค่าเก่าได้ ดังที่ `copies_sold + 500` แสดงให้เห็น คุณสามารถตั้งค่าหลาย column พร้อมกันได้โดยคั่นการกำหนดค่าแต่ละอันด้วยเครื่องหมายจุลภาค
+
+**ใน pgAdmin:** รันสิ่งนี้ใน Query Tool แผงข้อความจะรายงานว่า `UPDATE 1` ซึ่งเป็นจำนวน row ที่ถูกเปลี่ยน
+
+## การยืนยันการเปลี่ยนแปลงด้วย RETURNING
+
+เช่นเดียวกับ `INSERT` ทั้ง `UPDATE` และ `DELETE` รองรับ `RETURNING` นี่เป็นวิธีที่สะอาดที่สุดในการดูว่า row ใดถูกเปลี่ยนแปลงเป๊ะ ๆ และค่าใหม่ของมันคืออะไร
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    UPDATE books
+    SET published = 2005
+    WHERE title = 'The Glass Orchard'
+    RETURNING id, title, published;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published',
+      [2005, 'The Glass Orchard'],
+    );
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "UPDATE books SET published = %s WHERE title = %s RETURNING id, title, published",
+        (2005, "The Glass Orchard"),
+    )
+    changed = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published",
+        2005, "The Glass Orchard")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published",
+    )
+    .bind(2005_i32)
+    .bind("The Glass Orchard")
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ id |       title       | published
+----+-------------------+-----------
+  1 | The Glass Orchard |      2005
+(1 row)
+```
+
+## การลบ row
+
+`DELETE FROM` ลบ row ที่ตรงกับ `WHERE` clause เช่นเดียวกับ `UPDATE` คุณสามารถเพิ่ม `RETURNING` เพื่อดูว่าอะไรถูกลบไป
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    DELETE FROM books
+    WHERE copies_sold = 0
+    RETURNING id, title;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'DELETE FROM books WHERE copies_sold = $1 RETURNING id, title',
+      [0],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "DELETE FROM books WHERE copies_sold = %s RETURNING id, title",
+        (0,),
+    )
+    removed = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "DELETE FROM books WHERE copies_sold = $1 RETURNING id, title",
+        0)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query("DELETE FROM books WHERE copies_sold = $1 RETURNING id, title")
+        .bind(0_i32)
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ id |     title
+----+----------------
+  3 | Quiet Harbors
+(1 row)
+```
+
+## อันตรายของ WHERE ที่หายไป
+
+`UPDATE` และ `DELETE` ทำกับทุก row ที่ตรงกับเงื่อนไข — และถ้าไม่มีเงื่อนไข ทุก row ก็ตรงทั้งหมด การรัน `DELETE FROM books;` จะล้าง table ทั้งหมดให้ว่างเปล่า และ `UPDATE books SET copies_sold = 0;` จะทำให้ทุกระเบียนเป็นศูนย์ ไม่มีปุ่ม undo
+
+นิสัยที่ปลอดภัยคือการรัน `WHERE` เดียวกันเป็น `SELECT` ก่อน ยืนยันจำนวน row แล้วค่อยสลับคำกริยา การห่อการเปลี่ยนแปลงที่เสี่ยงไว้ใน transaction จะให้ทางหนีฉุกเฉินแก่คุณ
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    DELETE FROM books WHERE author_id = 4;
+    -- inspect the result, then decide:
+    ROLLBACK;  -- or COMMIT; to keep the change
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM books WHERE author_id = $1', [4]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("DELETE FROM books WHERE author_id = %s", (4,))
+    # commits if the block succeeds, rolls back on exception
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    if _, err := tx.Exec(ctx, "DELETE FROM books WHERE author_id = $1", 4); err != nil {
+        tx.Rollback(ctx)
+        return err
+    }
+    err = tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM books WHERE author_id = $1")
+        .bind(4_i64)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+ภายใน transaction ไม่มีอะไรถาวรจนกว่าคุณจะ `COMMIT` ส่วน `ROLLBACK` จะทิ้งการเปลี่ยนแปลงไป transaction จะมีบทเรียนเต็ม ๆ ของมันเองในภายหลังของคอร์ส
+
+## Tips / gotchas
+
+- ใส่ `WHERE` clause บน `UPDATE` และ `DELETE` เสมอ เว้นแต่คุณตั้งใจจริง ๆ ที่จะแตะต้องทุก row การลืม `WHERE` จะเขียนทับหรือล้าง table ทั้งหมดให้ว่างเปล่า
+- แสดงตัวอย่างคำสั่งที่สร้างความเสียหายล่วงหน้าโดยการรัน `SELECT count(*) ... WHERE ...` ที่ตรงกันก่อน เพื่อยืนยันว่าคุณกำลังจะกระทบกี่ row
+- ห่อการเปลี่ยนแปลงที่เสี่ยงหรือหลายขั้นตอนไว้ใน transaction เพื่อให้คุณ `ROLLBACK` ได้ถ้าผลลัพธ์ผิด
+- ใช้ `RETURNING` เพื่อตรวจสอบว่า row ใดถูกเปลี่ยนแปลงเป๊ะ ๆ แทนการไว้ใจแค่จำนวน row เพียงอย่างเดียว
+- `DELETE` อาจล้มเหลวได้ถ้า table อื่นอ้างถึง row นั้นผ่าน foreign key คุณจะกลับมาเจอเรื่องนี้อีกในโมดูล join และความสัมพันธ์
+
+<Callout title="WHERE ไม่ใช่ตัวเลือกในทางปฏิบัติ">
+อุบัติเหตุบน production ที่พบบ่อยที่สุดอันดับหนึ่งกับ SQL คือ `UPDATE` หรือ `DELETE` ที่รันโดยไม่มี `WHERE` clause สร้างความเคยชินให้กล้ามเนื้อจดจำ: พิมพ์ `WHERE` ก่อน แล้วค่อยพิมพ์ค่าทีหลัง เมื่อสงสัย ให้ทำมันภายใน transaction ที่คุณ rollback ได้
+</Callout>
+
+export const quizUpdateDelete = [
+  {
+    q: 'What happens if you run UPDATE books SET copies_sold = 0; with no WHERE clause?',
+    options: [
+      'Only the first row is updated',
+      'Every row in the table is set to 0',
+      'PostgreSQL refuses to run it',
+      'Nothing changes until you commit',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which clause lets an UPDATE or DELETE report exactly which rows it changed?',
+    options: ['SET', 'RETURNING', 'WHERE', 'LIMIT'],
+    answer: 1,
+  },
+  {
+    q: 'How can you make a risky DELETE reversible while you check the result?',
+    options: [
+      'Run it twice',
+      'Wrap it in a transaction and ROLLBACK if wrong',
+      'Add ORDER BY',
+      'Use DELETE ALL instead',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/update-and-delete" questions={quizUpdateDelete} />
+
+<ProgressTracker client:visible id="crud-and-sql/update-and-delete" />

@@ -1,0 +1,177 @@
+---
+title: Backup and security
+description: Protect your data with logical and physical backups and point-in-time recovery, and lock it down with roles, GRANT and REVOKE, row-level security, TLS, and pg_hba.conf.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The last two operational duties are the ones you hope never to need and cannot afford to skip. **Backups** let you rebuild after a disk failure, a bad deploy, or a mistaken `DELETE`. **Security** controls who may connect, who may see what, and how the data travels over the network. A database that is fast and highly available is still a liability if it cannot be restored or if anyone on the internet can read it.
+
+This lesson covers both families of backup PostgreSQL offers, then walks down the layers of access control from the network edge to individual rows.
+
+## Two kinds of backup
+
+PostgreSQL backups come in two styles that suit different needs.
+
+| Type     | Tool                          | What it captures                        | Best for                          |
+|----------|-------------------------------|-----------------------------------------|-----------------------------------|
+| Logical  | `pg_dump` / `pg_restore`      | SQL or an archive of one database       | Single databases, version moves   |
+| Physical | base backup + WAL archiving   | The whole cluster's files, byte-for-byte| Large clusters, point-in-time recovery |
+
+### Logical backups
+
+A logical backup runs `pg_dump`, which reads a database and writes out the statements needed to recreate it. It is portable across machines and even across major versions, which makes it ideal for moving or cloning a single database.
+
+```bash
+# Dump one database to a compressed custom-format archive
+pg_dump --format=custom --file=shop.dump --dbname=shop
+
+# Restore that archive into a fresh database
+pg_restore --dbname=shop_restored --create shop.dump
+```
+
+The custom format used here lets `pg_restore` selectively restore parts and run in parallel. For small databases a plain SQL file you replay with `psql` works too.
+
+### Physical backups and point-in-time recovery
+
+For a large or busy cluster, dumping logically is too slow. Instead you take a **base backup** — a byte-level copy of the data files — and continuously archive the write-ahead log. Replaying the WAL on top of the base backup lets you restore to any moment in time, known as **point-in-time recovery** (PITR).
+
+```bash
+# Take a base backup of the whole cluster
+pg_basebackup --pgdata=/backups/base --format=tar --gzip --progress
+```
+
+```conf
+# postgresql.conf: keep every WAL segment by archiving it
+archive_mode = on
+archive_command = 'test ! -f /archive/%f && cp %p /archive/%f'
+```
+
+With a base backup plus the archived WAL, recovery means restoring the base files and telling PostgreSQL to replay WAL up to a chosen timestamp — so you can rewind to the second before a bad migration ran.
+
+export const backupDiagram = `flowchart LR
+  PG[(Primary cluster)] -->|pg_basebackup| Base[Base backup]
+  PG -->|archive_command| WAL[Archived WAL segments]
+  Base --> Restore[Restore]
+  WAL -->|replay to a chosen time| Restore
+  Restore --> Recovered[(Recovered cluster)]`;
+
+<Mermaid code={backupDiagram} title="Base backup plus archived WAL enables point-in-time recovery" />
+
+## Security in layers
+
+Access control in PostgreSQL is best pictured as a series of gates a request passes through: first the network, then authentication, then role privileges, and finally row-level rules. Each layer can stop a request the previous one let through.
+
+export const securityDiagram = `flowchart LR
+  Client[Client] -->|encrypted with TLS| HBA[pg_hba.conf - who may connect]
+  HBA --> Auth[Authenticate the role]
+  Auth --> Priv[Role privileges - GRANT and REVOKE]
+  Priv --> RLS[Row-level security policy]
+  RLS --> Data[(Table rows)]`;
+
+<Mermaid code={securityDiagram} title="A connection passes through network, auth, privilege, and row gates" />
+
+### The network gate: pg_hba.conf and TLS
+
+The first gate is `pg_hba.conf` (host-based authentication). Each line says which roles may connect to which databases from which addresses, and how they must authenticate. Rules are read top to bottom, and the first match wins.
+
+```conf
+# TYPE  DATABASE  USER   ADDRESS         METHOD
+hostssl all       app    10.0.0.0/24     scram-sha-256
+host    all       all    127.0.0.1/32    scram-sha-256
+```
+
+The `hostssl` keyword requires the connection to be encrypted with **TLS**, which you enable in `postgresql.conf` by pointing at a certificate and key.
+
+```conf
+# postgresql.conf
+ssl = on
+ssl_cert_file = '/etc/postgresql/server.crt'
+ssl_key_file  = '/etc/postgresql/server.key'
+```
+
+### Roles and privileges: GRANT and REVOKE
+
+Once connected, what a role may do is governed by privileges. You create roles, then `GRANT` specific rights and `REVOKE` them. The guiding principle is **least privilege**: give each role only what it needs.
+
+```sql
+-- A read-only reporting role
+CREATE ROLE reporting LOGIN PASSWORD 'set-a-strong-one';
+GRANT CONNECT ON DATABASE shop TO reporting;
+GRANT USAGE ON SCHEMA public TO reporting;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO reporting;
+
+-- An application role that may also write to one table
+CREATE ROLE app LOGIN PASSWORD 'set-a-strong-one';
+GRANT SELECT, INSERT, UPDATE ON orders TO app;
+REVOKE DELETE ON orders FROM app;
+```
+
+### Row-level security
+
+Privileges control whole tables. **Row-level security** (RLS) goes finer, letting a policy decide which *rows* a role may see or change — the foundation of multi-tenant systems where each tenant must see only its own data.
+
+```sql
+-- Turn on RLS and add a policy keyed to a session setting
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = current_setting('app.tenant_id')::bigint);
+```
+
+With this policy, a query against `orders` silently returns only rows whose `tenant_id` matches the value the application set for the current session. One forgotten `WHERE` no longer leaks another tenant's data.
+
+## Tips / gotchas
+
+- A backup is only real once you have restored it successfully. Schedule regular test restores into a throwaway database and confirm the data is intact.
+- Logical dumps are portable and great for single databases; physical base backups plus WAL archiving are what you need for large clusters and point-in-time recovery.
+- Apply least privilege everywhere. The application role should not own the schema or be able to drop tables, and reporting should be read-only.
+- Never use `trust` authentication on any address reachable from outside the host — it lets anyone connect as any role with no password.
+- Require TLS for connections that cross a network with `hostssl`, and remember that `pg_hba.conf` rules are matched top to bottom, first match wins.
+
+<Callout title="Defence in depth">
+No single control is enough. The network gate keeps strangers out, authentication proves identity, role privileges limit actions, and row-level security limits visibility. Backups sit beneath all of it as the final safety net. Operate as though each layer will occasionally fail, and make sure the next one still protects you.
+</Callout>
+
+export const quizBackupSecurity = [
+  {
+    q: 'Which backup approach is best suited to point-in-time recovery on a large cluster?',
+    options: [
+      'A single pg_dump run once a week',
+      'A physical base backup combined with continuously archived WAL',
+      'Copying the data files while the server is running, with no WAL',
+      'Exporting each table to a spreadsheet',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does row-level security let you control that GRANT and REVOKE do not?',
+    options: [
+      'Which network addresses may connect',
+      'Which individual rows a role may see or modify',
+      'How fast queries run',
+      'Whether the connection is encrypted',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Why should you avoid trust authentication on a publicly reachable address?',
+    options: [
+      'It encrypts data too slowly',
+      'It lets anyone connect as any role with no password',
+      'It disables backups',
+      'It only works on Windows',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="operations-and-scaling/backup-and-security" questions={quizBackupSecurity} />
+
+<ProgressTracker client:visible id="operations-and-scaling/backup-and-security" />

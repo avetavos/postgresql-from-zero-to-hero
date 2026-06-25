@@ -1,0 +1,226 @@
+---
+title: Upsert with ON CONFLICT
+description: Insert a row or update it if it already exists, in one statement — PostgreSQL upsert with ON CONFLICT, the EXCLUDED pseudo-table, and DO NOTHING.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Sometimes you want to insert a row, but if a matching one already exists you would rather update it than fail. Doing this by hand — check first, then insert or update — is racy: two requests can both see "no row" and both try to insert. PostgreSQL solves this atomically with `INSERT ... ON CONFLICT`, often called **upsert** (update plus insert).
+
+For these examples, imagine the `books` table has a unique constraint on `title`, so no two books can share the exact same title.
+
+```sql
+ALTER TABLE books ADD CONSTRAINT books_title_key UNIQUE (title);
+```
+
+## How upsert decides
+
+When the insert would violate the named unique constraint, PostgreSQL does not error out; instead it runs the action in your `ON CONFLICT` clause — either updating the existing row or quietly doing nothing.
+
+export const upsertDiagram = `flowchart TD
+  A[INSERT row] --> B{Conflicts with unique constraint?}
+  B -- No --> C[Insert the new row]
+  B -- Yes --> D{ON CONFLICT action}
+  D -- DO UPDATE --> E[Update the existing row]
+  D -- DO NOTHING --> F[Leave the existing row unchanged]`;
+
+<Mermaid code={upsertDiagram} title="What ON CONFLICT does on a duplicate" />
+
+## DO UPDATE with EXCLUDED
+
+You name the column (or constraint) that defines a conflict, then describe how to update. Inside the update, the special `EXCLUDED` table holds the values you *tried* to insert, so you can copy them into the existing row.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO books (title, author_id, published, copies_sold)
+    VALUES ('The Glass Orchard', 1, 2005, 1200)
+    ON CONFLICT (title)
+    DO UPDATE SET
+      published   = EXCLUDED.published,
+      copies_sold = EXCLUDED.copies_sold
+    RETURNING id, title, copies_sold;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      `INSERT INTO books (title, author_id, published, copies_sold)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (title)
+       DO UPDATE SET published = EXCLUDED.published,
+                     copies_sold = EXCLUDED.copies_sold
+       RETURNING id, title, copies_sold`,
+      ['The Glass Orchard', 1, 2005, 1200],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        """
+        INSERT INTO books (title, author_id, published, copies_sold)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (title)
+        DO UPDATE SET published = EXCLUDED.published,
+                      copies_sold = EXCLUDED.copies_sold
+        RETURNING id, title, copies_sold
+        """,
+        ("The Glass Orchard", 1, 2005, 1200),
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        `INSERT INTO books (title, author_id, published, copies_sold)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (title)
+         DO UPDATE SET published = EXCLUDED.published,
+                       copies_sold = EXCLUDED.copies_sold
+         RETURNING id, title, copies_sold`,
+        "The Glass Orchard", 1, 2005, 1200)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "INSERT INTO books (title, author_id, published, copies_sold)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (title)
+         DO UPDATE SET published = EXCLUDED.published,
+                       copies_sold = EXCLUDED.copies_sold
+         RETURNING id, title, copies_sold",
+    )
+    .bind("The Glass Orchard")
+    .bind(1_i64)
+    .bind(2005_i32)
+    .bind(1200_i32)
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Because a book titled "The Glass Orchard" already exists, the insert turns into an update of that row:
+
+```text
+ id |       title       | copies_sold
+----+-------------------+-------------
+  1 | The Glass Orchard |        1200
+(1 row)
+```
+
+Run the same statement with a brand-new title and there is no conflict, so it inserts normally and returns the freshly generated id.
+
+**In pgAdmin:** run the statement twice in the Query Tool — the first run inserts, the second hits the conflict and updates. The Data Output grid shows the returned row each time.
+
+## DO NOTHING
+
+If you only want to insert when the row is new, and silently skip duplicates, use `DO NOTHING`. No error, no update.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    INSERT INTO books (title, author_id, published)
+    VALUES ('The Glass Orchard', 1, 2005)
+    ON CONFLICT (title) DO NOTHING;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING',
+      ['The Glass Orchard', 1, 2005],
+    );
+    console.log(res.rowCount); // 0 when the row already existed
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO books (title, author_id, published) VALUES (%s, %s, %s) ON CONFLICT (title) DO NOTHING",
+        ("The Glass Orchard", 1, 2005),
+    )
+    # cur.rowcount is 0 when nothing was inserted
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tag, err := conn.Exec(ctx,
+        "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING",
+        "The Glass Orchard", 1, 2005)
+    // tag.RowsAffected() is 0 when the row already existed
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let result = sqlx::query(
+        "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING",
+    )
+    .bind("The Glass Orchard")
+    .bind(1_i64)
+    .bind(2005_i32)
+    .execute(&pool)
+    .await?;
+    // result.rows_affected() is 0 when nothing was inserted
+    ```
+  </TabItem>
+</Tabs>
+
+When the row already exists, zero rows are affected; when it is new, one row is inserted.
+
+## Tips / gotchas
+
+- Upsert needs a unique constraint or unique index to detect a conflict. `ON CONFLICT (title)` only works because `title` is unique; without that, PostgreSQL has no notion of a duplicate.
+- The `EXCLUDED` table refers to the row you tried to insert. Use it in `DO UPDATE` to pull the new values into the existing row.
+- You can add a `WHERE` to `DO UPDATE` to update only under certain conditions, for example `DO UPDATE SET copies_sold = EXCLUDED.copies_sold WHERE EXCLUDED.copies_sold > books.copies_sold`.
+- `DO NOTHING` returns zero affected rows on a conflict, so check the row count if you need to know whether an insert actually happened.
+- Keep passing values as placeholders here too; upsert is still an `INSERT`, and the same SQL injection rules apply.
+
+<Callout title="One atomic statement">
+The real win of `ON CONFLICT` is atomicity. A check-then-insert in application code can lose a race between two requests, but a single upsert statement either inserts or updates exactly once, with the unique constraint enforcing correctness for you.
+</Callout>
+
+export const quizUpsert = [
+  {
+    q: 'What must exist on a column before ON CONFLICT (col) can detect a duplicate?',
+    options: [
+      'A foreign key',
+      'A unique constraint or unique index',
+      'A NOT NULL constraint',
+      'A default value',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'In DO UPDATE, what does EXCLUDED.copies_sold refer to?',
+    options: [
+      'The value currently stored in the existing row',
+      'The value you attempted to insert',
+      'Always zero',
+      'A random row from the table',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does ON CONFLICT (title) DO NOTHING do when the title already exists?',
+    options: [
+      'Raises a unique violation error',
+      'Updates the existing row',
+      'Skips the insert, affecting zero rows',
+      'Deletes the existing row',
+    ],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="crud-and-sql/upsert-on-conflict" questions={quizUpsert} />
+
+<ProgressTracker client:visible id="crud-and-sql/upsert-on-conflict" />

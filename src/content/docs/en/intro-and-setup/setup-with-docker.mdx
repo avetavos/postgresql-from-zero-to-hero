@@ -1,0 +1,146 @@
+---
+title: Setup with Docker
+description: Run PostgreSQL from the official Docker image — a single docker run command, a docker-compose.yml with pgAdmin, verifying the container, and connecting with psql.
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The fastest way to get a real PostgreSQL running is the official `postgres` Docker image. Docker downloads a ready-made copy of the database, starts it in an isolated container, and tears it down cleanly when you are done — no system-wide install, no leftover services. This lesson gets you from nothing to a running database you can connect to in a couple of commands.
+
+You will need Docker installed and running. Everything below uses plain `docker` and `docker compose` commands.
+
+## One command to run Postgres
+
+This single command pulls the image if needed and starts a database. It sets the superuser password, publishes the standard port, and stores the data in a named volume so it survives a container restart.
+
+```bash
+docker run --name pg \
+  -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 \
+  -v pgdata:/var/lib/postgresql/data \
+  -d postgres:17
+```
+
+A quick tour of the flags:
+
+- `--name pg` gives the container a memorable name so later commands can refer to it.
+- `-e POSTGRES_PASSWORD=secret` sets the password for the default `postgres` user. This variable is required; the image refuses to start without it.
+- `-p 5432:5432` maps the container's PostgreSQL port to the same port on your machine, so tools on the host can connect to `localhost:5432`.
+- `-v pgdata:/var/lib/postgresql/data` mounts a named volume at the directory where Postgres stores its files, so your data is not lost when the container is removed.
+- `-d postgres:17` runs the official image, tag `17`, in the background.
+
+## A docker-compose.yml for repeatable setups
+
+Typing that command every time gets old, and you often want a GUI alongside the database. A `docker-compose.yml` captures the whole setup in one file so you can start everything with `docker compose up`. This one runs PostgreSQL plus **pgAdmin**, a web GUI you will tour in the next lesson.
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: appdb
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: secret
+    ports:
+      - '8080:80'
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
+```
+
+Save it as `docker-compose.yml` and start everything from that directory:
+
+```bash
+docker compose up -d
+```
+
+PostgreSQL is now on `localhost:5432` and pgAdmin on `http://localhost:8080`. If you would rather use a lighter GUI, swap the `pgadmin` service for the `adminer` image, which serves a single-file admin page on its own port. Either way the database service is unchanged.
+
+## How the pieces fit together
+
+A container is a running copy of the image, the named volume is where the actual data files live on your machine, and clients connect over the published port. The volume is deliberately separate from the container so the data outlives any single container.
+
+export const dockerDiagram = `flowchart LR
+  V[(pgdata named volume)] --> P[postgres container]
+  P -->|port 5432| H[Host machine]
+  H --> CLI[psql or driver]
+  H --> GUI[pgAdmin in browser]`;
+
+<Mermaid code={dockerDiagram} title="Container, volume, and clients" />
+
+## Verify and connect
+
+Confirm the container is up:
+
+```bash
+docker ps
+```
+
+You should see a row for the `postgres` image with a status of `Up` and the port mapping `0.0.0.0:5432->5432/tcp`. Now connect with `psql`. If you have it on your host, point it at the database with a connection string:
+
+```bash
+psql "postgresql://postgres:secret@localhost:5432/postgres"
+```
+
+No local `psql`? The image bundles one, so you can run it inside the container instead:
+
+```bash
+docker exec -it pg psql -U postgres
+```
+
+Either way you land at the `postgres=#` prompt, ready to run SQL. When you are finished for the day, `docker compose down` stops everything; because the data lives in the `pgdata` volume, it is all still there next time you bring the stack back up.
+
+## Tips / gotchas
+
+- The named volume is what makes your data persistent. Remove the container and the data stays; delete the volume and the data is gone for good.
+- `5432` is PostgreSQL's default port and `postgres` is the default superuser. Tools assume these unless told otherwise.
+- `POSTGRES_DB` creates an extra database on first startup. Without it, you still get the built-in `postgres` database to work in.
+- `POSTGRES_PASSWORD` is mandatory for the official image. Use a real secret outside of local experiments, not `secret`.
+- Pin a major version like `postgres:17` rather than `postgres:latest` so an image update never surprises you with a different version.
+
+<Callout title="Disposable database, durable data">
+Containers are meant to be thrown away and recreated freely, but your data should not be. Keeping the data in a named volume gives you the best of both: you can destroy and rebuild the container as often as you like while the rows stay safely on disk.
+</Callout>
+
+export const quizDocker = [
+  {
+    q: 'Why mount a named volume at the Postgres data directory?',
+    options: [
+      'To make the container start faster',
+      'So the data survives when the container is removed',
+      'To change the default port',
+      'It is required for the image to run',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'Which environment variable must be set for the official postgres image to start?',
+    options: ['POSTGRES_DB', 'POSTGRES_PASSWORD', 'PGADMIN_DEFAULT_EMAIL', 'POSTGRES_PORT'],
+    answer: 1,
+  },
+  {
+    q: 'What is PostgreSQL\'s default port?',
+    options: ['80', '3306', '5432', '8080'],
+    answer: 2,
+  },
+];
+
+<Quiz client:visible id="intro-and-setup/setup-with-docker" questions={quizDocker} />
+
+<ProgressTracker client:visible id="intro-and-setup/setup-with-docker" />

@@ -1,0 +1,100 @@
+---
+title: Welcome to the course
+description: What this course covers, PostgreSQL in one paragraph, the eight-module journey from zero to hero, and how each module builds on the last.
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+This course takes you from never having opened a database to being comfortable running, querying, and operating PostgreSQL with confidence. You will write real SQL, see the same operations in four popular drivers, and learn the ideas behind the commands so the knowledge transfers to whatever language and project you work on next.
+
+PostgreSQL is a free, open-source relational database. It stores your data in tables, lets you read and change that data with **SQL**, and protects every change with **ACID** guarantees so your data stays correct even when things crash or many users write at once. It is also famously **extensible**: you can add data types, functions, and entire features through extensions, which is why the same engine powers tiny side projects and some of the largest systems in the world.
+
+## Who this course is for
+
+You do not need any database experience. If you have written a little code in any language, or even just used a terminal, you have everything you need to start. Every example is runnable, and we always show the plain `psql` version first so you can follow along with nothing but the database itself.
+
+## The journey ahead
+
+The course is eight modules long. Each one assumes the previous, so the cleanest path is straight through, top to bottom. The diagram below shows how the modules build on one another, from installing the database to operating it at scale.
+
+export const journeyDiagram = `flowchart TD
+  M1[1. Intro and Setup] --> M2[2. Tables and Types]
+  M2 --> M3[3. CRUD and SQL]
+  M3 --> M4[4. Joins and Relationships]
+  M4 --> M5[5. Indexes and Performance]
+  M5 --> M6[6. Transactions and Concurrency]
+  M6 --> M7[7. Advanced PostgreSQL]
+  M7 --> M8[8. Operations and Scaling]`;
+
+<Mermaid code={journeyDiagram} title="The eight-module journey from zero to hero" />
+
+## Module map
+
+Here is what each stop on the journey gives you.
+
+| Module | You will learn |
+|--------|----------------|
+| Intro and Setup | What PostgreSQL is, running it in Docker, the `psql` shell, pgAdmin, and databases and schemas |
+| Tables and Types | Designing tables, picking column types, constraints, and default values |
+| CRUD and SQL | Inserting, reading, updating, and deleting rows with SQL |
+| Joins and Relationships | Connecting tables with keys and combining them with joins |
+| Indexes and Performance | Making queries fast and reading the query planner |
+| Transactions and Concurrency | Grouping changes safely and handling many writers |
+| Advanced PostgreSQL | JSONB, full-text search, window functions, and extensions |
+| Operations and Scaling | Backups, monitoring, replication, and growing the database |
+
+## What you are in right now
+
+This first module, **Intro and Setup**, gets you a working PostgreSQL and the tools to talk to it. By the end you will have a database running, you will know how to connect from the shell, a GUI, and code, and you will understand how PostgreSQL organizes data into databases and schemas. The lessons in order are: what PostgreSQL is, setting it up with Docker, using `psql` and pgAdmin, and finally creating databases and schemas and connecting to them.
+
+## How to use the lessons
+
+Every lesson follows the same rhythm: a short explanation of the idea, runnable examples, a few tips and gotchas, and a short quiz to check your understanding. Whenever a lesson shows a database operation, you will see it in five tabs — the `psql` shell plus Node.js, Python, Go, and Rust — so you can read it in the language closest to your own work.
+
+## Tips / gotchas
+
+- Read in order the first time through; later modules lean on terms and tables introduced earlier.
+- You do not have to memorize commands. The goal is to recognize the shape of each operation so you can look up the details quickly.
+- Run the examples yourself. Typing the commands fixes them in memory far better than reading alone.
+- Mark each lesson complete with the tracker at the bottom so you can see your progress across the course.
+
+<Callout title="One database, many doors">
+PostgreSQL is a single server you can reach from many directions: a command-line shell, a graphical tool, or application code in almost any language. The commands look a little different in each, but they all send the same SQL to the same engine. Learn the SQL once and every door opens.
+</Callout>
+
+export const quizIndex = [
+  {
+    q: 'How many modules make up this course?',
+    options: ['Four', 'Six', 'Eight', 'Ten'],
+    answer: 2,
+  },
+  {
+    q: 'Which phrase best describes PostgreSQL?',
+    options: [
+      'A closed-source spreadsheet program',
+      'A free, open-source relational database',
+      'A programming language',
+      'A web browser',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does the first module, Intro and Setup, focus on?',
+    options: [
+      'Replication and backups at scale',
+      'Getting PostgreSQL running and learning the tools to connect to it',
+      'Writing advanced window functions',
+      'Designing indexes for performance',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-setup/index" questions={quizIndex} />
+
+<ProgressTracker client:visible id="intro-and-setup/index" />

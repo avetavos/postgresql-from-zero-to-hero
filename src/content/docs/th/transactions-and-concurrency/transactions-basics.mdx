@@ -1,0 +1,284 @@
+---
+title: Transaction basics
+description: ใช้ BEGIN, COMMIT และ ROLLBACK เพื่อทำให้กลุ่มคำสั่งเป็น atomic และใช้ SAVEPOINT กับ ROLLBACK TO สำหรับการ roll back บางส่วน ทั้งหมดผ่านตัวอย่างการโอนเงินระหว่างบัญชี
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+transaction เปลี่ยนหลายคำสั่งให้กลายเป็นหน่วยเดียวที่แบ่งแยกไม่ได้ คุณเปิดมันด้วย `BEGIN` รันคำสั่งที่ต้องการจัดกลุ่ม แล้วปิดมันด้วย `COMMIT` เพื่อเก็บงานไว้ หรือ `ROLLBACK` เพื่อทิ้งงานนั้น สิ่งที่อยู่ภายใน transaction จะไม่ปรากฏให้ connection อื่นเห็นจนกว่าคุณจะ commit
+
+เราจะใช้ตาราง `accounts` เล็ก ๆ ในทุกตัวอย่างของบทเรียนนี้
+
+```sql
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+```
+
+## การโอนเงินแบบคลาสสิก
+
+การย้ายเงิน 100 จาก Ada ไปยัง Linus คือการ update สองครั้งที่ต้องเกิดขึ้นพร้อมกัน ถ้าเซิร์ฟเวอร์ crash ระหว่างสองคำสั่งนั้น atomicity รับประกันว่าจะไม่มีการเปลี่ยนแปลงใดอยู่รอด เงินจึงไม่ถูกสร้างขึ้นหรือหายไป
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+    UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus';
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('UPDATE accounts SET balance = balance - $1 WHERE owner = $2', [100, 'Ada']);
+      await client.query('UPDATE accounts SET balance = balance + $1 WHERE owner = $2', [100, 'Linus']);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("UPDATE accounts SET balance = balance - %s WHERE owner = %s", (100, "Ada"))
+        cur.execute("UPDATE accounts SET balance = balance + %s WHERE owner = %s", (100, "Linus"))
+    # the block commits on success and rolls back on any exception
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE owner = $2", 100, "Ada"); err != nil {
+        tx.Rollback(ctx)
+        return err
+    }
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE owner = $2", 100, "Linus"); err != nil {
+        tx.Rollback(ctx)
+        return err
+    }
+    err = tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE owner = $2")
+        .bind(100_i64).bind("Ada").execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts SET balance = balance + $1 WHERE owner = $2")
+        .bind(100_i64).bind("Linus").execute(&mut *tx).await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+หลังจาก commit ยอดเงินคงเหลือสะท้อนการ update ทั้งสองครั้งไปด้วยกัน
+
+```text
+ id | owner | balance
+----+-------+---------
+  1 | Ada   |     400
+  2 | Linus |     200
+(2 rows)
+```
+
+## เลือกที่จะละทิ้งงาน
+
+หากมีอะไรดูผิดปกติก่อนที่คุณจะ commit `ROLLBACK` จะทิ้งทุกการเปลี่ยนแปลงที่ทำไปตั้งแต่ `BEGIN` ราวกับว่า transaction นั้นไม่เคยรันเลย ในที่นี้ Ada มีเงินไม่พอ เราจึงทิ้งทั้งหมด
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+    -- on reflection, cancel everything:
+    ROLLBACK;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await client.query('BEGIN');
+    await client.query('UPDATE accounts SET balance = balance - $1 WHERE owner = $2', [100, 'Ada']);
+    await client.query('ROLLBACK');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    conn.rollback()  # discards everything since the transaction began
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.Begin(ctx)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE owner = $2", 100, "Ada")
+    tx.Rollback(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE owner = $2")
+        .bind(100_i64).bind("Ada").execute(&mut *tx).await?;
+    tx.rollback().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+## วงจรชีวิตของ transaction
+
+ทุก transaction เดินตามเส้นทางเดียวกัน คือมันเริ่ม รันคำสั่งของมัน และจบลงในหนึ่งในสองทางพอดี ไม่มีสถานะระหว่างกลางเมื่อคุณตัดสินใจแล้ว
+
+export const txnFlow = `flowchart TD
+  A[BEGIN] --> B[Run statements]
+  B --> C{Everything correct?}
+  C -->|Yes| D[COMMIT: changes become permanent]
+  C -->|No| E[ROLLBACK: changes discarded]
+  D --> F[Transaction ends]
+  E --> F`;
+
+<Mermaid code={txnFlow} title="transaction เริ่ม รัน แล้วเลือกที่จะ commit หรือ roll back" />
+
+## การ roll back บางส่วนด้วย SAVEPOINT
+
+บางครั้งคุณต้องการยกเลิกเพียงบางส่วนของ transaction โดยไม่ละทิ้งส่วนที่เหลือ `SAVEPOINT` คือเครื่องหมายที่มีชื่อภายใน transaction `ROLLBACK TO` จะย้อนกลับไปยังเครื่องหมายนั้น โดยเก็บทุกอย่างก่อนหน้ามันไว้และทิ้งทุกอย่างหลังจากนั้น
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    BEGIN;
+    UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+    SAVEPOINT after_debit;
+    UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody';
+    -- that owner does not exist; undo just the second update:
+    ROLLBACK TO after_debit;
+    UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus';
+    COMMIT;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await client.query('BEGIN');
+    await client.query("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'");
+    await client.query('SAVEPOINT after_debit');
+    await client.query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'");
+    await client.query('ROLLBACK TO after_debit');
+    await client.query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'");
+    await client.query('COMMIT');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    with conn.transaction():
+        cur.execute("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
+        try:
+            with conn.transaction():  # a nested block acts as a savepoint
+                cur.execute("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
+                raise ValueError("undo just this part")
+        except ValueError:
+            pass
+        cur.execute("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    tx, _ := conn.Begin(ctx)
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
+    tx.Exec(ctx, "SAVEPOINT after_debit")
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
+    tx.Exec(ctx, "ROLLBACK TO after_debit")
+    tx.Exec(ctx, "UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
+    tx.Commit(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
+        .execute(&mut *tx).await?;
+    sqlx::query("SAVEPOINT after_debit").execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
+        .execute(&mut *tx).await?;
+    sqlx::query("ROLLBACK TO after_debit").execute(&mut *tx).await?;
+    sqlx::query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    ```
+  </TabItem>
+</Tabs>
+
+การหักเงินและการเพิ่มเงินครั้งสุดท้ายถูกเก็บไว้ มีเพียงงานระหว่าง savepoint กับ `ROLLBACK TO` เท่านั้นที่ถูกทิ้งไป
+
+```text
+ owner | balance
+-------+---------
+ Ada   |     400
+ Linus |     200
+(2 rows)
+```
+
+## Tips / gotchas
+
+- ทำให้ transaction สั้น transaction ที่เปิดค้างไว้จะถือทรัพยากรไว้ และอย่างที่บทเรียน MVCC แสดง มันอาจหน่วงการเก็บกวาด row เวอร์ชันเก่า ๆ
+- โดยค่าเริ่มต้น connection อยู่ในโหมด auto-commit คือแต่ละคำสั่งเดี่ยว ๆ เป็น transaction ที่ commit ของตัวเอง คุณออกจากโหมดนั้นได้ด้วยการสั่ง `BEGIN` เท่านั้น
+- error ภายใน transaction ทำให้มันเข้าสู่สถานะ aborted แล้ว PostgreSQL จะปฏิเสธคำสั่งต่อไปจนกว่าคุณจะ `ROLLBACK` (หรือ `ROLLBACK TO` ไปยัง savepoint)
+- ในโค้ดแอปพลิเคชัน ให้จับคู่ `BEGIN` กับ `ROLLBACK` บนเส้นทาง error เสมอ ตัวอย่าง driver ด้านบนแสดงรูปแบบ try-or-finally ที่รับประกันว่า connection จะไม่ปล่อย transaction ที่เปิดค้างหลุดออกไป
+
+<Callout title="commit คือจุดที่ย้อนกลับไม่ได้">
+ก่อน `COMMIT` การเปลี่ยนแปลงของคุณอยู่เฉพาะใน transaction ของคุณ และสามารถหายไปด้วย `ROLLBACK` เพียงครั้งเดียว หลัง `COMMIT` durability เข้ามาทำหน้าที่และการเปลี่ยนแปลงถูกเขียนลงเพื่อให้อยู่รอดผ่านการ crash จงถือว่าการ commit คือช่วงเวลาที่คุณมั่นใจแล้ว
+</Callout>
+
+export const quizBasics = [
+  {
+    q: 'What does ROLLBACK do to the statements run since BEGIN?',
+    options: [
+      'commit พวกมันให้เร็วขึ้น',
+      'ทิ้งพวกมันราวกับว่าไม่เคยรันเลย',
+      'ใช้เฉพาะคำสั่งแรกเท่านั้น',
+      'บันทึกพวกมันไว้ในตารางแยกต่างหาก',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What is the purpose of a SAVEPOINT?',
+    options: [
+      'มัน commit บางส่วนของ transaction อย่างถาวร',
+      'มันให้คุณ roll back ไปยังเครื่องหมายโดยไม่ละทิ้งทั้ง transaction',
+      'มันทำให้ COMMIT ครั้งถัดไปเร็วขึ้น',
+      'มันสร้างไฟล์สำรองบนดิสก์',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'When is a single statement run on its own committed automatically?',
+    options: [
+      'ไม่มีทาง คุณต้องพิมพ์ COMMIT เสมอ',
+      'เมื่อ connection อยู่ในโหมด auto-commit นอก BEGIN ใด ๆ',
+      'เฉพาะบนตารางที่มี primary key เท่านั้น',
+      'เฉพาะเมื่อใช้ RETURNING เท่านั้น',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="transactions-and-concurrency/transactions-basics" questions={quizBasics} />
+
+<ProgressTracker client:visible id="transactions-and-concurrency/transactions-basics" />

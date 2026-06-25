@@ -1,0 +1,162 @@
+---
+title: psql and pgAdmin
+description: Learn the essential psql meta-commands, tour the pgAdmin GUI in prose, hear about DBeaver as an alternative, then connect to PostgreSQL from each of the four drivers.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+Now that PostgreSQL is running, you need a way to talk to it. There are three common doors in: the `psql` command-line shell, a graphical tool like pgAdmin, and your own application code through a driver. This lesson covers all three so you can pick whichever fits the moment.
+
+## psql basics
+
+`psql` is the official terminal client. Once connected, you can type SQL directly, but its real superpower is **meta-commands** — short instructions that start with a backslash and inspect the database for you. Here are the ones you will use constantly.
+
+| Command | What it does |
+|---------|--------------|
+| `\l` | List all databases in the server |
+| `\c dbname` | Connect to a different database |
+| `\dt` | List tables in the current database |
+| `\d tablename` | Describe a table's columns, types, and constraints |
+| `\q` | Quit psql |
+
+A typical first session looks like this. You connect, look around, run a query, and leave.
+
+```text
+postgres=# \l
+                    List of databases
+   Name    |  Owner   | Encoding |   Collate   |  Ctype
+-----------+----------+----------+-------------+----------
+ appdb     | postgres | UTF8     | en_US.UTF-8 | en_US.UTF-8
+ postgres  | postgres | UTF8     | en_US.UTF-8 | en_US.UTF-8
+(2 rows)
+
+postgres=# \c appdb
+You are now connected to database "appdb" as user "postgres".
+appdb=# \dt
+Did not find any relations.
+appdb=# SELECT 1 + 1 AS answer;
+ answer
+--------
+      2
+(1 row)
+
+appdb=# \q
+```
+
+Running SQL is just typing the statement and ending it with a semicolon. The meta-commands save you from memorizing the system queries behind `\l`, `\dt`, and friends — they run those queries for you and format the result.
+
+## A tour of pgAdmin
+
+If you prefer clicking to typing, **pgAdmin** is the official graphical tool, and the Docker setup from the previous lesson already has it running at `http://localhost:8080`. Here is how to find your way around.
+
+When you first open pgAdmin, log in with the email and password you set in the compose file. The left side shows a **browser tree** with a Servers group at the top. To connect to your database, right-click Servers and choose to register a new server. In the dialog, give the connection a name on the General tab, then switch to the Connection tab and fill in the host, port, username, and password. Because pgAdmin runs in its own container, the host is the service name `postgres` rather than `localhost`; the port stays `5432` and the user is `postgres`.
+
+Once connected, the tree expands. Open your server, then **Databases**, then a database, then **Schemas**, then the `public` schema, and finally **Tables**. This nesting mirrors how PostgreSQL actually organizes data, which the next lesson explains in detail. Clicking any object shows its details in the main panel.
+
+The workhorse is the **Query Tool**, opened from the toolbar or by right-clicking a database. It gives you a SQL editor where you type a statement and press the run button; results appear in a grid below, and messages such as row counts show on a separate tab. To browse a table's contents without writing SQL, right-click the table and choose to view its rows, which opens the same grid pre-filled with a `SELECT`.
+
+If pgAdmin feels heavy, **DBeaver** is a popular free alternative — a desktop application that connects to PostgreSQL and many other databases with a similar tree-and-editor layout. The concepts carry over directly; only the menus differ.
+
+## Connecting from each driver
+
+In application code you connect through a **driver** — a library that speaks PostgreSQL's protocol. The connection details are the same ones you used above; only the syntax changes. Here is how each driver opens a connection.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- psql takes the connection string on the command line:
+    -- psql "postgresql://postgres:secret@localhost:5432/appdb"
+    SELECT current_database();
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    import { Pool } from 'pg';
+
+    const pool = new Pool({
+      connectionString: 'postgresql://postgres:secret@localhost:5432/appdb',
+    });
+
+    const res = await pool.query('SELECT current_database()');
+    console.log(res.rows[0]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import psycopg
+
+    conn = psycopg.connect(
+        "postgresql://postgres:secret@localhost:5432/appdb"
+    )
+    cur = conn.cursor()
+    cur.execute("SELECT current_database()")
+    print(cur.fetchone())
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    conn, err := pgx.Connect(ctx,
+        "postgresql://postgres:secret@localhost:5432/appdb")
+    if err != nil {
+        return err
+    }
+    defer conn.Close(ctx)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect("postgresql://postgres:secret@localhost:5432/appdb")
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Notice that every driver accepts the same `postgresql://user:password@host:port/database` connection string. Learn that one format and you can connect from anywhere.
+
+**In pgAdmin:** the same connection details live in the register-server dialog instead of a string — host, port, user, password, and database each have their own field.
+
+## Tips / gotchas
+
+- A connection string follows the shape `postgresql://user:password@host:port/database`. Each part is optional once a default applies.
+- From inside another container (like pgAdmin), the host is the service name, not `localhost`; from your own machine it is `localhost`.
+- Use `psql` for quick checks and scripting, a GUI like pgAdmin or DBeaver for browsing and exploration, and a driver for anything your application does repeatedly.
+- Never hard-code passwords in committed code. Read connection strings from environment variables in real projects.
+- The `\d` family of meta-commands is the fastest way to remember a table's exact shape without leaving the shell.
+
+<Callout title="Three doors, one database">
+psql, pgAdmin, and your application driver all connect to the very same PostgreSQL server with the very same credentials. Choose the door that suits the task — the shell for speed, the GUI for exploring, the driver for your app — and know that the database underneath does not care which one you walked through.
+</Callout>
+
+export const quizPsqlPgadmin = [
+  {
+    q: 'Which psql meta-command lists the tables in the current database?',
+    options: ['\\l', '\\dt', '\\c', '\\q'],
+    answer: 1,
+  },
+  {
+    q: 'What is the standard shape of a PostgreSQL connection string?',
+    options: [
+      'postgresql://user:password@host:port/database',
+      'pg://database/host/user',
+      'jdbc:host,port,user',
+      'connect host=... only',
+    ],
+    answer: 0,
+  },
+  {
+    q: 'From the pgAdmin container, what host name should you use to reach the database service?',
+    options: ['localhost', 'The service name, postgres', '127.0.0.1', 'pgadmin'],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="intro-and-setup/psql-and-pgadmin" questions={quizPsqlPgadmin} />
+
+<ProgressTracker client:visible id="intro-and-setup/psql-and-pgadmin" />

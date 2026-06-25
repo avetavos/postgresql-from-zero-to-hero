@@ -1,0 +1,223 @@
+---
+title: B-tree and index basics
+description: Create indexes with CREATE INDEX, understand the default B-tree, which queries it helps, composite indexes and the left-prefix rule, and unique indexes.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+The previous lesson showed *why* an index helps. This one shows *how* to create one and which kind you almost always want. PostgreSQL supports several index types, but one of them is the default and the right answer for the vast majority of cases: the **B-tree**.
+
+We continue with the `books` table from the CRUD module.
+
+## Creating an index
+
+The basic form names the table and the column or columns to index. PostgreSQL picks a name for you, or you can supply your own.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- let PostgreSQL name it
+    CREATE INDEX ON books (title);
+
+    -- or name it yourself
+    CREATE INDEX books_title_idx ON books (title);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE INDEX books_title_idx ON books (title)');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE INDEX books_title_idx ON books (title)")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE INDEX books_title_idx ON books (title)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE INDEX books_title_idx ON books (title)")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+Because no index type is specified, PostgreSQL builds a B-tree. Writing `CREATE INDEX ... USING btree (title)` is exactly equivalent — the `USING btree` is the silent default.
+
+**In pgAdmin:** expand the table in the browser tree, right-click Indexes, and choose Create. The dialog lets you pick columns and the access method, and shows the generated SQL on the SQL tab.
+
+## What a B-tree can do
+
+A B-tree keeps its entries in sorted order, which is what makes it so versatile. Because the values are ordered, the index can answer any query that depends on that ordering:
+
+| Query pattern                          | Example                                  | B-tree helps? |
+|----------------------------------------|------------------------------------------|---------------|
+| Equality                               | `WHERE title = 'Quiet Harbors'`          | Yes           |
+| Range                                  | `WHERE published > 2000`                 | Yes           |
+| Between                                | `WHERE published BETWEEN 1990 AND 2000`  | Yes           |
+| Sorting                                | `ORDER BY published`                     | Yes           |
+| Prefix match                           | `WHERE title LIKE 'The %'`               | Yes           |
+| Leading wildcard                       | `WHERE title LIKE '%orchard'`            | No            |
+
+The last two rows are the key insight: a B-tree can satisfy `LIKE 'The %'` because the search anchors to the start of the value, but it cannot help `LIKE '%orchard'` because a leading wildcard means the matching values are scattered throughout the sorted order rather than grouped together.
+
+## Composite indexes and the left-prefix rule
+
+An index can cover more than one column. Such a **composite** (or *multicolumn*) index sorts by the first column, then by the second within each first-column value, and so on.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE INDEX books_author_published_idx
+      ON books (author_id, published);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query(
+      'CREATE INDEX books_author_published_idx ON books (author_id, published)',
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "CREATE INDEX books_author_published_idx ON books (author_id, published)"
+    )
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx,
+        "CREATE INDEX books_author_published_idx ON books (author_id, published)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query(
+        "CREATE INDEX books_author_published_idx ON books (author_id, published)",
+    )
+    .execute(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+The order of the columns matters because of the **left-prefix rule**: a composite index can be used for queries that filter on a *leading prefix* of its columns. The index on `(author_id, published)` helps these queries:
+
+```sql
+-- uses the index: filters on the leading column
+SELECT * FROM books WHERE author_id = 4;
+
+-- uses the index: filters on both columns
+SELECT * FROM books WHERE author_id = 4 AND published > 2000;
+```
+
+but it does **not** efficiently help this one, because `published` is not the leading column:
+
+```sql
+-- the index cannot be used as a simple lookup here
+SELECT * FROM books WHERE published > 2000;
+```
+
+Think of it like a phone book sorted by last name, then first name. You can find everyone with a given last name, or a specific full name, but you cannot quickly find everyone with a given first name regardless of last name. Put the column you filter on most often first.
+
+## Unique indexes
+
+Adding `UNIQUE` makes the index also enforce that no two rows share the same value. This is both a performance structure and a data-integrity rule.
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    CREATE UNIQUE INDEX books_isbn_idx ON books (isbn);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+After this, an `INSERT` or `UPDATE` that would create a duplicate `isbn` fails with a unique-violation error. Defining a column as `PRIMARY KEY` or `UNIQUE` in the table definition creates exactly this kind of index automatically, which is why primary-key lookups are already fast without you doing anything.
+
+You can confirm any of these indexes exist with `\d books` in psql, which lists the table's columns followed by its indexes.
+
+```text
+Indexes:
+    "books_pkey" PRIMARY KEY, btree (id)
+    "books_author_published_idx" btree (author_id, published)
+    "books_isbn_idx" UNIQUE, btree (isbn)
+    "books_title_idx" btree (title)
+```
+
+## Tips / gotchas
+
+- B-tree is the default and the right choice for almost everything: equality, ranges, sorting, and prefix matches. Reach for other types only when B-tree genuinely cannot do the job.
+- Every index slows down writes and uses disk space, because each `INSERT`, `UPDATE`, and `DELETE` must maintain it. Do not create an index for every column.
+- For composite indexes, put the most selective and most frequently filtered column first, and remember the left-prefix rule when deciding column order.
+- A single well-chosen composite index can replace several single-column ones, but it is not a substitute when your queries filter on the trailing columns alone.
+- Building an index on a large, busy table locks it against writes; use `CREATE INDEX CONCURRENTLY` in production to avoid blocking, at the cost of a slower build.
+
+<Callout title="Index for the queries you actually run">
+Do not index speculatively. Look at the `WHERE`, `JOIN`, and `ORDER BY` clauses your application really uses, then add the B-tree indexes that serve them. An unused index is pure overhead: it costs you on every write and gives you nothing on reads.
+</Callout>
+
+export const quizBtree = [
+  {
+    q: 'Which index type does CREATE INDEX build when you do not specify one?',
+    options: ['Hash', 'GIN', 'B-tree', 'BRIN'],
+    answer: 2,
+  },
+  {
+    q: 'An index on (author_id, published) can efficiently serve which query?',
+    options: [
+      'WHERE published > 2000',
+      'WHERE author_id = 4',
+      'WHERE title LIKE \'%orchard\'',
+      'None of these',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'What does adding UNIQUE to an index do in addition to speeding up lookups?',
+    options: [
+      'It compresses the index',
+      'It prevents two rows from sharing the same indexed value',
+      'It makes writes faster',
+      'It allows leading-wildcard LIKE searches',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="indexes-and-performance/btree-and-index-basics" questions={quizBtree} />
+
+<ProgressTracker client:visible id="indexes-and-performance/btree-and-index-basics" />

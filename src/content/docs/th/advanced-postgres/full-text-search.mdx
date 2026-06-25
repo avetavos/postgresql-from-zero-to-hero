@@ -1,0 +1,265 @@
+---
+title: Full-text search
+description: เปลี่ยนข้อความให้เป็น tsvector จับคู่กับ tsquery ด้วย operator @@ จัดอันดับผลลัพธ์ด้วย ts_rank และทำ index การค้นหาด้วย GIN index หรือคอลัมน์ tsvector แบบ generated
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Callout from '../../../../components/Callout.astro';
+import Quiz from '../../../../components/Quiz.tsx';
+import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+
+query แบบ `LIKE '%search%'` หา substring ที่ตรงเป๊ะได้ แต่มันไม่เข้าใจภาษา มันบอกไม่ได้ว่า "running" กับ "ran" มีรากศัพท์ร่วมกัน มันไม่ละคำที่ไม่มีความหมายอย่าง "the" และมันจัดอันดับว่า match อันหนึ่งดีกว่าอีกอันไม่ได้ full-text search ของ PostgreSQL แก้ทั้งสามข้อ คือมันย่อข้อความให้เป็นคำค้นที่ถูกทำให้เป็นมาตรฐาน (normalized) จับคู่ query กับคำเหล่านั้น และให้คะแนนว่าแต่ละแถวเข้ากันได้ดีแค่ไหน
+
+ในบทนี้เราค้นหาตารางของ articles ตามเนื้อความ (body text) ของมัน
+
+## สองชนิดข้อมูลใหม่
+
+full-text search แนะนำสองชนิดข้อมูล `tsvector` คือเอกสารที่ถูกแตกออกเป็น **lexeme** (คำรากศัพท์) ที่ถูกทำให้เป็นมาตรฐานพร้อมตำแหน่งของมัน ส่วน `tsquery` คือนิพจน์การค้นหาของ lexeme ที่รวมกันด้วย operator `&` (and), `|` (or) และ `!` (not)
+
+```sql
+CREATE TABLE articles (
+  id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title text NOT NULL,
+  body  text NOT NULL
+);
+```
+
+คุณแปลงข้อความเป็นชนิดเหล่านี้ด้วยฟังก์ชัน `to_tsvector(config, text)` สร้าง `tsvector` ส่วน `to_tsquery(config, text)` parse query ที่มีโครงสร้าง และ `plainto_tsquery(config, text)` เปลี่ยน input ดิบจากผู้ใช้ให้เป็น query โดย and คำเหล่านั้นเข้าด้วยกัน
+
+```sql
+SELECT to_tsvector('english', 'The cats were running quickly');
+```
+
+```text
+                to_tsvector
+--------------------------------------------
+ 'cat':2 'quick':5 'run':4
+(1 row)
+```
+
+สังเกตว่าเกิดอะไรขึ้น "The" และ "were" ถูกตัดทิ้งในฐานะ stop word "cats" กลายเป็น "cat" "running" กลายเป็น "run" และ "quickly" กลายเป็น "quick" ทั้งเอกสารและ query ผ่านการทำให้เป็นมาตรฐานแบบเดียวกัน ดังนั้น "running" ในการค้นหาจึง match กับ "ran" ในข้อความ
+
+## การจับคู่ด้วย operator @@
+
+match operator `@@` คืนค่า true เมื่อ `tsvector` ตอบสนองต่อ `tsquery` นี่คือหัวใจของทุก full-text query
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT title
+    FROM articles
+    WHERE to_tsvector('english', body) @@ plainto_tsquery('english', 'running shoes');
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      `SELECT title
+       FROM articles
+       WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)`,
+      ['running shoes'],
+    );
+    console.log(res.rows);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        """
+        SELECT title
+        FROM articles
+        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', %s)
+        """,
+        ("running shoes",),
+    )
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+        SELECT title
+        FROM articles
+        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)`,
+        "running shoes")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT title FROM articles \
+         WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)",
+    )
+    .bind("running shoes")
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+        title
+----------------------
+ Choosing trail shoes
+(1 row)
+```
+
+สำหรับ query ที่มีโครงสร้างให้ใช้ `to_tsquery` ซึ่งเข้าใจ boolean operator ตัวอย่าง `to_tsquery('english', 'shoe & !leather')` จะ match เอกสารเกี่ยวกับรองเท้าที่ไม่กล่าวถึงหนัง
+
+## การจัดอันดับผลลัพธ์
+
+การ match เป็นแค่ใช่หรือไม่ใช่ แต่ผลการค้นหาต้องมีลำดับ `ts_rank` ให้คะแนนว่า `tsvector` match กับ `tsquery` ได้ดีแค่ไหน โดยคืนค่า `real` ที่คุณนำมาเรียงจากมากไปน้อยได้
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    SELECT title,
+           ts_rank(to_tsvector('english', body),
+                   plainto_tsquery('english', 'running shoes')) AS rank
+    FROM articles
+    WHERE to_tsvector('english', body) @@ plainto_tsquery('english', 'running shoes')
+    ORDER BY rank DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      `SELECT title,
+              ts_rank(to_tsvector('english', body),
+                      plainto_tsquery('english', $1)) AS rank
+       FROM articles
+       WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)
+       ORDER BY rank DESC`,
+      ['running shoes'],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        """
+        SELECT title,
+               ts_rank(to_tsvector('english', body),
+                       plainto_tsquery('english', %(q)s)) AS rank
+        FROM articles
+        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', %(q)s)
+        ORDER BY rank DESC
+        """,
+        {"q": "running shoes"},
+    )
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+        SELECT title,
+               ts_rank(to_tsvector('english', body),
+                       plainto_tsquery('english', $1)) AS rank
+        FROM articles
+        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)
+        ORDER BY rank DESC`,
+        "running shoes")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT title, \
+                ts_rank(to_tsvector('english', body), plainto_tsquery('english', $1)) AS rank \
+         FROM articles \
+         WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1) \
+         ORDER BY rank DESC",
+    )
+    .bind("running shoes")
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+        title         |   rank
+----------------------+-----------
+ Choosing trail shoes | 0.0607927
+ Marathon training    | 0.0303964
+(2 rows)
+```
+
+## การทำ index ให้การค้นหา
+
+query ข้างต้นคำนวณ `to_tsvector(body)` ใหม่สำหรับทุกแถวในทุกการค้นหา ซึ่งจะช้าลงเมื่อตารางโตขึ้น มีสองแพตเทิร์นที่แก้ปัญหานี้ และมันทำงานร่วมกันได้ดี
+
+ข้อแรก เก็บ `tsvector` ไว้ครั้งเดียวใน **generated column** เพื่อให้มันถูกคำนวณตอนเขียน ไม่ใช่ตอนอ่าน:
+
+```sql
+ALTER TABLE articles
+  ADD COLUMN search tsvector
+  GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED;
+```
+
+จากนั้นใส่ **GIN** index บนคอลัมน์นั้นเพื่อให้การจับคู่ไม่ต้อง scan ทุกแถว:
+
+```sql
+CREATE INDEX idx_articles_search ON articles USING gin (search);
+```
+
+```text
+CREATE INDEX
+```
+
+ตอนนี้การค้นหาจะอ่านคอลัมน์ที่คำนวณไว้ล่วงหน้าและใช้ index:
+
+```sql
+SELECT title, ts_rank(search, plainto_tsquery('english', 'running shoes')) AS rank
+FROM articles
+WHERE search @@ plainto_tsquery('english', 'running shoes')
+ORDER BY rank DESC;
+```
+
+**ใน pgAdmin:** คอลัมน์ `search` แบบ generated จะปรากฏในตารางเหมือนคอลัมน์อื่น ๆ แต่มันเป็นแบบอ่านอย่างเดียว — คุณแก้ไขค่าของมันโดยตรงไม่ได้เพราะ Postgres ดึงค่ามาจาก `title` และ `body`
+
+## Tips / ข้อควรระวัง
+
+- ส่ง language configuration อย่าง `'english'` เสมอ configuration นี้ควบคุม stemming และ stop word การใช้ผิด (หรือใช้ค่า default `simple` ซึ่งไม่ทำทั้งสองอย่าง) จะเปลี่ยนว่าแถวใดจะ match
+- ใช้ configuration เดียวกันทั้งสำหรับ `tsvector` ที่เก็บไว้และสำหรับ query เอกสารที่สร้างด้วย `english` จะไม่ match กับ query ที่ parse ด้วย configuration อื่น
+- คำนวณ `tsvector` ล่วงหน้าใน generated column สำหรับตารางใด ๆ ที่คุณค้นหาซ้ำ ๆ มันย้ายต้นทุนไปอยู่ตอนเขียนและปล่อยให้ GIN index ทำงานของมันได้
+- เลือกฟังก์ชัน query ให้ถูก: `plainto_tsquery` สำหรับ input ดิบจากผู้ใช้ (มัน and คำเข้าด้วยกัน), `to_tsquery` เมื่อคุณต้องการ operator `&`, `|` และ `!` ที่ระบุชัดเจน และ `websearch_to_tsquery` สำหรับวลีในเครื่องหมายคำพูดแบบ Google
+
+<Callout title="Search engine ในกล่อง">
+สำหรับหลายแอปพลิเคชัน full-text search ของ PostgreSQL ตัดความจำเป็นในการมี search service แยกต่างหากออกไป คุณได้ stemming, stop word, boolean query และการจัดอันดับใน SQL ธรรมดา โดยทำ index ด้วย GIN จงหยิบ engine เฉพาะทางมาใช้ก็ต่อเมื่อคุณโตเกินมัน — ไม่ใช่ใช้เป็นค่าตั้งต้น
+</Callout>
+
+export const quizFts = [
+  {
+    q: 'to_tsvector ทำอะไรกับวลีอย่าง "The cats were running"?',
+    options: [
+      'เก็บมันไว้ตามตัวอักษรเพื่อจับคู่ substring แบบเป๊ะ ๆ',
+      'ทำให้เป็นมาตรฐานเป็น lexeme ตัด stop word ทิ้งและทำ stemming คำ',
+      'แปลมันเป็นอีกภาษาหนึ่ง',
+      'เข้ารหัสมันเพื่อเก็บอย่างปลอดภัย',
+    ],
+    answer: 1,
+  },
+  {
+    q: 'operator ใดทดสอบว่า tsvector ตอบสนองต่อ tsquery หรือไม่?',
+    options: ['@>', '@@', '->>', '&&'],
+    answer: 1,
+  },
+  {
+    q: 'วิธีที่แนะนำในการทำให้การค้นหา full-text ซ้ำ ๆ เร็วขึ้นคืออะไร?',
+    options: [
+      'รัน VACUUM ก่อนการค้นหาแต่ละครั้ง',
+      'เก็บ tsvector ใน generated column และเพิ่ม GIN index บนมัน',
+      'ใช้ LIKE แทน',
+      'เพิ่ม B-tree index บนคอลัมน์ body',
+    ],
+    answer: 1,
+  },
+];
+
+<Quiz client:visible id="advanced-postgres/full-text-search" questions={quizFts} />
+
+<ProgressTracker client:visible id="advanced-postgres/full-text-search" />
