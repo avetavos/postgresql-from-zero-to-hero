@@ -1,6 +1,63 @@
 ---
 title: PostgreSQL — From Zero to Hero
-description: Learn PostgreSQL from the relational model through SQL, joins, indexing, transactions, advanced features, and scaling — with psql and driver examples.
+description: เรียนรู้ PostgreSQL ตั้งแต่พื้นฐาน — relational model, table & type, SQL, join & window function, การทำ index & performance, transaction & MVCC, ฟีเจอร์ขั้นสูง และการ scale — พร้อมตัวอย่างใน psql, pgAdmin และ driver ของ Node.js / Python / Go / Rust
 template: splash
+hero:
+  tagline: คอร์ส PostgreSQL แบบ standalone ตั้งแต่ผู้เริ่มต้นจนถึงขั้นสูง ตั้งแต่ relational model และ SQL ไปจนถึง join, การทำ index, transaction & MVCC, JSONB และ full-text search จนถึงการ scale ใน production — ทุก operation แสดงใน psql, Node.js, Python, Go และ Rust พร้อมทัวร์ pgAdmin และการตั้งค่าด้วย Docker
+  actions:
+    - text: เริ่มที่นี่
+      link: /postgresql-from-zero-to-hero/th/intro-and-setup/
+      icon: right-arrow
+      variant: primary
+    - text: ข้ามไปที่ CRUD & SQL
+      link: /postgresql-from-zero-to-hero/th/crud-and-sql/
+      icon: open-book
 ---
-Coming soon.
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## สิ่งที่คุณจะได้เรียน
+
+<CardGrid>
+  <Card title="Intro & Setup" icon="rocket">
+    relational model, รัน Postgres ด้วย Docker, psql + pgAdmin, database & schema, การเชื่อมต่อ driver [เริ่ม →](/postgresql-from-zero-to-hero/th/intro-and-setup/)
+  </Card>
+  <Card title="Tables & Types" icon="seti:db">
+    CREATE TABLE, ระบบ type (JSONB, array, UUID, enum), constraint (PK/FK/CHECK), การ migrate schema [ออกแบบ →](/postgresql-from-zero-to-hero/th/tables-and-types/)
+  </Card>
+  <Card title="CRUD & SQL" icon="pencil">
+    INSERT, SELECT & filtering, UPDATE/DELETE พร้อม RETURNING, upsert แบบ ON CONFLICT [query →](/postgresql-from-zero-to-hero/th/crud-and-sql/)
+  </Card>
+  <Card title="Joins & Relationships" icon="random">
+    INNER/LEFT/RIGHT/FULL join, aggregate & GROUP BY, subquery & CTE, window function [รวมข้อมูล →](/postgresql-from-zero-to-hero/th/joins-and-relationships/)
+  </Card>
+  <Card title="Indexes & Performance" icon="list-format">
+    B-tree & index เฉพาะทาง (GIN/GiST/BRIN), EXPLAIN ANALYZE, query plan, VACUUM & statistics [เร่งความเร็ว →](/postgresql-from-zero-to-hero/th/indexes-and-performance/)
+  </Card>
+  <Card title="Transactions & Concurrency" icon="approve-check">
+    BEGIN/COMMIT/ROLLBACK, isolation level, MVCC, row locking & deadlock [คงความถูกต้อง →](/postgresql-from-zero-to-hero/th/transactions-and-concurrency/)
+  </Card>
+  <Card title="Advanced PostgreSQL" icon="puzzle">
+    JSONB, full-text search, view & materialized view, PL/pgSQL function & trigger [เจาะลึก →](/postgresql-from-zero-to-hero/th/advanced-postgres/)
+  </Card>
+  <Card title="Operations & Scaling" icon="seti:config">
+    replication, connection pooling (PgBouncer), partitioning, backup/PITR & security (role, RLS) [รันจริง →](/postgresql-from-zero-to-hero/th/operations-and-scaling/)
+  </Card>
+</CardGrid>
+
+## คอร์สนี้ทำงานยังไง
+
+<CardGrid>
+  <Card title="รันทุก query ได้ห้าแบบ" icon="seti:default">
+    ทุก operation แสดงใน psql, Node.js, Python, Go และ Rust ผ่านแท็บที่ sync กัน เลือก driver ครั้งเดียวแล้วตามไปได้ตลอด
+  </Card>
+  <Card title="เห็น result set จริง" icon="open-book">
+    ทุก query แสดงผลลัพธ์เป็นตารางสไตล์ psql คุณจึงรู้แน่ชัดว่าได้อะไรกลับมา
+  </Card>
+  <Card title="ไดอะแกรม + pgAdmin + Docker" icon="puzzle">
+    ไดอะแกรม Mermaid ที่รองรับธีม (join, query plan, MVCC, replication), ทัวร์ GUI ของ pgAdmin และการตั้งค่า Docker เพื่อรันในเครื่อง
+  </Card>
+  <Card title="สองภาษา + read mode" icon="translate">
+    ภาษาอังกฤษและไทย, แบบทดสอบที่บันทึกความคืบหน้า และโหมดอ่านแบบไร้สิ่งรบกวน
+  </Card>
+</CardGrid>
