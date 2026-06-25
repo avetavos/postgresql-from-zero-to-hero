@@ -1,10 +1,10 @@
-# MongoDB — From Zero to Hero
+# PostgreSQL — From Zero to Hero
 
-A bilingual (EN/TH), standalone, beginner→advanced course on **MongoDB**. From the document model and CRUD through querying, indexing, the aggregation pipeline, data modeling, transactions, and production scaling. Every operation is shown across **mongosh, Node.js, Python, Go, and Rust**, with **MongoDB Compass** GUI tours, a **Docker** setup, result documents shown as JSON, and **Mermaid** architecture diagrams. There's a **read-mode** toggle.
+A bilingual (EN/TH), standalone, beginner→advanced course on **PostgreSQL**. From the relational model and SQL through joins, indexing, transactions & MVCC, advanced features (JSONB, full-text search, views, functions & triggers), and production scaling. Every operation is shown across **psql, Node.js, Python, Go, and Rust**, with **pgAdmin** GUI tours, a **Docker** setup, query results shown as psql-style tables, and **Mermaid** diagrams. There's a **read-mode** toggle.
 
-All content is original: original explanations of MongoDB (a public technology), original code/query examples and result documents, and original diagrams.
+All content is original: original explanations of PostgreSQL (a public technology), original SQL/code examples and result tables, and original diagrams.
 
-> **Note:** MongoDB is a server, so it can't run inside the browser — the examples are **illustrative** (real `mongosh`/driver code with the documents they return), not executed in-page. The Docker setup lesson shows how to run MongoDB locally and connect.
+> **Note:** PostgreSQL is a server, so it can't run inside the browser — the examples are **illustrative** (real SQL/driver code with the result tables they return), not executed in-page. The Docker setup lesson shows how to run Postgres locally and connect.
 
 ## Tech Stack
 
@@ -12,9 +12,9 @@ All content is original: original explanations of MongoDB (a public technology),
 | ----- | ---------- |
 | Site framework | [Astro 6](https://astro.build) + [Starlight 0.40](https://starlight.astro.build) |
 | UI islands | [Preact](https://preactjs.com) (via `@astrojs/preact`) |
-| Examples | Starlight built-in `<Tabs syncKey="lang">` + `<TabItem>` — five tabs per operation: **mongosh**, **Node.js** (`mongodb` driver), **Python** (PyMongo), **Go** (mongo-go-driver), **Rust** (`mongodb` crate). Reads show result documents as fenced JSON. Expressive-code copy buttons. |
-| GUI / setup | **MongoDB Compass** covered in prose ("In Compass:" notes + a tour); **Docker** setup lesson (`docker run` + `docker-compose.yml`). |
-| Diagrams | Client-side, theme-aware **Mermaid** (`<Mermaid>` + `public/enhance.js`) — pipelines, replica sets, sharding, the ESR rule, query plans |
+| Examples | Starlight built-in `<Tabs syncKey="lang">` + `<TabItem>` — five tabs per operation: **psql** (the SQL), **Node.js** (node-postgres `pg`), **Python** (psycopg 3), **Go** (pgx), **Rust** (sqlx). Driver tabs use parameterized queries. Results shown as psql-style ASCII tables. |
+| GUI / setup | **pgAdmin** covered in prose ("In pgAdmin:" notes + a tour; DBeaver mentioned as an alternative); **Docker** setup lesson (`docker run` + `docker-compose.yml`). |
+| Diagrams | Client-side, theme-aware **Mermaid** (`<Mermaid>` + `public/enhance.js`) — joins, query plans, MVCC, replication, partitioning |
 | Reading | **Read-mode** toggle (hides sidebar/TOC, widens content) via `public/enhance.js` |
 | Unit tests | [Vitest](https://vitest.dev) + `@testing-library/preact` |
 | i18n | Starlight built-in, `defaultLocale: 'en'`, locales: `en` + `th` |
@@ -34,14 +34,14 @@ npm test           # Run Vitest unit tests
 ```
 src/content/docs/
   en/                              # English — served at /en/...
-    intro-and-documents/           # document model, Docker setup, mongosh + Compass, BSON, vs relational
-    crud/                          # insert, find, update operators, delete, upsert & bulkWrite
-    querying/                      # comparison/logical operators, arrays, nested docs, projection/sort/pagination
-    indexes/                       # single & compound, the ESR rule, explain() & plans, index types
-    aggregation/                   # $match/$project, $group, $lookup, $unwind, $facet/$bucket
-    data-modeling/                 # embedding vs referencing, relationships, schema patterns, validation, anti-patterns
-    transactions-and-consistency/  # single-doc atomicity, multi-doc transactions, read/write concerns, change streams
-    operations-and-scaling/        # replica sets, sharding, performance & profiling, security & Atlas
+    intro-and-setup/               # relational model, Docker setup, psql + pgAdmin, databases & schemas
+    tables-and-types/              # CREATE TABLE, data types, constraints, schema migrations
+    crud-and-sql/                  # INSERT, SELECT/filtering, UPDATE/DELETE/RETURNING, ON CONFLICT upsert
+    joins-and-relationships/       # joins, aggregates/GROUP BY, subqueries & CTEs, window functions
+    indexes-and-performance/       # B-tree & specialized indexes, EXPLAIN, query plans, VACUUM
+    transactions-and-concurrency/  # transactions, isolation levels, MVCC, locking & deadlocks
+    advanced-postgres/             # JSONB, full-text search, views & matviews, functions & triggers
+    operations-and-scaling/        # replication, connection pooling, partitioning, backup & security
     index.mdx                      # EN landing (splash)
   th/                              # Thai — served at /th/...
     (same module directories)
@@ -54,16 +54,16 @@ src/content/docs/
 - **`Callout.astro`** `{ title }`, **`Quiz.tsx`** `{ id, questions }` (0-based `answer`, field `q`), **`ProgressTracker.tsx`** `{ id }`.
 - Multi-language code uses Starlight's **`{ Tabs, TabItem }`** from `@astrojs/starlight/components` — no custom component.
 
-Per-lesson order (tutorial): frontmatter → imports → concept intro → sections (prose + a 5-tab `<Tabs>` example + a fenced ```json result + an optional "In Compass:" note) → Tips/gotchas → `<Callout>` → `<Quiz>` → `<ProgressTracker>` (last). IDs follow `<module>/<slug>`.
+Per-lesson order (tutorial): frontmatter → imports → concept intro → sections (prose + a 5-tab `<Tabs>` example + a fenced ```text result table + an optional "In pgAdmin:" note) → Tips/gotchas → `<Callout>` → `<Quiz>` → `<ProgressTracker>` (last). IDs follow `<module>/<slug>`.
 
 > **⚠️ Authoring notes:**
-> - **Five driver tabs, in order:** mongosh (` ```js `), Node.js (` ```js `), Python (` ```python `), Go (` ```go `), Rust (` ```rust ` — `mongodb` crate, `bson::doc!`, `.await?`). After a read, show the result as ` ```json `.
-> - **Code/documents live in fenced blocks** (literal — no `${`/backtick escaping). **Never a bare `{...}` in prose** — Mongo query objects/documents go in fenced ` ```js `/` ```json ` or `<Tabs>`, never inline in a sentence.
-> - **Diagrams are Mermaid**, hoisted in `export const`. **No ASCII diagrams** (no box-drawing chars). **Never a `;` inside a Mermaid sequence message** (statement separator → the diagram silently fails to render); prefer `flowchart`.
-> - Each lesson **ends on its `<ProgressTracker .../>`** — no stray trailing tags. **Internal links include the base path** and matching locale (`/mongodb-from-zero-to-hero/en/...` on EN, `/th/...` on TH).
+> - **Five driver tabs, in order:** psql (` ```sql `), Node.js (`pg`, ` ```js `), Python (psycopg, ` ```python `), Go (pgx, ` ```go `), Rust (sqlx, ` ```rust `). Use **parameterized queries** in the driver tabs (`$1` / `%s`).
+> - **Result sets are psql-style ASCII tables** in ` ```text ` blocks using only `|` `-` `+`. **No Unicode box-drawing** anywhere.
+> - **Never a bare `{...}` in prose** — SQL/objects go in fenced blocks or `<Tabs>`. **Diagrams are Mermaid**, hoisted in `export const`; **never a `;` inside a Mermaid sequence message** (use `flowchart`). Note: PostgreSQL's `->>` JSONB operator is fine inside ` ```sql ` blocks — it is not a Mermaid arrow.
+> - Each lesson **ends on its `<ProgressTracker .../>`** — no stray trailing tags. **Internal links include the base path** and matching locale (`/postgresql-from-zero-to-hero/en/...` on EN, `/th/...` on TH).
 
 ## Deployment
 
-Fully static → `dist/`. Base path in `astro.config.mjs`: `site: 'https://avetavos.github.io'`, `base: '/mongodb-from-zero-to-hero'`.
+Fully static → `dist/`. Base path in `astro.config.mjs`: `site: 'https://avetavos.github.io'`, `base: '/postgresql-from-zero-to-hero'`.
 
 Deployed to GitHub Pages via **branch-source** (`gh-pages`): build `dist/`, add `.nojekyll`, push to `gh-pages`, set **Settings → Pages → Source: Deploy from a branch → `gh-pages` / `/`**, then **request a Pages build** (`gh api -X POST repos/<owner>/<repo>/pages/builds`) — flipping the source alone does not trigger one. If you change `base`, update the base-prefixed links in `src/content/docs/{en,th}/index.mdx`.
