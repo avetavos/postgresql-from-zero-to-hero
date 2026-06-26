@@ -1,0 +1,1 @@
+import{d as s}from"./hooks.module.BflLFCwM.js";import{u as a,a as n,m as l,i as m}from"./jsxRuntime.module.CvADg__D.js";function u({id:e}){const[o,t]=s(()=>m(e));function r(){o?(n(e),t(!1)):(l(e),t(!0))}return a("button",{class:`pt ${o?"pt--done":""}`,onClick:r,children:o?"✓ Completed":"Mark as complete"})}export{u as default};
