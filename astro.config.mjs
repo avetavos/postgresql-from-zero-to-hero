@@ -8,8 +8,8 @@ import preact from '@astrojs/preact';
 export default defineConfig({
   // GitHub Pages project site. Update `site` to your GitHub username and `base`
   // to your repo name if they differ.
-  site: 'https://postgresql-from-zero-to-hero.avetavos.com',
-  base: '/',
+  site: 'https://databases.avetavos.com',
+  base: '/postgresql',
   output: 'static',
   integrations: [starlight({
       title: 'PostgreSQL — From Zero to Hero',
@@ -20,16 +20,16 @@ export default defineConfig({
       },
       customCss: ['./src/styles/custom.css'],
       head: [
-        { tag: 'script', attrs: { type: 'module', src: '/enhance.js' } },
-        { tag: 'link', attrs: { rel: 'manifest', href: '/manifest.webmanifest' } },
-        { tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' } },
-        { tag: 'link', attrs: { rel: 'icon', type: 'image/png', sizes: '192x192', href: '/icon-192.png' } },
+        { tag: 'script', attrs: { type: 'module', src: '/postgresql/enhance.js' } },
+        { tag: 'link', attrs: { rel: 'manifest', href: '/postgresql/manifest.webmanifest' } },
+        { tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/postgresql/apple-touch-icon.png' } },
+        { tag: 'link', attrs: { rel: 'icon', type: 'image/png', sizes: '192x192', href: '/postgresql/icon-192.png' } },
         { tag: 'meta', attrs: { name: 'theme-color', content: '#336791' } },
         { tag: 'meta', attrs: { name: 'mobile-web-app-capable', content: 'yes' } },
         { tag: 'meta', attrs: { name: 'apple-mobile-web-app-capable', content: 'yes' } },
         { tag: 'meta', attrs: { name: 'apple-mobile-web-app-status-bar-style', content: 'black-translucent' } },
         { tag: 'meta', attrs: { name: 'apple-mobile-web-app-title', content: "PostgreSQL" } },
-        { tag: 'script', content: "if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js',{scope:'/'}).catch(function(){})})}" },
+        { tag: 'script', content: "if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/postgresql/sw.js',{scope:'/postgresql/'}).catch(function(){})})}" },
       ],
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/avetavos/postgresql-from-zero-to-hero' }],
       sidebar: [
