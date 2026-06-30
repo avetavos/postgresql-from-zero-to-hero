@@ -6,11 +6,11 @@ hero:
   tagline: A standalone, beginner→advanced course on PostgreSQL. From the relational model and SQL through joins, indexing, transactions & MVCC, JSONB and full-text search, to production scaling — every operation shown in psql, Node.js, Python, Go, and Rust, with pgAdmin tours and a Docker setup.
   actions:
     - text: Start here
-      link: /postgresql-from-zero-to-hero/en/intro-and-setup/
+      link: /postgresql/en/intro-and-setup/
       icon: right-arrow
       variant: primary
     - text: Jump to CRUD & SQL
-      link: /postgresql-from-zero-to-hero/en/crud-and-sql/
+      link: /postgresql/en/crud-and-sql/
       icon: open-book
 ---
 
@@ -20,28 +20,28 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 <CardGrid>
   <Card title="Intro & Setup" icon="rocket">
-    The relational model, run Postgres with Docker, psql + pgAdmin, databases & schemas, connecting drivers. [Start →](/postgresql-from-zero-to-hero/en/intro-and-setup/)
+    The relational model, run Postgres with Docker, psql + pgAdmin, databases & schemas, connecting drivers. [Start →](/postgresql/en/intro-and-setup/)
   </Card>
   <Card title="Tables & Types" icon="seti:db">
-    CREATE TABLE, the type system (JSONB, arrays, UUID, enum), constraints (PK/FK/CHECK), schema migrations. [Model →](/postgresql-from-zero-to-hero/en/tables-and-types/)
+    CREATE TABLE, the type system (JSONB, arrays, UUID, enum), constraints (PK/FK/CHECK), schema migrations. [Model →](/postgresql/en/tables-and-types/)
   </Card>
   <Card title="CRUD & SQL" icon="pencil">
-    INSERT, SELECT & filtering, UPDATE/DELETE with RETURNING, ON CONFLICT upsert. [Query →](/postgresql-from-zero-to-hero/en/crud-and-sql/)
+    INSERT, SELECT & filtering, UPDATE/DELETE with RETURNING, ON CONFLICT upsert. [Query →](/postgresql/en/crud-and-sql/)
   </Card>
   <Card title="Joins & Relationships" icon="random">
-    INNER/LEFT/RIGHT/FULL joins, aggregates & GROUP BY, subqueries & CTEs, window functions. [Combine →](/postgresql-from-zero-to-hero/en/joins-and-relationships/)
+    INNER/LEFT/RIGHT/FULL joins, aggregates & GROUP BY, subqueries & CTEs, window functions. [Combine →](/postgresql/en/joins-and-relationships/)
   </Card>
   <Card title="Indexes & Performance" icon="list-format">
-    B-tree & specialized indexes (GIN/GiST/BRIN), EXPLAIN ANALYZE, query plans, VACUUM & statistics. [Speed up →](/postgresql-from-zero-to-hero/en/indexes-and-performance/)
+    B-tree & specialized indexes (GIN/GiST/BRIN), EXPLAIN ANALYZE, query plans, VACUUM & statistics. [Speed up →](/postgresql/en/indexes-and-performance/)
   </Card>
   <Card title="Transactions & Concurrency" icon="approve-check">
-    BEGIN/COMMIT/ROLLBACK, isolation levels, MVCC, row locking & deadlocks. [Stay correct →](/postgresql-from-zero-to-hero/en/transactions-and-concurrency/)
+    BEGIN/COMMIT/ROLLBACK, isolation levels, MVCC, row locking & deadlocks. [Stay correct →](/postgresql/en/transactions-and-concurrency/)
   </Card>
   <Card title="Advanced PostgreSQL" icon="puzzle">
-    JSONB, full-text search, views & materialized views, PL/pgSQL functions & triggers. [Go deeper →](/postgresql-from-zero-to-hero/en/advanced-postgres/)
+    JSONB, full-text search, views & materialized views, PL/pgSQL functions & triggers. [Go deeper →](/postgresql/en/advanced-postgres/)
   </Card>
   <Card title="Operations & Scaling" icon="seti:config">
-    Replication, connection pooling (PgBouncer), partitioning, backup/PITR & security (roles, RLS). [Run it →](/postgresql-from-zero-to-hero/en/operations-and-scaling/)
+    Replication, connection pooling (PgBouncer), partitioning, backup/PITR & security (roles, RLS). [Run it →](/postgresql/en/operations-and-scaling/)
   </Card>
 </CardGrid>
 
