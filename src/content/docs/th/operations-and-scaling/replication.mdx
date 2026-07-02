@@ -1,6 +1,6 @@
 ---
 title: Replication
-description: คัดลอกการเปลี่ยนแปลงของเซิร์ฟเวอร์ primary ไปยัง read replica ด้วย streaming replication เลือกระหว่างโหมด synchronous และ asynchronous เข้าใจ failover และใช้ logical replication เพื่อคัดลอกตารางที่เลือก
+description: คัดลอกการเปลี่ยนแปลงของเซิร์ฟเวอร์ primary ไปยัง read replica ด้วย streaming replication เลือกระหว่างโหมด synchronous และ asynchronous เข้าใจ failover และใช้ logical replication เพื่อคัดลอก table ที่เลือก
 sidebar:
   order: 2
 ---
@@ -13,11 +13,11 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 เซิร์ฟเวอร์ตัวเดียวคือจุดที่ล้มเหลวได้จุดเดียว ถ้าดิสก์ของมันพังหรือเครื่อง reboot ฐานข้อมูลของคุณก็หายไปจนกว่าจะมีคนมาแก้ไข **Replication** ขจัดความเสี่ยงนั้นด้วยการเก็บสำเนาข้อมูลหนึ่งชุดหรือมากกว่าไว้บนเครื่องอื่น โดยอัปเดตอย่างต่อเนื่องตามที่ต้นฉบับเปลี่ยนแปลง สำเนาเหล่านั้นยังช่วยให้คุณกระจาย traffic การอ่านไปยังเซิร์ฟเวอร์หลายตัวได้
 
-PostgreSQL มีให้สองรูปแบบ: **streaming replication** ที่คัดลอกทั้ง cluster แบบ byte-for-byte และ **logical replication** ที่คัดลอกตารางที่เลือกทีละแถว ทั้งสองแก้ปัญหาที่แตกต่างกัน บทเรียนนี้จึงครอบคลุมทั้งคู่
+PostgreSQL มีให้สองรูปแบบ: **streaming replication** ที่คัดลอกทั้ง cluster แบบ byte-for-byte และ **logical replication** ที่คัดลอก table ที่เลือกทีละ row ทั้งสองแก้ปัญหาที่แตกต่างกัน บทเรียนนี้จึงครอบคลุมทั้งคู่
 
 ## write-ahead log คือแหล่งความจริง
 
-ก่อนที่การเปลี่ยนแปลงจะแตะไฟล์ของตาราง PostgreSQL จะบันทึกมันลงใน **write-ahead log** (WAL): stream แบบ append-only ของทุกการแก้ไข log นี้มีไว้สำหรับ crash recovery แต่มันก็เป็นสิ่งที่ replica ต้องการพอดี ถ้าเซิร์ฟเวอร์ตัวที่สอง replay WAL record ชุดเดียวกันในลำดับเดียวกัน มันจะได้สำเนาข้อมูลที่เหมือนกันทุกประการ
+ก่อนที่การเปลี่ยนแปลงจะแตะไฟล์ของ table PostgreSQL จะบันทึกมันลงใน **write-ahead log** (WAL): stream แบบ append-only ของทุกการแก้ไข log นี้มีไว้สำหรับ crash recovery แต่มันก็เป็นสิ่งที่ replica ต้องการพอดี ถ้าเซิร์ฟเวอร์ตัวที่สอง replay WAL record ชุดเดียวกันในลำดับเดียวกัน มันจะได้สำเนาข้อมูลที่เหมือนกันทุกประการ
 
 Streaming replication ทำสิ่งนั้นพอดี primary ส่ง WAL ของมันไปยัง replica แต่ละตัวผ่าน connection ของเครือข่าย และ replica แต่ละตัวก็ apply record เหล่านั้นอย่างต่อเนื่องเพื่อให้ตามทัน
 
@@ -94,11 +94,11 @@ pg_ctl promote --pgdata=/var/lib/postgresql/data
 
 ในโปรดักชัน เรื่องนี้มักจัดการโดยเครื่องมืออัตโนมัติที่ตรวจจับความล้มเหลวและ promote standby ให้คุณ แต่การกระทำที่อยู่เบื้องหลังก็คือขั้นตอนเดียวเดิมนี้
 
-## logical replication: คัดลอกตารางที่เลือก
+## logical replication: คัดลอก table ที่เลือก
 
-Streaming replication คัดลอก *ทั้ง cluster* และไหลทางเดียวไปยัง read-only standby เท่านั้น บางครั้งคุณต้องการน้อยกว่านั้น — แค่ตารางไม่กี่ตาราง — หรือคุณต้องการคัดลอกระหว่าง PostgreSQL major version ที่ต่างกัน เช่นระหว่างการอัปเกรด นั่นคือ **logical replication** ที่สร้างบนโมเดลแบบ publish-and-subscribe
+Streaming replication คัดลอก *ทั้ง cluster* และไหลทางเดียวไปยัง read-only standby เท่านั้น บางครั้งคุณต้องการน้อยกว่านั้น — แค่ table ไม่กี่ table — หรือคุณต้องการคัดลอกระหว่าง PostgreSQL major version ที่ต่างกัน เช่นระหว่างการอัปเกรด นั่นคือ **logical replication** ที่สร้างบนโมเดลแบบ publish-and-subscribe
 
-บนต้นทางคุณสร้าง **publication** ที่ระบุชื่อตารางที่จะแชร์ บนปลายทางคุณสร้าง **subscription** ที่เชื่อมต่อและคัดลอกมัน
+บนต้นทางคุณสร้าง **publication** ที่ระบุชื่อ table ที่จะแชร์ บนปลายทางคุณสร้าง **subscription** ที่เชื่อมต่อและคัดลอกมัน
 
 ```sql
 -- On the source database: publish two tables
@@ -112,14 +112,14 @@ CREATE SUBSCRIPTION analytics_sub
   PUBLICATION analytics_pub;
 ```
 
-Subscriber คัดลอกแถวที่มีอยู่ก่อน แล้วจึง apply การเปลี่ยนแปลงใหม่ ๆ ต่อไปเมื่อมันเกิดขึ้น ต่างจาก streaming replica ตรงที่ logical subscriber เป็นฐานข้อมูลที่เขียนได้เต็มรูปแบบ — มันสามารถมีตารางและ index พิเศษของตัวเองได้ — ซึ่งเป็นสิ่งที่ทำให้มันมีประโยชน์สำหรับการคัดลอกแบบเลือกและการ staging การอัปเกรดเวอร์ชัน
+Subscriber คัดลอก row ที่มีอยู่ก่อน แล้วจึง apply การเปลี่ยนแปลงใหม่ ๆ ต่อไปเมื่อมันเกิดขึ้น ต่างจาก streaming replica ตรงที่ logical subscriber เป็นฐานข้อมูลที่เขียนได้เต็มรูปแบบ — มันสามารถมี table และ index พิเศษของตัวเองได้ — ซึ่งเป็นสิ่งที่ทำให้มันมีประโยชน์สำหรับการคัดลอกแบบเลือกและการ staging การอัปเกรดเวอร์ชัน
 
 export const logicalDiagram = `flowchart LR
   S[(Source database)] -->|CREATE PUBLICATION| Pub[Publication: orders, customers]
   Pub -->|row changes| Sub[Subscription]
   Sub --> D[(Destination database - writable)]`;
 
-<Mermaid code={logicalDiagram} title="logical replication เผยแพร่ตารางที่เลือกไปยัง subscriber" />
+<Mermaid code={logicalDiagram} title="logical replication เผยแพร่ table ที่เลือกไปยัง subscriber" />
 
 Logical replication ก็ต้องการให้ยกระดับ `wal_level` เช่นกัน คราวนี้เป็น `logical` บนต้นทาง
 
@@ -128,17 +128,36 @@ Logical replication ก็ต้องการให้ยกระดับ `w
 wal_level = logical
 ```
 
-## เคล็ดลับ / ข้อควรระวัง
+## Tips / gotchas
 
 - Replica มีไว้สำหรับการอ่านและความพร้อมใช้งาน ส่งทุกการเขียนไปที่ primary; replica จะปฏิเสธมัน
 - เมื่อใช้ asynchronous replication ให้คาดหวังว่าจะมี lag บ้าง ถ้าการอ่านต้องสะท้อนการเขียนที่เพิ่งเกิดขึ้น ให้ส่งไปที่ primary หรือรอให้ replica ตามทัน
 - Synchronous replication แลก latency กับความปลอดภัย ใช้มันเมื่อการสูญเสีย transaction ที่ตอบรับแล้วแม้เพียงรายการเดียวเป็นสิ่งที่รับไม่ได้ ไม่ใช่ใช้เป็นค่าเริ่มต้นแบบเหมารวม
-- Streaming replication คัดลอกทั้ง cluster และต้องตรงเวอร์ชันกัน; logical replication คัดลอกตารางที่เลือกและข้าม major version ได้ ซึ่งเป็นเหตุผลที่มันโดดเด่นสำหรับการอัปเกรด
-- Logical replication ต้องการ replica identity — โดยปกติคือ primary key — บนทุกตารางที่เผยแพร่ เพื่อให้ subscriber จับคู่แถวสำหรับการ update และ delete ได้
+- Streaming replication คัดลอกทั้ง cluster และต้องตรงเวอร์ชันกัน; logical replication คัดลอก table ที่เลือกและข้าม major version ได้ ซึ่งเป็นเหตุผลที่มันโดดเด่นสำหรับการอัปเกรด
+- Logical replication ต้องการ replica identity — โดยปกติคือ primary key — บนทุก table ที่เผยแพร่ เพื่อให้ subscriber จับคู่ row สำหรับการ update และ delete ได้
 
 <Callout title="log เดียว สองการใช้งาน">
 write-ahead log ถูกคิดค้นขึ้นเพื่อให้ PostgreSQL กู้คืนได้หลังจาก crash ด้วยการ replay การเปลี่ยนแปลงล่าสุด Replication นำ log เดียวกันนั้นมาใช้ซ้ำ: replica เป็นเพียงเซิร์ฟเวอร์อีกตัวที่ replay WAL ของ primary ตลอดไปและผ่านเครือข่าย การเข้าใจ WAL คือการเข้าใจ replication
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Synchronous replication | ไม่สูญข้อมูลตอน failover เพราะ replica มี WAL ก่อน commit จะตอบรับ | ทุกการเขียนต้องรอ round-trip เครือข่ายไปยัง replica ทำให้ latency สูงขึ้น |
+| Asynchronous replication | เขียนเร็ว เพราะ primary ไม่ต้องรอ replica | replica อาจล้าหลัง (replication lag) และมีโอกาสสูญข้อมูลเล็กน้อยตอน failover |
+
+## Common Mistakes
+
+- **สมมติว่า replica ตามทันเสมอ แล้วอ่านข้อมูลที่เพิ่งเขียนจาก replica ทันที** — เจอปัญหา "read-your-writes" เพราะ asynchronous replication มี lag ให้ส่ง read ที่ต้องสดใหม่ไปที่ primary
+- **ไม่เคยทดสอบ failover จริง** — ไม่มีใครรู้ว่าจะเกิดอะไรขึ้นจริงเมื่อ primary ล้มจนกว่าจะซ้อมจริง ควร drill การ promote replica เป็นประจำ
+- **ถือว่า replica ตัวเดียวคือแผน disaster recovery ที่สมบูรณ์** — replica ไม่ใช่ backup มันคัดลอกความผิดพลาดและการลบข้อมูลตามไปด้วย ยังต้องมี backup แยกต่างหาก
+
+> 💡 Real World Example
+>
+> **Zalando Patroni** — เป็นเครื่องมือ open-source ที่ใช้กันแพร่หลายสำหรับจัดการ automated failover ของ PostgreSQL cluster ในโปรดักชัน
+>
+> **Neon และ Supabase** — สร้างฟีเจอร์อย่าง database branching และ read replica ไว้บน primitive การทำ replication ของ PostgreSQL เอง
 
 export const quizReplication = [
   {
@@ -146,7 +165,7 @@ export const quizReplication = [
     options: [
       'มันเก็บไว้เป็น backup แต่ไม่เคยอ่านมัน',
       'มัน replay record เพื่อรักษาสำเนาข้อมูลที่เหมือนกันและอ่านอย่างเดียว',
-      'มันแปลงมันเป็นการเปลี่ยนแปลงแถวแบบ logical',
+      'มันแปลงมันเป็นการเปลี่ยนแปลง row แบบ logical',
       'มันส่งมันกลับไปที่ primary เพื่อยืนยัน',
     ],
     answer: 1,
@@ -165,7 +184,7 @@ export const quizReplication = [
     q: 'คุณจะเลือก logical replication แทน streaming replication เมื่อใด?',
     options: [
       'เมื่อคุณต้องการสำเนาแบบ byte-for-byte ที่แม่นยำของทั้ง cluster',
-      'เมื่อคุณต้องการคัดลอกเฉพาะตารางที่เลือกหรือ replicate ข้าม major version ที่ต่างกัน',
+      'เมื่อคุณต้องการคัดลอกเฉพาะ table ที่เลือกหรือ replicate ข้าม major version ที่ต่างกัน',
       'เมื่อคุณต้องการการเขียนที่เร็วที่สุดเท่าที่จะเป็นไปได้',
       'เมื่อคุณไม่จำเป็นต้องอ่านจากสำเนาเลย',
     ],

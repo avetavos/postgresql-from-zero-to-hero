@@ -251,6 +251,27 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 อุบัติเหตุบน production ที่พบบ่อยที่สุดอันดับหนึ่งกับ SQL คือ `UPDATE` หรือ `DELETE` ที่รันโดยไม่มี `WHERE` clause สร้างความเคยชินให้กล้ามเนื้อจดจำ: พิมพ์ `WHERE` ก่อน แล้วค่อยพิมพ์ค่าทีหลัง เมื่อสงสัย ให้ทำมันภายใน transaction ที่คุณ rollback ได้
 </Callout>
 
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| `UPDATE`/`DELETE` พร้อม `WHERE` ที่เจาะจง | ปลอดภัย กระทบเฉพาะ row ที่ตั้งใจ | ต้องคิดเงื่อนไขให้ถูกต้องครบถ้วนก่อนรัน |
+| `UPDATE`/`DELETE` โดยไม่มี `WHERE` | เขียนเร็ว ไม่ต้องคิดเงื่อนไข | กระทบทุก row ในทันที เป็นหายนะถ้ารันผิด table หรือผิด environment |
+| ห่อไว้ใน transaction แล้ว `ROLLBACK` ได้ | มีทางหนีฉุกเฉินก่อน `COMMIT` จริง | ต้องจำเปิด/ปิด transaction และตรวจผลก่อน commit ทุกครั้ง |
+| รันตรง ๆ นอก transaction | เร็ว ไม่ต้องจัดการ transaction | ไม่มีปุ่ม undo ถ้าผลลัพธ์ผิดพลาด |
+
+## Common Mistakes
+
+- **รัน `UPDATE`/`DELETE` โดยไม่มี `WHERE` clause** — กระทบทุก row ใน table ทันที ให้สร้างนิสัยพิมพ์ `WHERE` ก่อนแล้วค่อยเติมเงื่อนไข
+- **ไม่ทดสอบเงื่อนไขด้วย `SELECT` ก่อน** — ควรรัน `SELECT count(*) ... WHERE ...` ที่ตรงกันก่อนเสมอ เพื่อยืนยันจำนวน row ที่จะถูกกระทบ ก่อนสลับเป็น `UPDATE`/`DELETE`
+- **คิดว่า `DELETE` คืนพื้นที่ดิสก์ทันที** — `DELETE` แค่ทำเครื่องหมาย row ว่าตายแล้ว การคืนพื้นที่จริงเป็นหน้าที่ของ `VACUUM`
+
+> 💡 Real World Example
+>
+> **กระบวนการเปลี่ยนแปลงข้อมูล production ของ GitLab** — กำหนดให้ dry-run คำสั่ง SQL ที่ทำลายข้อมูล (destructive) ด้วยเวอร์ชัน `SELECT` ก่อนเสมอ แล้วให้ทีมรีวิวจำนวน row ก่อนอนุมัติให้รัน `UPDATE`/`DELETE` จริง
+>
+> **ทีม SRE ทั่วไปที่ทำ manual data fix** — บังคับให้ทุกการเปลี่ยนแปลงข้อมูลด้วยมือห่อด้วย transaction ที่ `ROLLBACK` ได้ พร้อมมีคนที่สองช่วยรีวิวผลก่อน `COMMIT`
+
 export const quizUpdateDelete = [
   {
     q: 'What happens if you run UPDATE books SET copies_sold = 0; with no WHERE clause?',

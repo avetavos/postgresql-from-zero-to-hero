@@ -1,0 +1,70 @@
+---
+title: Glossary
+description: คำศัพท์ PostgreSQL ที่ใช้ตลอด course นี้ — รักษา terminology ภาษาอังกฤษตามที่ developer ใช้จริง
+sidebar:
+  order: 99
+---
+
+import Callout from '../../../components/Callout.astro';
+import ProgressTracker from '../../../components/ProgressTracker.tsx';
+
+## โครงสร้างข้อมูล
+
+| English | Thai Style | หมายเหตุ |
+|---------|-----------|---------|
+| table | table | ไม่แปลเป็น "ตาราง" — ใช้ "table" ตรง ๆ ตลอด course |
+| row | row | ไม่แปลเป็น "แถว" |
+| column | column | ไม่แปลเป็น "คอลัมน์" |
+| schema | schema | การจัดกลุ่ม table และ object อื่น ๆ ภายใน database |
+| database | database / ฐานข้อมูล | ทั้งสองแบบใช้ได้ แต่ "database" พบบ่อยกว่าเมื่อพูดถึง object เฉพาะ (`CREATE DATABASE`) |
+| cluster | cluster | server หนึ่งตัวที่รันอยู่ บรรจุหลาย database |
+| constraint | constraint | ไม่แปลเป็น "ข้อจำกัด" |
+| index | index | ไม่แปลเป็น "ดัชนี" |
+| primary key / foreign key | primary key / foreign key | คงคำเต็มภาษาอังกฤษ ไม่ย่อเป็นไทย |
+
+## Query และการดำเนินการ
+
+| English | Thai Style | หมายเหตุ |
+|---------|-----------|---------|
+| query | query | ไม่แปลเป็น "คิวรี" |
+| statement | statement | คำสั่ง SQL หนึ่งคำสั่ง |
+| operation | operation | ใช้แทน "การดำเนินการ" ในบริบททั่วไป |
+| transaction | transaction | ไม่แปลเป็นไทย |
+| lock | lock | ไม่แปลเป็น "ล็อก" (ยกเว้น "ล็อกอิน" ซึ่งเป็นคนละคำ ไม่เกี่ยวกับ database lock) |
+| deadlock | deadlock | คงคำอังกฤษ |
+| isolation level | isolation level | ไม่แปลเป็นไทย |
+| planner | planner | ส่วนของ PostgreSQL ที่เลือก query plan |
+| vacuum / autovacuum | VACUUM / autovacuum | เขียนตามชื่อคำสั่งจริง |
+
+## Runtime และ infrastructure
+
+| English | Thai Style | หมายเหตุ |
+|---------|-----------|---------|
+| replication | replication | ไม่แปลเป็นไทย |
+| partition / partitioning | partition / partitioning | ไม่แปลเป็นไทย |
+| connection pool / pooling | connection pool / pooling | ไม่แปลเป็นไทย |
+| backup | backup | ไม่แปลเป็นไทย |
+| role | role | บัญชีที่เชื่อมต่อและได้รับสิทธิ์ ไม่ใช่ "บทบาท" ทั่วไป |
+| driver | driver | library ที่พูด protocol ของ PostgreSQL |
+| trigger / function | trigger / function | ไม่แปลเป็นไทย |
+| view / materialized view | view / materialized view | ไม่แปลเป็นไทย |
+
+## เมื่อ **ไม่** ควรใช้ literal Thai translation
+
+| หลีกเลี่ยง | ใช้แทน |
+|------------|--------|
+| ตาราง | table |
+| แถว | row |
+| คอลัมน์ | column |
+| คิวรี | query |
+| ดัชนี | index |
+| ข้อจำกัด | constraint |
+| ล็อก (หมายถึง database lock) | lock |
+| ดำเนินการ (หมายถึง operation ทั่วไป) | operation / ทำงาน / รัน ตามบริบท |
+| ทำการ + verb (เช่น "ทำการรัน") | ตัด "ทำการ" ออก แล้วใช้ verb ตรง ๆ ("รัน") |
+
+<Callout title="ทำไมคำเหล่านี้ไม่แปลเป็นไทยทั้งหมด">
+Developer ไทยที่ทำงานกับ PostgreSQL จริงแทบไม่มีใครพูดว่า "ไปดูที่ตารางแถวนี้ที่มีดัชนีติดอยู่" — ทุกคนพูดว่า "table", "row", "index" ตรง ๆ เพราะนั่นคือคำที่ปรากฏใน error message, documentation, และโค้ดจริงทุกวัน course นี้จึงรักษาคำศัพท์เทคนิคไว้เป็นภาษาอังกฤษ แล้วใช้ภาษาไทยสำหรับอธิบายแนวคิดและเชื่อมประโยค เพื่อให้สิ่งที่คุณอ่านตรงกับสิ่งที่คุณจะพูดและเขียนในงานจริง
+</Callout>
+
+<ProgressTracker client:visible id="th/glossary" />

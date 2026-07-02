@@ -10,7 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การสร้างข้อมูลหมายถึงการเพิ่ม row และคำสั่งสำหรับสิ่งนั้นคือ `INSERT` คุณระบุชื่อ table แสดงรายการ column ที่คุณกำลังจะให้ค่า แล้วให้ค่าเหล่านั้น PostgreSQL จะเติมทุกอย่างที่คุณเว้นไว้ — id ที่ถูกสร้างขึ้น, column ที่มี `DEFAULT` และ column ใด ๆ ที่อนุญาตให้เป็น `NULL`
+ปัญหาที่เจอจริง: แอปพลิเคชันของคุณไม่มีอะไรให้แสดงเลยจนกว่าจะมีข้อมูลอยู่ใน table เสียก่อน การสร้างข้อมูลหมายถึงการเพิ่ม row และคำสั่งสำหรับสิ่งนั้นคือ `INSERT` คุณระบุชื่อ table แสดงรายการ column ที่คุณกำลังจะให้ค่า แล้วให้ค่าเหล่านั้น PostgreSQL จะเติมทุกอย่างที่คุณเว้นไว้ — id ที่ถูกสร้างขึ้น, column ที่มี `DEFAULT` และ column ใด ๆ ที่อนุญาตให้เป็น `NULL`
 
 บทเรียนนี้ใช้ table `authors` และ `books` จากภาพรวมของโมดูล
 
@@ -228,18 +228,39 @@ column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น Po
 (1 row)
 ```
 
-คุณสามารถ return column ใดก็ได้ที่คุณต้องการ — `RETURNING id, name` หรือแม้แต่ `RETURNING *` เพื่อรับ row ใหม่ทั้งแถว รวมถึง default ที่เซิร์ฟเวอร์เติมให้ด้วย
+คุณสามารถ return column ใดก็ได้ที่คุณต้องการ — `RETURNING id, name` หรือแม้แต่ `RETURNING *` เพื่อรับ row ใหม่ทั้ง row รวมถึง default ที่เซิร์ฟเวอร์เติมให้ด้วย
 
 ## Tips / gotchas
 
 - ส่งค่าผ่าน placeholder ของ driver (`$1`, `%s`) เสมอ การสร้าง SQL ด้วยการต่อ string เปิดทางให้ SQL injection และพังเมื่อเจออัญประกาศหรืออักขระพิเศษ
 - เมื่อใช้ primary key แบบ `IDENTITY` (หรือ `serial`) อย่าให้ค่า id เอง — ปล่อยให้ PostgreSQL สร้างมันแล้วอ่านกลับมาด้วย `RETURNING`
-- การ insert หลาย row เป็นคำสั่งเดียวและการเดินทางไป-กลับครั้งเดียว ดังนั้นจึงเร็วกว่าการวน loop insert ทีละแถวอย่างมาก
+- การ insert หลาย row เป็นคำสั่งเดียวและการเดินทางไป-กลับครั้งเดียว ดังนั้นจึงเร็วกว่าการวน loop insert ทีละ row อย่างมาก
 - column ที่ไม่มีค่าและไม่มี default ต้องอนุญาตให้เป็น `NULL` ได้ มิฉะนั้น insert จะล้มเหลวด้วย not-null violation
 
 <Callout title="RETURNING คือเพื่อนของคุณ">
 `RETURNING` เปลี่ยนการเขียน (write) ให้กลายเป็น write บวก read ในคำสั่งเดียว มันหลีกเลี่ยงการตามด้วย `SELECT` และหลีกเลี่ยง race condition เพราะค่าที่คุณได้กลับมาคือค่าที่ insert นี้สร้างขึ้นเป๊ะ ๆ
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| `RETURNING` หลัง `INSERT` | ได้ค่าที่ถูกสร้างขึ้น (เช่น `id`) กลับมาในการเดินทางไป-กลับเดียว ไม่มี race condition | ต้องจำ syntax เพิ่มเติม และบาง driver ต้องอ่านผลลัพธ์แบบ query แทน exec ธรรมดา |
+| แยก `SELECT` มาทีหลัง | เขียนง่าย เข้าใจง่ายสำหรับมือใหม่ | เดินทางไป-กลับเพิ่มอีกครั้ง และมี race condition ถ้ามี insert อื่นแทรกระหว่างนั้น |
+| `INSERT` หลาย row ในคำสั่งเดียว | เร็ว เพราะเป็นการเดินทางไป-กลับครั้งเดียว | คำสั่งยาวขึ้น และ error ของ row เดียวอาจทำให้ทั้งคำสั่งล้มเหลว |
+| วน loop insert ทีละ row | โค้ดอ่านง่าย ทีละขั้นตอน | ช้ามาก เพราะเดินทางไป-กลับ N ครั้งสำหรับ N row |
+
+## Common Mistakes
+
+- **วน loop รัน `INSERT` ทีละ row แทนที่จะรวมเป็นคำสั่งเดียว** — ทำให้เสีย network round-trip ต่อ row ควรใช้ multi-row `INSERT`, `executemany`, หรือ bulk copy (`COPY`/`CopyFrom`) แทน
+- **เอา input ของผู้ใช้มาต่อ (concatenate) เข้ากับ SQL string ตรง ๆ** — เปิดช่องให้เกิด SQL injection ให้ส่งค่าผ่าน placeholder (`$1`, `%s`) เสมอ
+- **ลืมว่า column เป็น `NOT NULL` และไม่มี `DEFAULT`** — insert จะล้มเหลวด้วย not-null violation ตรวจ schema ก่อนเขียน insert หรือใส่ค่าให้ครบทุก column ที่จำเป็น
+
+> 💡 Real World Example
+>
+> **GitHub / GitLab** — งาน insert ทั่วไปในแอปส่วนใหญ่ผ่าน ORM (เช่น ActiveRecord) เพื่อความสะดวกและ maintainability แต่ในจุดที่ throughput สูง เช่น event ingestion หรือ audit log พวกเขาจะลง SQL มือพร้อม `RETURNING` และ multi-row insert เพื่อลด round-trip
+>
+> **ระบบ bulk import ไฟล์ CSV ของผู้ใช้** — ใช้ `COPY` หรือ multi-row `INSERT` แทนการวน insert ทีละ row เพื่อให้ import ไฟล์หลักแสน row เสร็จในไม่กี่วินาทีแทนที่จะเป็นหลักนาที
 
 export const quizInsert = [
   {

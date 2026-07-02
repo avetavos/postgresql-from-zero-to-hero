@@ -54,7 +54,12 @@ appdb=# \q
 
 หากคุณชอบการคลิกมากกว่าการพิมพ์ **pgAdmin** คือเครื่องมือแบบกราฟิกอย่างเป็นทางการ และการตั้งค่า Docker จากบทเรียนก่อนหน้าก็มีมันรันอยู่ที่ `http://localhost:8080` แล้ว ต่อไปนี้คือวิธีหาทางไปรอบ ๆ
 
-เมื่อคุณเปิด pgAdmin ครั้งแรก ให้ล็อกอินด้วยอีเมลและรหัสผ่านที่คุณตั้งไว้ในไฟล์ compose ด้านซ้ายแสดง **browser tree** ที่มีกลุ่ม Servers อยู่ด้านบนสุด หากต้องการเชื่อมต่อกับฐานข้อมูลของคุณ ให้คลิกขวาที่ Servers และเลือกลงทะเบียน server ใหม่ ในกล่องโต้ตอบ ให้ตั้งชื่อการเชื่อมต่อในแท็บ General จากนั้นสลับไปยังแท็บ Connection และกรอก host, port, username และ password เนื่องจาก pgAdmin รันใน container ของตัวเอง host จึงเป็นชื่อ service `postgres` แทนที่จะเป็น `localhost` ส่วน port ยังคงเป็น `5432` และ user คือ `postgres`
+เมื่อคุณเปิด pgAdmin ครั้งแรก ให้ล็อกอินด้วยอีเมลและรหัสผ่านที่คุณตั้งไว้ในไฟล์ compose ด้านซ้ายแสดง **browser tree** ที่มีกลุ่ม Servers อยู่ด้านบนสุด หากต้องการเชื่อมต่อกับฐานข้อมูลของคุณ ให้ทำตามขั้นตอนนี้:
+
+1. คลิกขวาที่ Servers แล้วเลือกลงทะเบียน server ใหม่
+2. ในกล่องโต้ตอบ ตั้งชื่อการเชื่อมต่อในแท็บ General
+3. สลับไปยังแท็บ Connection แล้วกรอก host, port, username และ password
+4. เนื่องจาก pgAdmin รันใน container ของตัวเอง host จึงเป็นชื่อ service `postgres` แทนที่จะเป็น `localhost` ส่วน port ยังคงเป็น `5432` และ user คือ `postgres`
 
 เมื่อเชื่อมต่อแล้ว tree จะขยายออก เปิด server ของคุณ จากนั้น **Databases** จากนั้นฐานข้อมูลหนึ่ง จากนั้น **Schemas** จากนั้น schema `public` และสุดท้าย **Tables** การซ้อนกันนี้สะท้อนวิธีที่ PostgreSQL จัดระเบียบข้อมูลจริง ๆ ซึ่งบทเรียนถัดไปจะอธิบายในรายละเอียด การคลิก object ใด ๆ จะแสดงรายละเอียดของมันใน panel หลัก
 
@@ -122,7 +127,7 @@ appdb=# \q
 
 **ใน pgAdmin:** รายละเอียดการเชื่อมต่อเดียวกันนี้อยู่ในกล่องโต้ตอบลงทะเบียน server แทนที่จะเป็น string — host, port, user, password และ database ต่างมีช่องของตัวเอง
 
-## เคล็ดลับ / จุดที่ต้องระวัง
+## Tips / gotchas
 
 - connection string เป็นไปตามรูปแบบ `postgresql://user:password@host:port/database` แต่ละส่วนเป็น optional เมื่อมีค่า default ใช้แทน
 - จากภายใน container อื่น (เช่น pgAdmin) host คือชื่อ service ไม่ใช่ `localhost` จากเครื่องของคุณเองมันคือ `localhost`
@@ -133,6 +138,26 @@ appdb=# \q
 <Callout title="สามประตู ฐานข้อมูลเดียว">
 psql, pgAdmin และ driver ของแอปพลิเคชันคุณ ล้วนเชื่อมต่อกับ PostgreSQL server ตัวเดียวกันด้วย credential เดียวกัน เลือกประตูที่เหมาะกับงาน — shell เพื่อความเร็ว, GUI เพื่อการสำรวจ, driver สำหรับแอปของคุณ — และจงรู้ไว้ว่าฐานข้อมูลที่อยู่ข้างใต้ไม่สนใจว่าคุณเดินผ่านบานไหนเข้ามา
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| `psql` CLI | เร็ว, script ได้, overhead ต่ำ | ต้องจำ meta-command และ syntax |
+| pgAdmin GUI | เห็นโครงสร้างข้อมูลชัดเจน เหมาะกับมือใหม่ | หนักกว่า และต้องมีเครื่อง desktop เปิด browser |
+| Driver ในโค้ดแอป | คือของจริงที่ production ใช้รันทุกวัน | ต้องเขียนโค้ดเพิ่มแค่เพื่อ query อย่างเดียวไม่คุ้ม |
+
+## Common Mistakes
+
+- **พึ่ง GUI อย่างเดียวแล้วไม่เคยเรียน meta-command** — เวลาต้อง SSH เข้า production ที่ไม่มี GUI ให้ใช้ คุณจะติดขัดทันทีถ้าไม่คุ้นกับ `\dt`, `\d` และผองเพื่อน
+- **ลืมว่า pgAdmin/DBeaver เชื่อมด้วยชื่อ host ของ container network ไม่ใช่ `localhost`** — จากเครื่อง host คุณใช้ `localhost` ได้ แต่จาก container อื่นต้องใช้ชื่อ service เช่น `postgres` ตามที่ compose ตั้งไว้
+- **copy-paste SQL ข้ามเครื่องมือโดยไม่เช็คสถานะ transaction** — psql กับ GUI บางตัวจัดการ autocommit ต่างกัน การ copy query ที่มี `BEGIN`/`COMMIT` ข้ามเครื่องมืออาจทำให้ transaction ค้างโดยไม่รู้ตัว
+
+> 💡 Real World Example
+>
+> **ทีม backend ส่วนใหญ่** — ใช้ `psql` สำหรับ debug production อย่างรวดเร็วผ่าน SSH เพราะเซิร์ฟเวอร์จริงมักไม่มี GUI ให้ใช้
+>
+> **นักวิเคราะห์ข้อมูล (data analyst)** — ใช้ pgAdmin หรือ DBeaver เป็นหลักสำหรับงานสำรวจข้อมูลแบบ exploratory เพราะเห็นโครงสร้าง table และผลลัพธ์เป็น grid ได้ทันที ไม่ต้องจำ syntax
 
 export const quizPsqlPgadmin = [
   {

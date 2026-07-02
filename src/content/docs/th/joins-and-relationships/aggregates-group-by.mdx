@@ -1,6 +1,6 @@
 ---
 title: Aggregate และ GROUP BY
-description: ยุบหลายแถวให้กลายเป็นตัวเลขสรุปด้วย count, sum, avg, min, และ max, จัดกลุ่มด้วย GROUP BY, กรองกลุ่มด้วย HAVING, และเข้าใจความต่างระหว่าง count(*) กับ count(col)
+description: ยุบหลาย row ให้กลายเป็นตัวเลขสรุปด้วย count, sum, avg, min, และ max, จัดกลุ่มด้วย GROUP BY, กรองกลุ่มด้วย HAVING, และเข้าใจความต่างระหว่าง count(*) กับ count(col)
 sidebar:
   order: 3
 ---
@@ -10,13 +10,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-จนถึงตอนนี้ทุกคิวรีคืนแถวที่มีอยู่แล้ว aggregate function ต่างออกไป: มันอ่านหลายแถวแล้วผลิตค่าสรุปออกมาเพียงค่าเดียว มีหนังสือกี่เล่ม? ยอดขายรวมทั้งหมดกี่เล่ม? ปีที่ตีพิมพ์โดยเฉลี่ยคือปีไหน? แต่ละข้อนั้นคือตัวเลขหนึ่งตัวที่ถูกบีบออกมาจากทั้งคอลัมน์ เพิ่ม `GROUP BY` เข้าไปแล้วคุณจะได้ตัวเลขสรุปหนึ่งตัวต่อหนึ่งกลุ่ม แทนที่จะได้หนึ่งตัวสำหรับทั้งตาราง
+จนถึงตอนนี้ทุก query คืน row ที่มีอยู่แล้ว aggregate function ต่างออกไป: มันอ่านหลาย row แล้วผลิตค่าสรุปออกมาเพียงค่าเดียว มีหนังสือกี่เล่ม? ยอดขายรวมทั้งหมดกี่เล่ม? ปีที่ตีพิมพ์โดยเฉลี่ยคือปีไหน? แต่ละข้อนั้นคือตัวเลขหนึ่งตัวที่ถูกบีบออกมาจากทั้ง column เพิ่ม `GROUP BY` เข้าไปแล้วคุณจะได้ตัวเลขสรุปหนึ่งตัวต่อหนึ่งกลุ่ม แทนที่จะได้หนึ่งตัวสำหรับทั้ง table
 
-เรายังคงใช้ตาราง `authors`, `books`, และ `sales` ต่อไป
+เรายังคงใช้ table `authors`, `books`, และ `sales` ต่อไป
 
-## Aggregate function ทั่วทั้งตาราง
+## Aggregate function ทั่วทั้ง table
 
-เมื่อไม่มี `GROUP BY` aggregate function จะพับผลลัพธ์ทั้งหมดลงเหลือเพียงแถวเดียว ตัวที่ใช้บ่อยที่สุดคือ `count`, `sum`, `avg`, `min`, และ `max`
+เมื่อไม่มี `GROUP BY` aggregate function จะพับผลลัพธ์ทั้งหมดลงเหลือเพียง row เดียว ตัวที่ใช้บ่อยที่สุดคือ `count`, `sum`, `avg`, `min`, และ `max`
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -81,7 +81,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## GROUP BY: หนึ่งสรุปต่อหนึ่งกลุ่ม
 
-`GROUP BY` แยกแถวออกเป็นถังที่ใช้ค่าเดียวกันในคอลัมน์ที่ระบุไว้ แล้วรัน aggregate ครั้งเดียวต่อหนึ่งถัง ที่นี่เรารวมจำนวนเล่มที่ขายได้ต่อภูมิภาค
+`GROUP BY` แยก row ออกเป็นถังที่ใช้ค่าเดียวกันใน column ที่ระบุไว้ แล้วรัน aggregate ครั้งเดียวต่อหนึ่งถัง ที่นี่เรารวมจำนวนเล่มที่ขายได้ต่อภูมิภาค
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -144,11 +144,11 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 (2 rows)
 ```
 
-แต่ละภูมิภาคกลายเป็นผลลัพธ์หนึ่งแถว คอลัมน์ `region` อยู่ใน `SELECT` ได้เพราะมันคือสิ่งที่เราจัดกลุ่มตาม ทุกอย่างที่เหลือต้องอยู่ภายใน aggregate
+แต่ละภูมิภาคกลายเป็นผลลัพธ์หนึ่ง row column `region` อยู่ใน `SELECT` ได้เพราะมันคือสิ่งที่เราจัดกลุ่มตาม ทุกอย่างที่เหลือต้องอยู่ภายใน aggregate
 
 ## กรองกลุ่มด้วย HAVING
 
-`WHERE` กรองแถวแต่ละแถว *ก่อน* ที่มันจะถูกจัดกลุ่ม ในการกรองบนผลลัพธ์ของ aggregate คุณต้องใช้ `HAVING` ซึ่งทำงาน *หลัง* การจัดกลุ่ม ที่นี่เราเก็บเฉพาะภูมิภาคที่ขายได้มากกว่าแปดร้อยเล่ม
+`WHERE` กรอง row แต่ละ row *ก่อน* ที่มันจะถูกจัดกลุ่ม ในการกรองบนผลลัพธ์ของ aggregate คุณต้องใช้ `HAVING` ซึ่งทำงาน *หลัง* การจัดกลุ่ม ที่นี่เราเก็บเฉพาะภูมิภาคที่ขายได้มากกว่าแปดร้อยเล่ม
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -215,11 +215,11 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 (1 row)
 ```
 
-ใช้ `WHERE` ทิ้งแถวที่คุณไม่อยากให้ถูกนับเลย และใช้ `HAVING` ทิ้งทั้งกลุ่มโดยอิงจากยอดรวมของกลุ่ม ทั้งสองมักปรากฏในคิวรีเดียวกัน
+ใช้ `WHERE` ทิ้ง row ที่คุณไม่อยากให้ถูกนับเลย และใช้ `HAVING` ทิ้งทั้งกลุ่มโดยอิงจากยอดรวมของกลุ่ม ทั้งสองมักปรากฏใน query เดียวกัน
 
 ## count(*) เทียบกับ count(column)
 
-`count(*)` นับแถว ส่วน `count(column)` นับแถวที่คอลัมน์นั้นไม่เป็น `NULL` ความต่างนี้สำคัญทุกครั้งที่คอลัมน์หนึ่งอาจขาดหายไป การ join `authors` เข้ากับ `books` ด้วย `LEFT JOIN` แสดงให้เห็นชัดเจน
+`count(*)` นับ row ส่วน `count(column)` นับ row ที่ column นั้นไม่เป็น `NULL` ความต่างนี้สำคัญทุกครั้งที่ column หนึ่งอาจขาดหายไป การ join `authors` เข้ากับ `books` ด้วย `LEFT JOIN` แสดงให้เห็นชัดเจน
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -290,25 +290,44 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 (3 rows)
 ```
 
-Sela Vance แสดง `row_count` เป็นหนึ่งเพราะ `LEFT JOIN` ยังคงผลิตแถวให้เธอ แต่ `book_count` เป็นศูนย์เพราะ `b.id` เป็น `NULL` ตรงนั้น และ `count(b.id)` ข้ามค่า `NULL` ไป
+Sela Vance แสดง `row_count` เป็นหนึ่งเพราะ `LEFT JOIN` ยังคงผลิต row ให้เธอ แต่ `book_count` เป็นศูนย์เพราะ `b.id` เป็น `NULL` ตรงนั้น และ `count(b.id)` ข้ามค่า `NULL` ไป
 
-## ทิป / จุดพลาดที่พบบ่อย
+## Tips / gotchas
 
-- ทุกคอลัมน์ในรายการ `SELECT` ที่ไม่ได้ห่อด้วย aggregate ต้องปรากฏใน `GROUP BY` มิฉะนั้น PostgreSQL จะบอกไม่ได้ว่าจะแสดงค่าของแถวไหน และจะโยน error ออกมา
-- หยิบ `count(*)` มาใช้เพื่อนับแถว และ `count(col)` เพื่อนับค่าที่ไม่เป็น `NULL` ใช้ `count(DISTINCT col)` เพื่อนับค่าที่ไม่ซ้ำกันและไม่เป็น `NULL`
-- `WHERE` กรองแถวก่อนจัดกลุ่ม ส่วน `HAVING` กรองกลุ่มหลังจากนั้น คุณใส่ aggregate ใน `WHERE` ไม่ได้
+- ทุก column ในรายการ `SELECT` ที่ไม่ได้ห่อด้วย aggregate ต้องปรากฏใน `GROUP BY` มิฉะนั้น PostgreSQL จะบอกไม่ได้ว่าจะแสดงค่าของ row ไหน และจะโยน error ออกมา
+- หยิบ `count(*)` มาใช้เพื่อนับ row และ `count(col)` เพื่อนับค่าที่ไม่เป็น `NULL` ใช้ `count(DISTINCT col)` เพื่อนับค่าที่ไม่ซ้ำกันและไม่เป็น `NULL`
+- `WHERE` กรอง row ก่อนจัดกลุ่ม ส่วน `HAVING` กรองกลุ่มหลังจากนั้น คุณใส่ aggregate ใน `WHERE` ไม่ได้
 - aggregate มองข้าม `NULL` สำหรับ `sum`, `avg`, `min`, และ `max` ด้วยเช่นกัน ดังนั้นค่าเฉลี่ยจึงคิดเฉพาะจากค่าที่ไม่เป็น `NULL` เท่านั้น
 
-<Callout title="GROUP BY ยุบแถว และนั่นคือจุดประสงค์">
-หลังจาก `GROUP BY` คุณจะไม่มีแถวต้นฉบับอีกต่อไป — คุณมีหนึ่งแถวต่อหนึ่งกลุ่ม ถ้าคุณพบว่าตัวเองอยากได้ทั้งยอดรวมของกลุ่มและแถวแต่ละแถวในผลลัพธ์เดียวกัน นั่นคือสัญญาณให้หันไปหา window function ซึ่งครอบคลุมในบทเรียนสุดท้ายของโมดูลนี้
+<Callout title="GROUP BY ยุบ row และนั่นคือจุดประสงค์">
+หลังจาก `GROUP BY` คุณจะไม่มี row ต้นฉบับอีกต่อไป — คุณมีหนึ่ง row ต่อหนึ่งกลุ่ม ถ้าคุณพบว่าตัวเองอยากได้ทั้งยอดรวมของกลุ่มและ row แต่ละ row ในผลลัพธ์เดียวกัน นั่นคือสัญญาณให้หันไปหา window function ซึ่งครอบคลุมในบทเรียนสุดท้ายของโมดูลนี้
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Aggregate ด้วย `GROUP BY` ใน PostgreSQL | ทำงานใกล้ข้อมูล ใช้ index/parallel worker ได้ ส่งข้อมูลผ่าน network น้อย | ต้องเขียน SQL ให้ถูกต้อง เช่นเข้าใจกฎของ `GROUP BY`/`HAVING` |
+| ดึงทุก row มาสรุปในโค้ด application | เขียนโค้ดง่าย ปรับ logic ได้อิสระ | โอนข้อมูลเปลืองแบนด์วิดท์ ไม่ scale เมื่อ table โต |
+
+## Common Mistakes
+
+- **เลือก column ที่ไม่ใช่ aggregate และไม่อยู่ใน `GROUP BY`** — PostgreSQL เข้มงวดกว่าฐานข้อมูลบางตัว มันจะปฏิเสธและโยน error ทันที ไม่เดาค่าให้เหมือนบางระบบ
+- **`GROUP BY` บน expression ที่ไม่มี index บน table ขนาดใหญ่** — ทำให้ PostgreSQL ต้อง scan ทั้ง table ทุกครั้ง ถ้า query แบบนี้รันบ่อย ควรพิจารณาสร้าง expression index
+- **สับสนระหว่าง `WHERE` กับ `HAVING`** — `WHERE` กรอง row ก่อนจัดกลุ่ม ส่วน `HAVING` กรองกลุ่มหลัง aggregate เอา aggregate function ใส่ใน `WHERE` ไม่ได้เด็ดขาด
+
+> 💡 Real World Example
+>
+> **E-commerce dashboard** — รายงานยอดขายต่อวันหรือต่อสินค้าใช้ `GROUP BY` สรุปยอดตรงใน PostgreSQL แทนที่จะดึง row ระดับ transaction ทุก row มาบวกเองใน backend
+>
+> **SaaS usage reporting** — รายงาน usage ต่อ tenant (เช่นจำนวน API call ต่อเดือน) คำนวณด้วย `GROUP BY tenant_id` ในฐานข้อมูลโดยตรง ทำให้ scale ได้แม้ tenant และ row จะเพิ่มขึ้นเรื่อย ๆ
 
 export const quizAggregates = [
   {
     q: 'ความต่างระหว่าง count(*) กับ count(some_column) คืออะไร?',
     options: [
       'มันเหมือนกันทุกประการ',
-      'count(*) นับทุกแถว ส่วน count(some_column) นับเฉพาะแถวที่คอลัมน์นั้นไม่เป็น NULL',
+      'count(*) นับทุก row ส่วน count(some_column) นับเฉพาะ row ที่ column นั้นไม่เป็น NULL',
       'count(*) เร็วกว่าแต่แม่นยำน้อยกว่า',
       'count(some_column) นับค่าที่ไม่ซ้ำกันโดยอัตโนมัติ',
     ],
@@ -320,11 +339,11 @@ export const quizAggregates = [
     answer: 1,
   },
   {
-    q: 'คอลัมน์ที่ไม่ผ่าน aggregate ปรากฏใน SELECT ของคุณแต่ไม่อยู่ใน GROUP BY จะเกิดอะไรขึ้น?',
+    q: 'column ที่ไม่ผ่าน aggregate ปรากฏใน SELECT ของคุณแต่ไม่อยู่ใน GROUP BY จะเกิดอะไรขึ้น?',
     options: [
       'PostgreSQL เดาค่าให้',
       'PostgreSQL โยน error ออกมา',
-      'คอลัมน์นั้นถูกทิ้งไปอย่างเงียบ ๆ',
+      'column นั้นถูกทิ้งไปอย่างเงียบ ๆ',
       'มันถูกปฏิบัติเหมือนเป็น count(*)',
     ],
     answer: 1,

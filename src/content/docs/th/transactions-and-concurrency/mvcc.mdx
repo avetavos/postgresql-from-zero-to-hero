@@ -1,6 +1,6 @@
 ---
 title: MVCC
-description: Multi-Version Concurrency Control — วิธีที่ PostgreSQL ปล่อยให้ writer และ reader ทำงานโดยไม่ block กัน ด้วยการเก็บแถวไว้หลายเวอร์ชันและให้แต่ละ transaction มี snapshot
+description: Multi-Version Concurrency Control — วิธีที่ PostgreSQL ปล่อยให้ writer และ reader ทำงานโดยไม่ block กัน ด้วยการเก็บ row ไว้หลายเวอร์ชันและให้แต่ละ transaction มี snapshot
 sidebar:
   order: 4
 ---
@@ -15,9 +15,9 @@ isolation level ในบทเรียนก่อนหน้าทั้ง�
 
 ## แนวคิดหลัก: ไม่เคยเขียนทับที่เดิม
 
-เมื่อคุณ `UPDATE` แถวหนึ่ง PostgreSQL ไม่ได้เปลี่ยน byte เดิม มันเขียน **เวอร์ชันใหม่** ของแถวและทำเครื่องหมายเวอร์ชันเก่าว่าถูกแทนที่แล้ว ชั่วขณะหนึ่งทั้งสองเวอร์ชันมีอยู่บนดิสก์ transaction หนึ่ง ๆ จะเห็นเวอร์ชันใดขึ้นอยู่กับว่า transaction นั้นเริ่มเมื่อใด
+เมื่อคุณ `UPDATE` row หนึ่ง PostgreSQL ไม่ได้เปลี่ยน byte เดิม มันเขียน **เวอร์ชันใหม่** ของ row และทำเครื่องหมายเวอร์ชันเก่าว่าถูกแทนที่แล้ว ชั่วขณะหนึ่งทั้งสองเวอร์ชันมีอยู่บนดิสก์ transaction หนึ่ง ๆ จะเห็นเวอร์ชันใดขึ้นอยู่กับว่า transaction นั้นเริ่มเมื่อใด
 
-แต่ละเวอร์ชันของแถวพก system column ที่ซ่อนอยู่สองคอลัมน์ ซึ่งบันทึกช่วงชีวิตของมัน
+แต่ละเวอร์ชันของ row พก system column ที่ซ่อนอยู่สอง column ซึ่งบันทึกช่วงชีวิตของมัน
 
 - `xmin` — id ของ transaction ที่สร้างเวอร์ชันนี้
 - `xmax` — id ของ transaction ที่ลบหรือแทนที่มัน (เป็นศูนย์ในขณะที่เวอร์ชันยังมีชีวิตอยู่)
@@ -37,7 +37,7 @@ export const mvccDiagram = `flowchart TD
   S1 -->|reads| V1
   S2 -->|reads| V2`;
 
-<Mermaid code={mvccDiagram} title="หนึ่งแถว สองเวอร์ชัน สอง snapshot เห็นค่าต่างกัน" />
+<Mermaid code={mvccDiagram} title="หนึ่ง row สองเวอร์ชัน สอง snapshot เห็นค่าต่างกัน" />
 
 ในแผนภาพ transaction 205 เปลี่ยน balance จาก 500 เป็น 400 reader ที่ snapshot เกิดก่อนการ commit ยังคงเห็น 500 จากเวอร์ชัน 1 reader ที่เริ่มหลังจากนั้นเห็น 400 จากเวอร์ชัน 2 ทั้งคู่กำลังอ่านโดยไม่มี lock ในเวลาเดียวกัน และทั้งคู่ถูกต้องสำหรับจุดเวลาของตัวเอง
 
@@ -134,18 +134,37 @@ export const mvccDiagram = `flowchart TD
 (1 row)
 ```
 
-**ใน pgAdmin:** คลิกขวาที่ตารางในแผนผัง browser แล้วเลือก Maintenance เพื่อรัน `VACUUM` (หรือ `VACUUM ANALYZE`) ผ่านกล่องโต้ตอบแทนการพิมพ์เอง
+**ใน pgAdmin:** คลิกขวาที่ table ในแผนผัง browser แล้วเลือก Maintenance เพื่อรัน `VACUUM` (หรือ `VACUUM ANALYZE`) ผ่านกล่องโต้ตอบแทนการพิมพ์เอง
 
 ## Tips / gotchas
 
-- การอ่านธรรมดาไม่จับ row lock ภายใต้ MVCC ถ้าคุณต้องการให้การอ่านจองแถวไว้สำหรับการเขียนที่กำลังจะมา นั่นคือหน้าที่ของ `SELECT ... FOR UPDATE` ในบทเรียน locking
-- transaction ที่รันนานคือศัตรูของการ vacuuming ในขณะที่ transaction ยังเปิดค้าง snapshot ของมันอาจยังต้องการเวอร์ชันเก่า dead tuple จึงถูกลบไม่ได้และตารางจะบวม
-- `VACUUM` ทวงคืนพื้นที่เพื่อใช้ซ้ำภายในตาราง ปกติแล้วมันไม่ลดขนาดไฟล์บนดิสก์ ส่วน `VACUUM FULL` ที่หนักกว่านั้นทำได้ แต่มัน lock ตารางในขณะที่ทำงาน
-- การ update แถวเดิมซ้ำ ๆ บ่อย ๆ สร้างหลายเวอร์ชัน จับตา `n_dead_tup` ใน `pg_stat_user_tables` แล้วปล่อยให้ autovacuum ตามทัน หรือปรับจูนมันสำหรับตารางที่ร้อน
+- การอ่านธรรมดาไม่จับ row lock ภายใต้ MVCC ถ้าคุณต้องการให้การอ่านจอง row ไว้สำหรับการเขียนที่กำลังจะมา นั่นคือหน้าที่ของ `SELECT ... FOR UPDATE` ในบทเรียน locking
+- transaction ที่รันนานคือศัตรูของการ vacuuming ในขณะที่ transaction ยังเปิดค้าง snapshot ของมันอาจยังต้องการเวอร์ชันเก่า dead tuple จึงถูกลบไม่ได้และ table จะบวม
+- `VACUUM` ทวงคืนพื้นที่เพื่อใช้ซ้ำภายใน table ปกติแล้วมันไม่ลดขนาดไฟล์บนดิสก์ ส่วน `VACUUM FULL` ที่หนักกว่านั้นทำได้ แต่มัน lock table ในขณะที่ทำงาน
+- การ update row เดิมซ้ำ ๆ บ่อย ๆ สร้างหลายเวอร์ชัน จับตา `n_dead_tup` ใน `pg_stat_user_tables` แล้วปล่อยให้ autovacuum ตามทัน หรือปรับจูนมันสำหรับ table ที่ร้อน
 
 <Callout title="ทำไม SELECT ของคุณจึงไม่เคยรอ">
 เหตุที่ analytics query ที่ช้าและการ update ที่หลั่งไหลสามารถรันด้วยกันได้อย่างมีความสุขก็คือ MVCC reader เห็น snapshot ที่ถูกตรึงไว้ ส่วน writer ต่อท้ายเวอร์ชันใหม่ไว้ข้างเวอร์ชันเก่า ไม่มีใคร block ใคร ราคาที่ต้องจ่ายคือ dead tuple ที่ถูกทิ้งไว้ ซึ่งเป็นเหตุผลที่ VACUUM มีอยู่นั่นเอง
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| MVCC (reader ไม่บล็อก writer, writer ไม่บล็อก reader) | concurrency สูงมาก analytics query ยาว ๆ รันพร้อมกับ write load ได้โดยไม่ต้องรอกัน | ต้องเก็บ row เวอร์ชันเก่าไว้เป็น dead tuple ใช้พื้นที่เพิ่มและต้องมี VACUUM คอยเก็บกวาด |
+| lock-based concurrency control (ฐานข้อมูลอื่นบางตัว) | ไม่มี dead tuple สะสม ไม่ต้อง vacuum | reader กับ writer บล็อกกันเอง throughput ต่ำกว่าภายใต้ workload อ่าน-เขียนผสมกัน |
+
+## Common Mistakes
+
+- **คิดว่า `UPDATE` เขียนทับ row เดิมแบบไม่มีผลข้างเคียง** — ภายใต้ MVCC `UPDATE` สร้างเวอร์ชันใหม่เสมอและทิ้งเวอร์ชันเก่าไว้เป็น dead tuple ไม่ใช่การเขียนทับ byte เดิม
+- **ไม่รู้ว่า transaction ที่รันนานหน่วง VACUUM ทั้งฐานข้อมูล** — snapshot ของ transaction ที่ยังเปิดอยู่อาจยังต้องการเวอร์ชันเก่า ทำให้ VACUUM ลบ dead tuple ไม่ได้ ไม่ใช่แค่ table ของ transaction นั้นเอง แต่กระทบทั้งระบบ
+- **ลืมว่า `SELECT` อาจกำลังอ่านจาก snapshot เก่า** — ขณะที่ transaction อื่น commit การเปลี่ยนแปลงไปแล้ว transaction ของคุณอาจยังเห็นค่าก่อนหน้า ถ้าตรรกะแอปพลิเคชันคาดหวังค่าล่าสุดเสมอ ต้องออกแบบ isolation level ให้เหมาะสม
+
+> 💡 Real World Example
+>
+> **Dashboard และ analytics แบบ real-time** — สามารถรัน query ที่ใช้เวลาหลายวินาทีบน table เดียวกับที่แอปพลิเคชันกำลังเขียนอยู่ตลอดเวลา ได้โดยไม่บล็อกการเขียน เพราะ MVCC ให้แต่ละฝ่ายทำงานจาก snapshot ของตัวเอง นี่เป็นเหตุผลหลักที่หลายทีมเลือก PostgreSQL สำหรับ workload อ่าน-เขียนผสมกัน
+>
+> **ทีม SRE ที่ tune autovacuum** — บริษัทที่มี table ขนาดใหญ่และ update ถี่ ๆ (เช่น session store หรือ counter table) มักต้องปรับจูน `autovacuum_vacuum_scale_factor` ให้ aggressive ขึ้นเพื่อป้องกัน table bloat จาก dead tuple ที่สะสมเร็วกว่าที่ autovacuum เริ่มทำงาน
 
 export const quizMvcc = [
   {
@@ -153,8 +172,8 @@ export const quizMvcc = [
     options: [
       'byte ของมันถูกเขียนทับที่เดิม',
       'เวอร์ชันใหม่ถูกเขียนและเวอร์ชันเก่าถูกทำเครื่องหมายว่าถูกแทนที่',
-      'แถวถูก lock จนกว่าจะ VACUUM ครั้งถัดไป',
-      'ตารางถูกเขียนใหม่ทั้งหมด',
+      'row ถูก lock จนกว่าจะ VACUUM ครั้งถัดไป',
+      'table ถูกเขียนใหม่ทั้งหมด',
     ],
     answer: 1,
   },
@@ -172,7 +191,7 @@ export const quizMvcc = [
     q: 'What problem do long-running transactions cause for MVCC?',
     options: [
       'พวกมันทำให้ snapshot เสียหาย',
-      'พวกมันกัน VACUUM ไม่ให้ลบเวอร์ชันเก่าของแถว ทำให้เกิดการบวม',
+      'พวกมันกัน VACUUM ไม่ให้ลบเวอร์ชันเก่าของ row ทำให้เกิดการบวม',
       'พวกมันปิด autovacuum อย่างถาวร',
       'พวกมันลด isolation level ลง',
     ],

@@ -1,6 +1,6 @@
 ---
 title: Backup และ security
-description: ปกป้องข้อมูลของคุณด้วย backup แบบ logical และ physical และ point-in-time recovery และล็อกมันด้วย role, GRANT และ REVOKE, row-level security, TLS, และ pg_hba.conf
+description: ปกป้องข้อมูลของคุณด้วย backup แบบ logical และ physical และ point-in-time recovery และ lock มันด้วย role, GRANT และ REVOKE, row-level security, TLS, และ pg_hba.conf
 sidebar:
   order: 5
 ---
@@ -13,7 +13,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 หน้าที่ด้าน operations สองอย่างสุดท้ายคือสิ่งที่คุณหวังว่าจะไม่ต้องใช้และไม่อาจมองข้ามได้ **Backup** ให้คุณสร้างใหม่ได้หลังจากดิสก์ล้มเหลว การ deploy ที่ผิดพลาด หรือ `DELETE` ที่พลาดไป **Security** ควบคุมว่าใครอาจเชื่อมต่อได้ ใครอาจเห็นอะไร และข้อมูลเดินทางผ่านเครือข่ายอย่างไร ฐานข้อมูลที่เร็วและพร้อมใช้งานสูงก็ยังเป็นภาระอยู่ดีถ้ามัน restore ไม่ได้ หรือถ้าใครก็ได้บนอินเทอร์เน็ตอ่านมันได้
 
-บทเรียนนี้ครอบคลุม backup ทั้งสองตระกูลที่ PostgreSQL มีให้ จากนั้นเดินลงไปทีละชั้นของการควบคุมการเข้าถึงจากขอบเครือข่ายไปจนถึงแถวแต่ละแถว
+บทเรียนนี้ครอบคลุม backup ทั้งสองตระกูลที่ PostgreSQL มีให้ จากนั้นเดินลงไปทีละชั้นของการควบคุมการเข้าถึงจากขอบเครือข่ายไปจนถึง row แต่ละ row
 
 ## backup สองชนิด
 
@@ -66,7 +66,7 @@ export const backupDiagram = `flowchart LR
 
 ## security เป็นชั้น ๆ
 
-การควบคุมการเข้าถึงใน PostgreSQL มองภาพได้ดีที่สุดเป็นชุดของประตูที่ request ผ่านไป: ก่อนอื่นคือเครือข่าย จากนั้น authentication แล้วก็ role privilege และสุดท้ายคือกฎระดับแถว แต่ละชั้นสามารถหยุด request ที่ชั้นก่อนหน้าปล่อยผ่านมาได้
+การควบคุมการเข้าถึงใน PostgreSQL มองภาพได้ดีที่สุดเป็นชุดของประตูที่ request ผ่านไป: ก่อนอื่นคือเครือข่าย จากนั้น authentication แล้วก็ role privilege และสุดท้ายคือกฎระดับ row แต่ละชั้นสามารถหยุด request ที่ชั้นก่อนหน้าปล่อยผ่านมาได้
 
 export const securityDiagram = `flowchart LR
   Client[Client] -->|encrypted with TLS| HBA[pg_hba.conf - who may connect]
@@ -75,7 +75,7 @@ export const securityDiagram = `flowchart LR
   Priv --> RLS[Row-level security policy]
   RLS --> Data[(Table rows)]`;
 
-<Mermaid code={securityDiagram} title="connection ผ่านประตูเครือข่าย, auth, privilege, และแถว" />
+<Mermaid code={securityDiagram} title="connection ผ่านประตูเครือข่าย, auth, privilege, และ row" />
 
 ### ประตูเครือข่าย: pg_hba.conf และ TLS
 
@@ -115,7 +115,7 @@ REVOKE DELETE ON orders FROM app;
 
 ### row-level security
 
-Privilege ควบคุมทั้งตาราง **Row-level security** (RLS) ลงลึกกว่านั้น โดยให้ policy ตัดสินว่า role อาจเห็นหรือเปลี่ยน *แถว* ใด — เป็นรากฐานของระบบ multi-tenant ที่แต่ละ tenant ต้องเห็นเฉพาะข้อมูลของตัวเองเท่านั้น
+Privilege ควบคุมทั้ง table **Row-level security** (RLS) ลงลึกกว่านั้น โดยให้ policy ตัดสินว่า role อาจเห็นหรือเปลี่ยน *row* ใด — เป็นรากฐานของระบบ multi-tenant ที่แต่ละ tenant ต้องเห็นเฉพาะข้อมูลของตัวเองเท่านั้น
 
 ```sql
 -- Turn on RLS and add a policy keyed to a session setting
@@ -125,19 +125,38 @@ CREATE POLICY tenant_isolation ON orders
   USING (tenant_id = current_setting('app.tenant_id')::bigint);
 ```
 
-ด้วย policy นี้ query บน `orders` จะคืนค่าเฉพาะแถวที่ `tenant_id` ตรงกับค่าที่แอปพลิเคชันตั้งไว้สำหรับ session ปัจจุบันอย่างเงียบ ๆ `WHERE` ที่ลืมไปหนึ่งครั้งจะไม่ทำให้ข้อมูลของ tenant อื่นรั่วไหลอีกต่อไป
+ด้วย policy นี้ query บน `orders` จะคืนค่าเฉพาะ row ที่ `tenant_id` ตรงกับค่าที่แอปพลิเคชันตั้งไว้สำหรับ session ปัจจุบันอย่างเงียบ ๆ `WHERE` ที่ลืมไปหนึ่งครั้งจะไม่ทำให้ข้อมูลของ tenant อื่นรั่วไหลอีกต่อไป
 
-## เคล็ดลับ / ข้อควรระวัง
+## Tips / gotchas
 
-- Backup จะเป็นของจริงก็ต่อเมื่อคุณ restore มันสำเร็จแล้วเท่านั้น จัดตารางทดสอบ restore เป็นประจำลงในฐานข้อมูลแบบใช้แล้วทิ้ง และยืนยันว่าข้อมูลยังครบถ้วน
+- Backup จะเป็นของจริงก็ต่อเมื่อคุณ restore มันสำเร็จแล้วเท่านั้น จัด table ทดสอบ restore เป็นประจำลงในฐานข้อมูลแบบใช้แล้วทิ้ง และยืนยันว่าข้อมูลยังครบถ้วน
 - Logical dump พกพาได้และเยี่ยมสำหรับฐานข้อมูลเดี่ยว; physical base backup บวกกับ WAL archiving คือสิ่งที่คุณต้องการสำหรับ cluster ขนาดใหญ่และ point-in-time recovery
-- ใช้ least privilege ในทุกที่ application role ไม่ควรเป็นเจ้าของ schema หรือสามารถ drop ตารางได้ และ reporting ควรเป็นแบบอ่านอย่างเดียว
+- ใช้ least privilege ในทุกที่ application role ไม่ควรเป็นเจ้าของ schema หรือสามารถ drop table ได้ และ reporting ควรเป็นแบบอ่านอย่างเดียว
 - อย่าใช้ authentication แบบ `trust` บน address ใดก็ตามที่เข้าถึงได้จากภายนอกเครื่อง — มันให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password
 - กำหนดให้ใช้ TLS สำหรับ connection ที่ข้ามเครือข่ายด้วย `hostssl` และจำไว้ว่ากฎ `pg_hba.conf` ถูก match จากบนลงล่าง การ match แรกชนะ
 
 <Callout title="Defence in depth">
-ไม่มีการควบคุมเดียวที่เพียงพอ ประตูเครือข่ายกันคนแปลกหน้าออกไป authentication พิสูจน์ตัวตน role privilege จำกัดการกระทำ และ row-level security จำกัดการมองเห็น Backup อยู่ใต้ทั้งหมดนั้นในฐานะตาข่ายความปลอดภัยสุดท้าย ดำเนินการเสมือนว่าแต่ละชั้นจะล้มเหลวเป็นครั้งคราว และทำให้แน่ใจว่าชั้นถัดไปยังคงปกป้องคุณอยู่
+ไม่มีการควบคุมเดียวที่เพียงพอ ประตูเครือข่ายกันคนแปลกหน้าออกไป authentication พิสูจน์ตัวตน role privilege จำกัดการกระทำ และ row-level security จำกัดการมองเห็น Backup อยู่ใต้ทั้งหมดนั้นในฐานะตาข่ายความปลอดภัยสุดท้าย ออกแบบโดยคิดไว้ก่อนว่าแต่ละชั้นจะล้มเหลวได้ และทำให้แน่ใจว่าชั้นถัดไปยังคงปกป้องคุณอยู่
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Automated backup ที่ทดสอบ restore เป็นประจำ | กู้คืนได้จริงเมื่อเกิดภัยพิบัติจริง | เสียพื้นที่ storage และต้องมีวินัยด้าน operations |
+| พึ่งพา replication อย่างเดียวเพื่อความทนทานของข้อมูล | failover เร็ว พร้อมใช้งานสูง | replica ไม่ใช่ backup มันคัดลอกทั้งความผิดพลาดและการลบข้อมูลตามไปด้วย |
+
+## Common Mistakes
+
+- **ตั้งค่า backup ครั้งเดียวแล้วไม่เคยทดสอบ restore** — ไม่มีใครรู้ว่า backup พังจนกว่าจะต้องใช้จริง จัดตาราง restore drill เป็นประจำ
+- **ถือว่า replica เป็น backup** — replica เป็นสำเนาที่ตามทัน primary แบบเรียลไทม์ ไม่ใช่สำเนาที่ point-in-time recoverable แยกต่างหาก ต้องมี backup จริงควบคู่ไปด้วยเสมอ
+- **ให้ role ของแอปพลิเคชันมีสิทธิ์กว้างเกินจำเป็น (เช่นใช้ superuser role กับแอป)** — ยึดหลัก least privilege ให้แต่ละ role ได้เฉพาะสิทธิ์ที่ต้องใช้จริงเท่านั้น
+
+> 💡 Real World Example
+>
+> **Instagram** — ในช่วง scale ขึ้นไปรองรับผู้ใช้หลายร้อยล้านคน มีการซ้อม sharding และ backup อย่างสม่ำเสมอเป็นส่วนหนึ่งของ infrastructure practice
+>
+> **มาตรฐานทั่วไปในทีม PostgreSQL ระดับโปรดักชัน** — การทดสอบ restore แบบอัตโนมัติเป็นประจำถือเป็น practice มาตรฐาน ไม่ใช่แค่การสร้าง backup อย่างเดียว
 
 export const quizBackupSecurity = [
   {
@@ -146,7 +165,7 @@ export const quizBackupSecurity = [
       'การรัน pg_dump ครั้งเดียวต่อสัปดาห์',
       'physical base backup ผสมกับ WAL ที่ archive อย่างต่อเนื่อง',
       'การคัดลอกไฟล์ข้อมูลขณะที่เซิร์ฟเวอร์กำลังรันอยู่ โดยไม่มี WAL',
-      'การ export แต่ละตารางไปยัง spreadsheet',
+      'การ export แต่ละ table ไปยัง spreadsheet',
     ],
     answer: 1,
   },
@@ -154,7 +173,7 @@ export const quizBackupSecurity = [
     q: 'row-level security ให้คุณควบคุมอะไรที่ GRANT และ REVOKE ทำไม่ได้?',
     options: [
       'network address ใดอาจเชื่อมต่อได้',
-      'แถวแต่ละแถวใดที่ role อาจเห็นหรือแก้ไขได้',
+      'row แต่ละ row ใดที่ role อาจเห็นหรือแก้ไขได้',
       'query รันเร็วแค่ไหน',
       'connection ถูกเข้ารหัสหรือไม่',
     ],

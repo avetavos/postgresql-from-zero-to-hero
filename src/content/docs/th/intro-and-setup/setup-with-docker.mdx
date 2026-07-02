@@ -106,7 +106,7 @@ docker exec -it pg psql -U postgres
 
 ไม่ว่าทางใดก็ตามคุณจะมาถึง prompt `postgres=#` พร้อมที่จะรัน SQL เมื่อคุณเสร็จงานสำหรับวันนี้ `docker compose down` จะหยุดทุกอย่าง เนื่องจากข้อมูลอยู่ใน volume `pgdata` มันจึงยังคงอยู่ตรงนั้นในครั้งถัดไปที่คุณนำ stack กลับขึ้นมา
 
-## เคล็ดลับ / จุดที่ต้องระวัง
+## Tips / gotchas
 
 - named volume คือสิ่งที่ทำให้ข้อมูลของคุณคงอยู่ ลบ container แล้วข้อมูลยังอยู่ ลบ volume แล้วข้อมูลหายไปตลอดกาล
 - `5432` คือ port เริ่มต้นของ PostgreSQL และ `postgres` คือ superuser เริ่มต้น เครื่องมือต่าง ๆ สันนิษฐานเช่นนี้เว้นแต่จะถูกบอกเป็นอย่างอื่น
@@ -117,6 +117,27 @@ docker exec -it pg psql -U postgres
 <Callout title="ฐานข้อมูลที่ทิ้งได้ ข้อมูลที่คงทน">
 container ถูกออกแบบมาให้โยนทิ้งและสร้างใหม่ได้อย่างอิสระ แต่ข้อมูลของคุณไม่ควรเป็นเช่นนั้น การเก็บข้อมูลไว้ใน named volume มอบสิ่งที่ดีที่สุดของทั้งสองอย่างให้คุณ: คุณทำลายและสร้าง container ใหม่ได้บ่อยเท่าที่คุณต้องการในขณะที่ row ต่าง ๆ ยังคงอยู่บน disk อย่างปลอดภัย
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| รันด้วย Docker | เร็ว, disposable, ตั้งค่าเหมือนกันทุกเครื่อง | มี container overhead และต่างจากการ tune บน production จริงเล็กน้อย |
+| ติดตั้ง PostgreSQL แบบ native | ใกล้เคียงสภาพแวดล้อม production มากกว่า ไม่มี layer เพิ่ม | ติดตั้ง/ถอนยุ่งยากกว่า และต่างกันไปตามแต่ละ OS |
+| ใช้ image default ตรง ๆ | เริ่มงานได้ทันที ไม่ต้องเขียนอะไรเพิ่ม | ไม่ได้ tune เรื่อง memory หรือ config เฉพาะงาน |
+| เขียน Dockerfile กำหนดเอง | ปรับ config, extension ได้ตามต้องการ | ดูแลและอัปเดต image เองเพิ่มขึ้น |
+
+## Common Mistakes
+
+- **ไม่ mount named volume แล้วข้อมูลหายตอน `docker compose down -v`** — ถ้าไม่ผูก volume ไว้กับ data directory ข้อมูลทั้งหมดจะหายไปพร้อม container ตรวจสอบว่า `volumes:` ผูกไว้ถูกต้องเสมอ
+- **รันเป็น superuser เริ่มต้นแม้ตอน dev ในเครื่อง** — การใช้ user `postgres` ตลอดจะซ่อน bug เรื่อง permission ที่จะเจอจริงตอนขึ้น production ควรสร้าง role จำกัดสิทธิ์ไว้ทดสอบตั้งแต่ local
+- **ไว้ใจ config แบบ `POSTGRES_HOST_AUTH_METHOD=trust` แล้วลืมว่ามันไม่ปลอดภัย** — ค่านี้สะดวกตอน dev แต่ห้ามนำไปใช้นอกเครื่อง local เด็ดขาด เพราะมันอนุญาตให้เชื่อมต่อได้โดยไม่ต้องใช้รหัสผ่าน
+
+> 💡 Real World Example
+>
+> **docker-library/postgres** — official image เป็นจุดเริ่มต้นมาตรฐานที่คอร์สและ tutorial ส่วนใหญ่ใช้ เพราะให้ฐานข้อมูลที่ใช้งานได้จริงในไม่กี่วินาทีโดยไม่ต้องติดตั้งอะไรบนเครื่อง
+>
+> **ทีม backend ทั่วไป** — มาตรฐานใช้ `docker-compose.yml` เป็นทางเข้าโปรเจกต์ เพื่อลดปัญหา "works on my machine" ตอน onboard คนใหม่เข้าทีม
 
 export const quizDocker = [
   {

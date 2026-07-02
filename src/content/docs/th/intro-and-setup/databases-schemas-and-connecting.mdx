@@ -149,9 +149,13 @@ table มีชื่อเต็มแบบ **qualified name** ในรูป
 
 ## Role เทียบกับ database
 
-มันง่ายที่จะสับสนระหว่างแนวคิดบัญชีหลักสองอย่าง **database** คือภาชนะสำหรับข้อมูลของคุณ ส่วน **role** คือบัญชีที่เชื่อมต่อและได้รับสิทธิ์ในการกระทำต่อข้อมูลนั้น — role เป็นทั้ง user และ group ใน PostgreSQL พวกมันเป็นอิสระต่อกัน: role เดียวสามารถเป็นเจ้าของและเชื่อมต่อกับ database หลายอันได้ และ database หนึ่งสามารถถูกใช้โดยหลาย role ได้ คุณล็อกอินเป็น role `postgres` ซึ่งเป็น superuser ตลอดโมดูลนี้ ระบบจริงสร้าง role ที่จำกัดสิทธิ์ต่อแอปพลิเคชัน ซึ่งโมดูล operations จะครอบคลุม
+มันง่ายที่จะสับสนระหว่างแนวคิดบัญชีหลักสองอย่าง **database** คือภาชนะสำหรับข้อมูลของคุณ ส่วน **role** คือบัญชีที่เชื่อมต่อและได้รับสิทธิ์ในการกระทำต่อข้อมูลนั้น role เป็นทั้ง user และ group ใน PostgreSQL
 
-## เคล็ดลับ / จุดที่ต้องระวัง
+ทั้งสองแนวคิดเป็นอิสระต่อกัน: role เดียวสามารถเป็นเจ้าของและเชื่อมต่อกับ database หลายอันได้ และ database หนึ่งก็สามารถถูกใช้โดยหลาย role ได้เช่นกัน
+
+ตลอดโมดูลนี้คุณล็อกอินเป็น role `postgres` ซึ่งเป็น superuser ระบบจริงจะสร้าง role ที่จำกัดสิทธิ์ต่อแอปพลิเคชันแทน ซึ่งโมดูล operations จะครอบคลุมเรื่องนั้น
+
+## Tips / gotchas
 
 - การเชื่อมต่อมุ่งเป้าไปที่ database เพียงหนึ่งเดียวเสมอ หากต้องการสลับ คุณเชื่อมต่อใหม่
 - database ใหม่มาพร้อม schema `public` ดังนั้น table ที่คุณสร้างโดยไม่ตั้งชื่อ schema จะไปลงที่ `public`
@@ -162,6 +166,27 @@ table มีชื่อเต็มแบบ **qualified name** ในรูป
 <Callout title="cluster, database, schema, table">
 ลองนึกภาพสี่ชั้นเป็นกล่องที่ซ้อนกัน: server บรรจุ database, database บรรจุ schema, schema บรรจุ table การรู้ว่าคุณอยู่ในกล่องใดตอบคำถาม "table ของฉันอยู่ที่ไหน?" ได้เกือบทั้งหมด และการเขียนชื่อแบบ qualified `schema.table` ช่วยให้คุณรอดพ้นจากเซอร์ไพรส์ของ search_path
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| หนึ่ง database ต่อหนึ่งแอป | แยกตัวชัดเจน, mental model ง่าย | connection pool แยกกัน ใช้ resource มากขึ้น |
+| หลาย schema ในหนึ่ง database | ใช้ connection pool ร่วมกัน, join ข้าม schema ได้ | ต้องคุม naming และ permission ให้ไม่ชนกันเอง |
+| ชื่อแบบ qualified (`schema.table`) | ไม่กำกวม อ่านแล้วรู้ทันทีว่า table อยู่ที่ไหน | เขียนยาวกว่า |
+| พึ่ง `search_path` | เขียนสั้น กระชับ | เปราะบาง เพราะผลลัพธ์เปลี่ยนตาม session |
+
+## Common Mistakes
+
+- **พึ่ง `search_path` default ใน database ที่ใช้ร่วมกัน** — ถ้ามีหลาย schema ชื่อ table ซ้ำกัน การเขียนชื่อ unqualified อาจ resolve ไปผิด schema โดยไม่มี error แจ้งเตือน
+- **เชื่อมต่อด้วย role `postgres` (superuser) ในสภาพแวดล้อมจริง** — ควรสร้าง role ที่จำกัดสิทธิ์เฉพาะแอปพลิเคชัน เพื่อลดความเสียหายถ้า credential รั่วไหล
+- **ลืมว่า `CREATE DATABASE` รันใน transaction block ไม่ได้** — ถ้ารันผ่าน migration tool หรือ script ที่ wrap ทุกอย่างด้วย transaction จะเจอ error ทันที ต้องแยก statement นี้ออกมา commit เดี่ยว ๆ
+
+> 💡 Real World Example
+>
+> **แพลตฟอร์ม SaaS แบบ multi-tenant** — หลายระบบ (เช่นหลาย setup ของ Rails บน Postgres) เลือกใช้ schema-per-tenant ภายใน database เดียว เพื่อให้ได้ความเป็นส่วนตัวของข้อมูลระดับหนึ่งโดยไม่ต้องดูแล database แยกเป็นร้อยเป็นพันตัว
+>
+> **ทีมที่แยก database ต่อแอป** — บริษัทจำนวนมากยึดหลักหนึ่ง database ต่อหนึ่ง service เพื่อให้การ scale, backup และ access control ของแต่ละทีมเป็นอิสระต่อกันอย่างสมบูรณ์
 
 export const quizDatabasesSchemas = [
   {

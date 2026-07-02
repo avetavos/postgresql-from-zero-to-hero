@@ -119,7 +119,7 @@ export const upsertDiagram = `flowchart TD
 
 รันคำสั่งเดียวกันด้วย title ใหม่เอี่ยม แล้วจะไม่มี conflict ดังนั้นมันจึง insert ตามปกติและคืน id ที่ถูกสร้างขึ้นใหม่สด ๆ
 
-**ใน pgAdmin:** รันคำสั่งสองครั้งใน Query Tool — การรันครั้งแรก insert ครั้งที่สองชน conflict และ update ตาราง Data Output แสดง row ที่ถูกคืนกลับมาในแต่ละครั้ง
+**ใน pgAdmin:** รันคำสั่งสองครั้งใน Query Tool — การรันครั้งแรก insert ครั้งที่สองชน conflict และ update table Data Output แสดง row ที่ถูกคืนกลับมาในแต่ละครั้ง
 
 ## DO NOTHING
 
@@ -187,6 +187,27 @@ export const upsertDiagram = `flowchart TD
 <Callout title="คำสั่ง atomic เดียว">
 ชัยชนะที่แท้จริงของ `ON CONFLICT` คือความเป็น atomic การตรวจสอบแล้วค่อย insert ในโค้ดแอปพลิเคชันอาจแพ้ race ระหว่างคำขอสองอันได้ แต่คำสั่ง upsert เดียวจะ insert หรือ update เพียงครั้งเดียวพอดี โดยมี unique constraint บังคับความถูกต้องให้คุณ
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| `INSERT ... ON CONFLICT` | atomic, การเดินทางไป-กลับครั้งเดียว, ไม่มี race condition | ต้องมี unique constraint หรือ unique index ให้ conflict อ้างอิงได้ |
+| ตรวจสอบก่อนแล้วค่อย insert ในโค้ดแอป (check-then-insert) | อ่านง่าย เข้าใจ logic ได้ตรงไปตรงมา | เป็น race condition แบบคลาสสิกเมื่อมีหลาย request พร้อมกัน |
+| `DO UPDATE` เมื่อชน conflict | ข้อมูลถูก sync ให้เป็นค่าล่าสุดเสมอ | overwrite ค่าที่มีอยู่แล้วโดยไม่ตั้งใจได้ถ้าไม่ระวัง |
+| `DO NOTHING` เมื่อชน conflict | ปลอดภัย ไม่เผลอเขียนทับข้อมูลเดิม | ข้อมูลซ้ำจะถูกละเว้นอย่างเงียบ ๆ แม้บางครั้งควรจะ update จริง |
+
+## Common Mistakes
+
+- **ใช้ `SELECT` ตรวจสอบว่า row มีอยู่ก่อน แล้วค่อย `INSERT` ในโค้ดแอปพลิเคชัน** — race กันได้เมื่อมีหลาย request พร้อมกันเห็น "ไม่มี row" ทั้งคู่ ให้ใช้ `ON CONFLICT` แทนเพื่อความ atomic
+- **ลืมว่า `ON CONFLICT` ต้องมี unique/exclusion constraint ให้เล็ง** — ถ้า column ที่ระบุใน `ON CONFLICT (...)` ไม่ใช่ unique PostgreSQL จะขึ้น error ทันที
+- **ใช้ `DO NOTHING` ทั้งที่ต้องการให้ row ถูก update** — ทำให้ข้อมูลเก่าค้างอยู่โดยไม่รู้ตัว ต้องเลือกระหว่าง `DO UPDATE` กับ `DO NOTHING` ให้ตรงกับ intent จริง
+
+> 💡 Real World Example
+>
+> **ระบบ checkout ของ e-commerce** — ใช้ `ON CONFLICT` เพื่อสร้าง order แบบ idempotent เมื่อ client retry request ที่ล้มเหลว (เช่น network timeout) โดยไม่สร้าง order ซ้ำซ้อน
+>
+> **ระบบจัดการ inventory / stock** — ใช้ upsert primitive แบบเดียวกันเพื่อรับ event อัปเดตจำนวนสินค้าที่อาจถูกส่งซ้ำจาก message queue โดยไม่ทำให้ตัวเลข stock ผิดเพี้ยนจาก race condition
 
 export const quizUpsert = [
   {

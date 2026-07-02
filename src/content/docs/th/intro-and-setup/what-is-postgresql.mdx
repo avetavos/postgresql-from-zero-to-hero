@@ -14,7 +14,7 @@ PostgreSQL คือ relational database: มันเก็บข้อมู�
 
 ## relational model
 
-ใน relational model ข้อมูลอยู่ใน table โดย **table** คือตารางที่มีชื่อ แต่ละ **column** มีชื่อและ type ที่ตายตัว และแต่ละ **row** คือหนึ่ง record ที่มีค่าสำหรับทุก column table ของลูกค้าอาจมี column สำหรับ id, ชื่อ และอีเมล โดยแต่ละ row คือลูกค้าหนึ่งราย
+ใน relational model ข้อมูลอยู่ใน table โดย **table** คือ table ที่มีชื่อ แต่ละ **column** มีชื่อและ type ที่ตายตัว และแต่ละ **row** คือหนึ่ง record ที่มีค่าสำหรับทุก column table ของลูกค้าอาจมี column สำหรับ id, ชื่อ และอีเมล โดยแต่ละ row คือลูกค้าหนึ่งราย
 
 พลังนั้นมาจาก **ความสัมพันธ์ (relationship)** row ใน table หนึ่งสามารถชี้ไปยัง row ใน table อีกอันได้โดยการเก็บ key ของมัน table `orders` เก็บ `customer_id` ของลูกค้าที่สั่งซื้อในแต่ละ order ซึ่งเชื่อมโยง table ทั้งสองเข้าด้วยกัน แผนภาพด้านล่างแสดง table สอง table ที่สัมพันธ์กันในลักษณะนี้
 
@@ -69,7 +69,7 @@ PostgreSQL เป็นตัวเลือกเริ่มต้นที่
 
 มันเหมาะน้อยลงเมื่อคุณต้องการ in-memory cache ล้วน ๆ สำหรับข้อมูลชั่วคราว หรือ engine เฉพาะทางสำหรับ workload สุดขั้วเพียงอย่างเดียว เช่น time-series ที่อัตราการรับเข้าข้อมูลมหาศาล — แม้แต่ในกรณีนั้น extension มักจะช่วยปิดช่องว่างได้ สำหรับโปรเจกต์ส่วนใหญ่อย่างท่วมท้น การหยิบ PostgreSQL ขึ้นมาก่อนเป็นตัวเลือกที่ปลอดภัยและยืนยง
 
-## เคล็ดลับ / จุดที่ต้องระวัง
+## Tips / gotchas
 
 - คิดในรูปของ table และความสัมพันธ์ตั้งแต่แรก การออกแบบข้อมูลให้ดีตั้งแต่เนิ่น ๆ ช่วยลดความเจ็บปวดในภายหลัง
 - primary key ระบุ row ได้แบบไม่ซ้ำ ส่วน foreign key ใน table อีกอันชี้กลับมาที่มัน
@@ -80,6 +80,27 @@ PostgreSQL เป็นตัวเลือกเริ่มต้นที่
 <Callout title="relational ก่อน ยืดหยุ่นเสมอ">
 relational model มอบความถูกต้องและโครงสร้างที่ชัดเจนให้คุณ ACID มอบความไว้วางใจ ส่วน extensibility มอบพื้นที่ให้เติบโต PostgreSQL เป็นเครื่องมือที่หาได้ยากที่มอบทั้งสามอย่างพร้อมกัน ซึ่งเป็นเหตุผลว่าทำไมส่วนใหญ่ของคอร์สนี้จึงเป็นเพียงการเรียนรู้ที่จะใช้ฐานข้อมูลหนึ่งให้ดีจริง ๆ
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Self-hosted PostgreSQL | ควบคุม config, extension และ version ได้เต็มที่ | ต้องดูแล backup, patching และ tuning เอง |
+| Managed service เช่น RDS หรือ Supabase | ลดภาระ ops, ได้ backup และ failover มาให้ | ค่าใช้จ่ายสูงขึ้นและถูกจำกัด extension บางตัว |
+| ใช้ extensibility ของ Postgres (JSONB, extension) | engine เดียวรองรับหลาย workload | schema และ query ซับซ้อนขึ้นถ้าใช้พร่ำเพรื่อ |
+| ฐานข้อมูลเฉพาะทางแยกต่างหาก | ประสิทธิภาพที่ดีที่สุดสำหรับงานนั้นโดยเฉพาะ | เพิ่มจำนวนระบบที่ต้องดูแลและ sync ข้อมูล |
+
+## Common Mistakes
+
+- **คิดว่า PostgreSQL "ก็เหมือน MySQL"** — ทั้งสองเป็น relational database ก็จริง แต่ MVCC, type system และพฤติกรรม transaction ต่างกันพอสมควร อย่าย้าย mental model มาตรง ๆ โดยไม่เช็คก่อน
+- **เลือก managed provider โดยไม่เช็ค version หรือ extension ที่รองรับ** — บาง provider lock version ไว้เก่ากว่าหรือไม่เปิด extension ที่คุณต้องการ (เช่น `postgis`) เช็ค compatibility ก่อนผูกมัดกับ provider
+- **ประเมินภาระงานของการ self-host ต่ำเกินไป** — backup, monitoring, patching และ scaling เป็นงานต่อเนื่อง ไม่ใช่ตั้งค่าครั้งเดียวจบ
+
+> 💡 Real World Example
+>
+> **Instagram** — สเกล PostgreSQL แบบ vanilla ให้รองรับผู้ใช้หลายร้อยล้านคนได้ด้วยเทคนิค sharding ที่ layer แอปพลิเคชัน แสดงให้เห็นว่า Postgres ธรรมดาไปได้ไกลแค่ไหนเมื่อออกแบบ schema และ scaling strategy ดี
+>
+> **Supabase** — สร้าง developer platform ทั้งชุดขึ้นบน PostgreSQL โดยใช้ extensibility ของมัน (realtime, auth, storage) เป็นแกนหลัก แทนที่จะสร้างฐานข้อมูลของตัวเองใหม่
 
 export const quizWhatIs = [
   {

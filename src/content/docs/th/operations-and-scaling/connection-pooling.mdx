@@ -130,7 +130,7 @@ default_pool_size = 20
 
 **ใน pgAdmin:** ลงทะเบียนเซิร์ฟเวอร์ connection ใหม่ที่ host และ port ชี้ไปที่ PgBouncer (port `6432`) pgAdmin จะปฏิบัติต่อมันเหมือนเซิร์ฟเวอร์ PostgreSQL ตัวใดก็ได้ ซึ่งเป็นวิธีที่สะดวกในการยืนยันว่า pooler เข้าถึงได้
 
-## เคล็ดลับ / ข้อควรระวัง
+## Tips / gotchas
 
 - Transaction mode เป็นคำแนะนำตามปกติ เพราะมันให้การนำ connection กลับมาใช้ซ้ำได้ดีที่สุดสำหรับ request เว็บสั้น ๆ คว้า session mode มาใช้ก็ต่อเมื่อคุณต้องการความต่อเนื่องของ session จริง ๆ เท่านั้น
 - ใน transaction mode ให้หลีกเลี่ยงฟีเจอร์ที่กินข้าม transaction บน connection เดียว — server-side prepared statement, `SET` ระดับ session, advisory lock, และ `LISTEN`/`NOTIFY` อาจทำงานผิดปกติได้ driver จำนวนมากมีการตั้งค่าให้ปิด server-side prepared statement ด้วยเหตุผลนี้
@@ -140,6 +140,25 @@ default_pool_size = 20
 <Callout title="ความว่างคือศัตรู">
 แก่นของ pooling คือ connection ของแอปพลิเคชันส่วนใหญ่นั่งว่างอยู่เป็นส่วนใหญ่ของเวลา แต่ PostgreSQL connection ที่ว่างแต่ละตัวก็ยังเสียต้นทุนเป็น process pooler ให้ช่วงเวลาที่ว่างเหล่านั้นถูกแชร์ร่วมกัน คุณไม่ได้เพิ่มความจุให้ฐานข้อมูล — คุณกำลังหยุด client ไม่ให้กักตุนมันไว้ในขณะที่ไม่มีอะไรทำ
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Transaction-mode pooling (PgBouncer) | รองรับ client จำนวนมากต่อ PostgreSQL connection จริงหนึ่งตัว ราคาถูกและ scale ได้ | ฟีเจอร์ระดับ session เช่น prepared statement, `SET`, advisory lock ใช้งานไม่ได้อย่างปลอดภัย |
+| Session-mode pooling / ไม่มี pooler เลย | รองรับฟีเจอร์ระดับ session ได้เต็มรูปแบบ เชื่อมต่อตรงไปตรงมา | PostgreSQL connection แพงและมีจำกัด, scale จำนวน client ได้น้อยกว่ามาก |
+
+## Common Mistakes
+
+- **มองข้าม connection pooling จนกว่าจะเจอ error `too many connections` ในโปรดักชัน** — ตั้ง pooler ไว้ตั้งแต่ต้น อย่ารอให้ปัญหาเกิดก่อนแล้วค่อยแก้
+- **ใช้ transaction-mode pooling ทั้งที่โค้ดพึ่งพาฟีเจอร์ระดับ session อย่าง `SET` หรือ advisory lock** — ฟีเจอร์เหล่านี้จะพังแบบเงียบ ๆ เพราะ transaction ถัดไปอาจไปตกบนเซิร์ฟเวอร์ connection คนละตัว ตรวจสอบโค้ดก่อนเปลี่ยนโหมด
+- **กำหนดขนาด pool ให้ใหญ่กว่า `max_connections` ที่ฐานข้อมูลรองรับได้จริงมาก** — pool ที่ใหญ่เกินไปแค่ย้ายปัญหาไปกองไว้ที่ฐานข้อมูล ให้กำหนดขนาดตามความจุจริงของเซิร์ฟเวอร์
+
+> 💡 Real World Example
+>
+> **Supabase** — ให้ pooler (PgBouncer แบบ managed) เป็นค่าเริ่มต้นหน้า PostgreSQL instance ของทุกโปรเจกต์ เพราะแอปพลิเคชัน serverless เปิด connection พร้อมกันได้มากกว่าที่ฐานข้อมูลรองรับโดยตรง
+>
+> **Amazon RDS Proxy** — วางตัวเป็น pooler ระดับ managed service สำหรับ RDS PostgreSQL เพื่อให้ Lambda function หรือแอปที่ scale เร็วไม่ทำให้ connection ของฐานข้อมูลพุ่งจนล้น
 
 export const quizPooling = [
   {

@@ -11,16 +11,16 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-เมื่อ transaction หลายตัวทำงานพร้อมกัน พวกมันอาจรบกวนกันในแบบที่ให้ผลลัพธ์น่าประหลาดใจ **isolation level** คือลูกบิดที่ควบคุมว่าหนึ่ง transaction จะถูกปกป้องจากงานที่กำลังดำเนินอยู่ของตัวอื่นมากแค่ไหน หมุนลูกบิดขึ้นจะป้องกัน anomaly ได้มากขึ้น แต่ทำให้ conflict มีโอกาส fail และต้อง retry มากขึ้น
+ปัญหาที่เจอจริง: ระบบที่มี transaction ทำงานพร้อมกันหลายตัวมักเจอบั๊กที่เกิดเป็นครั้งคราวและสืบสวนยาก เพราะผลลัพธ์ขึ้นอยู่กับจังหวะเวลา เมื่อ transaction หลายตัวทำงานพร้อมกัน พวกมันอาจรบกวนกันในแบบที่ให้ผลลัพธ์น่าประหลาดใจ **isolation level** คือลูกบิดที่ควบคุมว่าหนึ่ง transaction จะถูกปกป้องจากงานที่กำลังดำเนินอยู่ของตัวอื่นมากแค่ไหน หมุนลูกบิดขึ้นจะป้องกัน anomaly ได้มากขึ้น แต่ทำให้ conflict มีโอกาส fail และต้อง retry มากขึ้น
 
 ## anomaly ต่าง ๆ
 
 มาตรฐาน SQL ตั้งชื่อชุดของปรากฏการณ์ที่ isolation ระดับอ่อนกว่ายอมให้เกิดได้ ระดับต่าง ๆ ของ PostgreSQL ถูกนิยามด้วยว่ามันห้ามปรากฏการณ์ใดบ้าง
 
-- **dirty read** — การอ่านแถวที่ transaction อื่นเปลี่ยนแปลงแต่ยังไม่ได้ commit PostgreSQL ไม่เคยยอมให้เกิดสิ่งนี้ในระดับใด ๆ
-- **non-repeatable read** — การอ่านแถวเดียวกันสองครั้งใน transaction เดียวแล้วได้ค่าที่ committed แตกต่างกัน เพราะ transaction อื่นเปลี่ยนมันในระหว่างนั้น
-- **phantom read** — การรันการค้นหาเดียวกันสองครั้งแล้วพบแถวที่ไม่มีอยู่ในครั้งแรก เพราะ transaction อื่น insert พวกมันเข้ามา
-- **write skew** — สอง transaction ต่างก็อ่านชุดของแถวที่ซ้อนทับกัน แล้วต่างก็เขียนตามสิ่งที่ตัวเองอ่าน ให้ผลลัพธ์ที่ลำดับ serial เดี่ยว ๆ ไม่อาจสร้างขึ้นได้
+- **dirty read** — การอ่าน row ที่ transaction อื่นเปลี่ยนแปลงแต่ยังไม่ได้ commit PostgreSQL ไม่เคยยอมให้เกิดสิ่งนี้ในระดับใด ๆ
+- **non-repeatable read** — การอ่าน row เดียวกันสองครั้งใน transaction เดียวแล้วได้ค่าที่ committed แตกต่างกัน เพราะ transaction อื่นเปลี่ยนมันในระหว่างนั้น
+- **phantom read** — การรันการค้นหาเดียวกันสองครั้งแล้วพบ row ที่ไม่มีอยู่ในครั้งแรก เพราะ transaction อื่น insert พวกมันเข้ามา
+- **write skew** — สอง transaction ต่างก็อ่านชุดของ row ที่ซ้อนทับกัน แล้วต่างก็เขียนตามสิ่งที่ตัวเองอ่าน ให้ผลลัพธ์ที่ลำดับ serial เดี่ยว ๆ ไม่อาจสร้างขึ้นได้
 
 ## สามระดับที่คุณเลือกได้
 
@@ -207,6 +207,25 @@ HINT:  The transaction might succeed if retried.
 <Callout title="เลือกระดับที่อ่อนที่สุดที่ยังถูกต้อง">
 isolation คือการตัดทิ้ง anomaly จำเพาะออกไป ไม่ใช่การเข้มงวดให้สุดทาง จงระบุว่า anomaly ใดจะทำให้ตรรกะของคุณพังจริง ๆ เลือกระดับต่ำสุดที่ห้ามมัน และเพิ่มลูป retry หากระดับนั้น abort ได้ ถูกต้องและประหยัด ชนะ เข้มงวดและช้า
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Serializable (เข้มงวดที่สุด) | ป้องกัน anomaly ได้ครบทุกแบบ รวมถึง write skew ผลลัพธ์เสมือนรันตามลำดับเดียว | throughput ต่ำลง เพราะมี conflict ที่ทำให้ต้อง abort และ retry บ่อยขึ้นภายใต้ contention |
+| Read Committed (ค่าเริ่มต้น) | throughput สูง แทบไม่มี abort จาก isolation conflict | ยอมให้ non-repeatable read, phantom read และ write skew เกิดขึ้นได้ |
+
+## Common Mistakes
+
+- **เลือก Serializable ทุกที่ "เพื่อความปลอดภัย" โดยไม่เตรียม retry logic** — Serializable ต้อง abort transaction ด้วย SQLSTATE `40001` เป็นเรื่องปกติ ถ้าไม่มีลูป retry แอปจะพังกลางทาง
+- **ไม่ห่อ transaction ระดับ Serializable ไว้ในลูป retry** — transaction จะ fail ทันทีที่เจอ conflict ครั้งแรกโดยไม่มีโอกาสสำเร็จเลย
+- **คิดว่าระดับที่สูงกว่า "ถูกต้องกว่า" เสมอ** — แต่ละระดับป้องกันเฉพาะ anomaly บางชนิด การเข้าใจว่า anomaly ไหนที่ระดับนั้นป้องกันสำคัญกว่าการเลือกระดับสูงสุดแบบไม่คิด
+
+> 💡 Real World Example
+>
+> **ระบบ ledger ของธนาคาร** — transaction โอนยอดเงินที่กระทบยอดคงเหลือมักรันที่ Serializable โดยเฉพาะ เพื่อป้องกัน write skew ระหว่างสองบัญชีที่อ่าน-เขียนพร้อมกัน ยอมรับ overhead ของการ retry เป็นต้นทุนของความถูกต้อง
+>
+> **ระบบ job queue สไตล์ Sidekiq** — ใช้ `SKIP LOCKED` ร่วมกับ isolation level ที่อ่อนกว่าอย่าง Read Committed เพื่อให้ worker หลายตัวคว้างานพร้อมกันได้โดยไม่บล็อกกัน แลกกับการไม่ต้องการ correctness guarantee ระดับสูงสำหรับงานประเภทนี้
 
 export const quizIso = [
   {

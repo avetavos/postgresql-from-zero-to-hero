@@ -263,7 +263,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 (2 rows)
 ```
 
-**ใน pgAdmin:** รันอันใดก็ได้เหล่านี้ใน Query Tool ผลลัพธ์จะปรากฏในตาราง Data Output ด้านล่าง ที่ซึ่งคุณยังสามารถเรียง column ได้ด้วยการคลิกที่หัวคอลัมน์
+**ใน pgAdmin:** รันอันใดก็ได้เหล่านี้ใน Query Tool ผลลัพธ์จะปรากฏใน table Data Output ด้านล่าง ที่ซึ่งคุณยังสามารถเรียง column ได้ด้วยการคลิกที่หัว column
 
 ## Tips / gotchas
 
@@ -275,6 +275,27 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 <Callout title="เรียงลำดับก่อนแบ่งหน้า">
 การแบ่งหน้า (pagination) มีความหมายก็ต่อเมื่ออยู่บนการเรียงลำดับที่คงที่ ถ้าสอง row เสมอกันบน column ที่ใช้เรียง ให้เพิ่มตัวตัดสินเสมอ (tiebreaker) เช่น `ORDER BY born DESC, id` เพื่อให้ row เดิมไม่ปรากฏบนสองหน้า
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| ระบุ column list ชัดเจน | ผลลัพธ์คงที่ (stable API), ส่งข้อมูลผ่าน wire น้อยลง, ไม่ leak column ที่อ่อนไหว | ต้องแก้ query เมื่อ column ที่ต้องการเปลี่ยน |
+| `SELECT *` | เขียนเร็ว สะดวกตอน prototype หรือสำรวจข้อมูล | พังเงียบ ๆ เมื่อมีคนเพิ่ม/ลบ/เปลี่ยนชื่อ column ทีหลัง และอาจ leak column ที่ไม่ควรออก |
+| กรองด้วย `WHERE` ใน SQL | ถูก push ไปให้ database ทำ ใช้ index ได้ ส่งเฉพาะ row ที่ต้องการผ่าน wire | ต้องเข้าใจ SQL และวางแผน index ให้ตรงกับ pattern การกรอง |
+| ดึงข้อมูลทั้งหมดมากรองใน application code | เขียน logic ฝั่งแอปได้ง่าย ไม่ต้องคิด SQL ซับซ้อน | เปลือง bandwidth, พลาดโอกาสใช้ index, ช้าลงเมื่อ table โต |
+
+## Common Mistakes
+
+- **ใช้ `SELECT *` ใน production code** — เมื่อมีคนเพิ่ม column ใหม่ทีหลัง ผลลัพธ์ที่ได้เปลี่ยนไปแบบไม่ตั้งใจ และอาจ leak column ที่อ่อนไหวออกไปด้วย ให้ระบุ column ที่ต้องการเสมอ
+- **ห่อ column ที่มี index ด้วย function ใน `WHERE`** เช่น `WHERE lower(email) = ...` — ทำให้ index ธรรมดาใช้งานไม่ได้ ต้องใช้ expression index หรือปรับ query
+- **คิดว่า `NULL` จับคู่กับ `=` ได้** — `WHERE born = NULL` ไม่คืน row ใด ๆ เลยเพราะ `NULL` เทียบด้วยตรรกะสามค่า ต้องใช้ `IS NULL` แทน
+
+> 💡 Real World Example
+>
+> **GitHub API / GitLab API** — บังคับให้ client ระบุ field ที่ต้องการอย่างชัดเจนและมี pagination เสมอ เพื่อป้องกัน `SELECT *` ที่แอบเปลี่ยน contract ของ response และรักษา query plan ให้คาดเดาได้
+>
+> **ระบบ dashboard แบบ real-time** — กรองข้อมูลด้วย `WHERE` และ index ที่วางแผนไว้ล่วงหน้าแทนการดึงทั้ง table มากรองในโค้ด เพื่อให้ query ตอบสนองไวแม้ table มีหลายสิบล้าน row
 
 export const quizSelect = [
   {

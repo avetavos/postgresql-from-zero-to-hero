@@ -1,6 +1,6 @@
 ---
 title: Partitioning
-description: แบ่งตารางเชิงตรรกะขนาดมหึมาหนึ่งตารางออกเป็น partition ทางกายภาพจำนวนมากด้วย declarative PARTITION BY RANGE, LIST, และ HASH ให้ planner ทำ prune partition และเรียนรู้ว่า partitioning ช่วยได้จริงเมื่อใด
+description: แบ่ง table เชิงตรรกะขนาดมหึมาหนึ่ง table ออกเป็น partition ทางกายภาพจำนวนมากด้วย declarative PARTITION BY RANGE, LIST, และ HASH ให้ planner ทำ prune partition และเรียนรู้ว่า partitioning ช่วยได้จริงเมื่อใด
 sidebar:
   order: 4
 ---
@@ -11,13 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ตารางบางตารางโตขึ้นไม่มีขีดจำกัด ตารางของ event, log line, หรือค่าจาก sensor สามารถถึงพันล้านแถวได้ และเมื่อขนาดเท่านั้นทุกอย่างก็ยากขึ้น: index พองตัว, งาน maintenance รันเป็นชั่วโมง, และการลบข้อมูลเก่าก็ล็อกตารางไว้นานแสนนาน **Partitioning** จัดการเรื่องนี้ด้วยการแบ่งตารางเชิงตรรกะขนาดมหึมาหนึ่งตารางออกเป็นตารางทางกายภาพที่เล็กกว่าหลายตาราง ในขณะที่ query ของคุณยังคงเห็นตารางเดียว
+table บาง table โตขึ้นไม่มีขีดจำกัด table ของ event, log line, หรือค่าจาก sensor สามารถถึงพันล้าน row ได้ และเมื่อขนาดเท่านั้นทุกอย่างก็ยากขึ้น: index พองตัว, งาน maintenance รันเป็นชั่วโมง, และการลบข้อมูลเก่าก็ lock table ไว้นานแสนนาน **Partitioning** จัดการเรื่องนี้ด้วยการแบ่ง table เชิงตรรกะขนาดมหึมาหนึ่ง table ออกเป็น table ทางกายภาพที่เล็กกว่าหลาย table ในขณะที่ query ของคุณยังคงเห็น table เดียว
 
-**Declarative partitioning** ของ PostgreSQL ให้คุณกำหนดกฎการแบ่งเพียงครั้งเดียว คุณเขียนและอ่านจากตาราง parent ตามปกติ และเซิร์ฟเวอร์จะ route แต่ละแถวไปยัง partition ที่ถูกต้องโดยทำเบื้องหลัง
+**Declarative partitioning** ของ PostgreSQL ให้คุณกำหนดกฎการแบ่งเพียงครั้งเดียว คุณเขียนและอ่านจาก table parent ตามปกติ และเซิร์ฟเวอร์จะ route แต่ละ row ไปยัง partition ที่ถูกต้องโดยทำเบื้องหลัง
 
-## ตารางเชิงตรรกะหนึ่ง partition จำนวนมาก
+## table เชิงตรรกะหนึ่ง partition จำนวนมาก
 
-คุณประกาศตาราง parent ให้เป็นแบบ partitioned แล้วให้ **partition key** แก่มัน — column ที่ค่าของมันตัดสินว่าแถวหนึ่งเป็นของ partition ใด parent เองไม่ถือข้อมูลใด ๆ มันเป็นชั้น routing ที่อยู่เหนือ child partition ของมัน
+คุณประกาศ table parent ให้เป็นแบบ partitioned แล้วให้ **partition key** แก่มัน — column ที่ค่าของมันตัดสินว่า row หนึ่งเป็นของ partition ใด parent เองไม่ถือข้อมูลใด ๆ มันเป็นชั้น routing ที่อยู่เหนือ child partition ของมัน
 
 export const partDiagram = `flowchart TD
   Parent[events - logical parent table] --> P1[events_2024_q1]
@@ -25,17 +25,17 @@ export const partDiagram = `flowchart TD
   Parent --> P3[events_2024_q3]
   Parent --> P4[events_2024_q4]`;
 
-<Mermaid code={partDiagram} title="ตารางเชิงตรรกะหนึ่งที่ถูก route ข้ามหลาย partition" />
+<Mermaid code={partDiagram} title="table เชิงตรรกะหนึ่งที่ถูก route ข้ามหลาย partition" />
 
 มีกลยุทธ์ partitioning สามแบบ เลือกตามวิธีที่ key แมปไปยัง partition
 
-| กลยุทธ์   | แถวถูกกำหนดโดย...                                  | เหมาะสำหรับ                                |
+| กลยุทธ์   | row ถูกกำหนดโดย...                                  | เหมาะสำหรับ                                |
 |----------|--------------------------------------------------|-------------------------------------------|
 | RANGE    | ค่าที่ตกอยู่ในช่วงหนึ่ง เช่นช่วงวันที่             | ข้อมูล time-series ที่ partition ตามเดือน  |
 | LIST     | key ที่ตรงกับค่าหนึ่งในชุดค่าที่กำหนดตายตัว        | การแบ่งตาม region, status, หรือ tenant     |
 | HASH     | hash ของ key ที่กระจายอย่างสม่ำเสมอข้าม bucket    | การกระจายอย่างสม่ำเสมอเมื่อไม่มีช่วงตามธรรมชาติ |
 
-## range partitioning ตาราง time-series
+## range partitioning table time-series
 
 กรณีที่พบบ่อยที่สุดคือ range partitioning ตามเวลา คุณประกาศ parent ด้วย `PARTITION BY RANGE` แล้วสร้าง child partition หนึ่งตัวต่อหนึ่งช่วงเวลา
 
@@ -56,7 +56,7 @@ CREATE TABLE events_2024_q2 PARTITION OF events
   FOR VALUES FROM ('2024-04-01') TO ('2024-07-01');
 ```
 
-การ insert เข้า `events` จะลงแถวใน partition ที่ตรงกันโดยอัตโนมัติ
+การ insert เข้า `events` จะลง row ใน partition ที่ตรงกันโดยอัตโนมัติ
 
 ```sql
 -- This row routes itself into events_2024_q1
@@ -64,11 +64,11 @@ INSERT INTO events (created_at, kind, payload)
 VALUES ('2024-02-14', 'signup', '{"plan": "pro"}');
 ```
 
-ข้อสังเกตเกี่ยวกับ partition key: มันต้องเป็นส่วนหนึ่งของ primary key บนตารางที่ partition ซึ่งเป็นเหตุผลที่ตัวอย่างใช้ `GENERATED ALWAYS AS IDENTITY` โดยไม่มี `PRIMARY KEY` แบบเดี่ยวบน `id` เพียงตัวเดียว
+ข้อสังเกตเกี่ยวกับ partition key: มันต้องเป็นส่วนหนึ่งของ primary key บน table ที่ partition ซึ่งเป็นเหตุผลที่ตัวอย่างใช้ `GENERATED ALWAYS AS IDENTITY` โดยไม่มี `PRIMARY KEY` แบบเดี่ยวบน `id` เพียงตัวเดียว
 
 ## list และ hash partitioning
 
-`PARTITION BY LIST` กำหนดแถวด้วยค่า key ที่ตรงกันพอดี — สะดวกเมื่อมีหมวดหมู่ตามธรรมชาติอยู่
+`PARTITION BY LIST` กำหนด row ด้วยค่า key ที่ตรงกันพอดี — สะดวกเมื่อมีหมวดหมู่ตามธรรมชาติอยู่
 
 ```sql
 CREATE TABLE customers (
@@ -84,7 +84,7 @@ CREATE TABLE customers_amer PARTITION OF customers
   FOR VALUES IN ('us', 'ca', 'latam');
 ```
 
-`PARTITION BY HASH` กระจายแถวอย่างสม่ำเสมอข้าม bucket จำนวนที่กำหนดตายตัวเมื่อไม่มี range หรือ list ใดที่สมเหตุสมผล
+`PARTITION BY HASH` กระจาย row อย่างสม่ำเสมอข้าม bucket จำนวนที่กำหนดตายตัวเมื่อไม่มี range หรือ list ใดที่สมเหตุสมผล
 
 ```sql
 CREATE TABLE sessions (
@@ -101,7 +101,7 @@ CREATE TABLE sessions_1 PARTITION OF sessions
 
 ## partition pruning
 
-ผลตอบแทนที่แท้จริงคือ **partition pruning**: เมื่อ clause `WHERE` ของ query กรองบน partition key planner จะข้าม partition ทุกตัวที่ไม่อาจมีแถวที่ตรงกัน และ scan เฉพาะตัวที่เกี่ยวข้องเท่านั้น
+ผลตอบแทนที่แท้จริงคือ **partition pruning**: เมื่อ clause `WHERE` ของ query กรองบน partition key planner จะข้าม partition ทุกตัวที่ไม่อาจมี row ที่ตรงกัน และ scan เฉพาะตัวที่เกี่ยวข้องเท่านั้น
 
 ```sql
 -- The planner reads only events_2024_q1, not the whole table
@@ -110,45 +110,64 @@ SELECT count(*) FROM events
 WHERE created_at >= '2024-02-01' AND created_at < '2024-03-01';
 ```
 
-แผนแสดงเพียง partition ของไตรมาสเดียวที่ถูก scan ถ้าคุณกลับไป query โดยไม่กล่าวถึง `created_at` planner ก็ไม่มีทางจำกัดให้แคบลงและต้อง scan ทุก partition — ซึ่งช้ากว่าตารางเดียวที่ทำ index ดี Pruning คือจุดประสงค์ทั้งหมด และ pruning ต้องการ partition key ใน clause `WHERE`
+แผนแสดงเพียง partition ของไตรมาสเดียวที่ถูก scan ถ้าคุณกลับไป query โดยไม่กล่าวถึง `created_at` planner ก็ไม่มีทางจำกัดให้แคบลงและต้อง scan ทุก partition — ซึ่งช้ากว่า table เดียวที่ทำ index ดี Pruning คือจุดประสงค์ทั้งหมด และ pruning ต้องการ partition key ใน clause `WHERE`
 
 ## partitioning ช่วยเมื่อใด
 
-Partitioning ไม่ได้มาฟรี: มีตารางให้จัดการมากขึ้น มีชั้น routing ในทุกการเขียน และ query ที่มองข้าม key อาจช้าลงได้ มันคุ้มค่าเมื่อ:
+Partitioning ไม่ได้มาฟรี: มี table ให้จัดการมากขึ้น มีชั้น routing ในทุกการเขียน และ query ที่มองข้าม key อาจช้าลงได้ มันคุ้มค่าเมื่อ:
 
-- ตารางใหญ่จริง ๆ — คิดถึงหลายร้อยล้านแถวขึ้นไป
+- table ใหญ่จริง ๆ — คิดถึงหลายร้อยล้าน row ขึ้นไป
 - query ส่วนใหญ่กรองบนมิติเดียวที่คุณ partition ตามได้ ซึ่งโดยปกติคือเวลา
-- คุณทิ้งข้อมูลเก่าเป็นกลุ่มก้อน การ detach หรือ drop ทั้ง partition แทบจะทันที เทียบกับ `DELETE` ที่ scan และล็อกหลายล้านแถว
+- คุณทิ้งข้อมูลเก่าเป็นกลุ่มก้อน การ detach หรือ drop ทั้ง partition แทบจะทันที เทียบกับ `DELETE` ที่ scan และ lock หลายล้าน row
 
-ไม่กี่ล้านแถวพร้อม index ที่ดีไม่ต้องการ partitioning การเพิ่มมันเร็วเกินไปก็แค่ซื้อความซับซ้อนมาโดยไม่ได้ประโยชน์
+ไม่กี่ล้าน row พร้อม index ที่ดีไม่ต้องการ partitioning การเพิ่มมันเร็วเกินไปก็แค่ซื้อความซับซ้อนมาโดยไม่ได้ประโยชน์
 
-## เคล็ดลับ / ข้อควรระวัง
+## Tips / gotchas
 
 - เลือก partition key ให้ตรงกับ query pattern หลักของคุณ ถ้าคุณ query ตามวันที่ ก็ partition ตามวันที่เพื่อให้ pruning ทำงานได้
 - Pruning เกิดขึ้นเฉพาะเมื่อ partition key ปรากฏใน clause `WHERE` เท่านั้น query ที่กรองบนสิ่งอื่นจะ scan ทุก partition
 - สร้าง partition ในอนาคตไว้ล่วงหน้า หรือทำให้เป็นอัตโนมัติ การ insert ที่ไม่มี partition ตรงกันจะล้มเหลว เว้นแต่คุณจะมี default partition
-- การทิ้งข้อมูลเก่าด้วยการ detach หรือ drop ทั้ง partition เร็วและเบากว่า `DELETE` แบบทีละแถวอย่างมหาศาล
+- การทิ้งข้อมูลเก่าด้วยการ detach หรือ drop ทั้ง partition เร็วและเบากว่า `DELETE` แบบทีละ row อย่างมหาศาล
 - ทำ index บน partition ไม่ใช่แค่บน parent index ที่กำหนดบน parent ที่ partition จะถูกสร้างบนแต่ละ partition โดยอัตโนมัติ ซึ่งเป็นวิธีง่าย ๆ ในการรักษาให้สอดคล้องกัน
 
-<Callout title="ตารางเดิม ปัญหาที่เล็กลง">
-Partitioning ไม่ได้ทำให้ตารางเล็กลง — ข้อมูลของคุณยังใหญ่เท่าเดิม มันทำให้แต่ละ *operation* เล็กลงด้วยการทำให้แน่ใจว่า query, index, และการ delete เป็นกลุ่มก้อนแตะเฉพาะส่วนที่ต้องการ ทักษะคือการเลือก partition key ที่ตรงกับวิธีที่คุณ query จริง ๆ เพื่อให้ planner ทำ prune ส่วนที่เหลือทิ้งไปได้
+<Callout title="table เดิม ปัญหาที่เล็กลง">
+Partitioning ไม่ได้ทำให้ table เล็กลง — ข้อมูลของคุณยังใหญ่เท่าเดิม มันทำให้แต่ละ *operation* เล็กลงด้วยการทำให้แน่ใจว่า query, index, และการ delete เป็นกลุ่มก้อนแตะเฉพาะส่วนที่ต้องการ ทักษะคือการเลือก partition key ที่ตรงกับวิธีที่คุณ query จริง ๆ เพื่อให้ planner ทำ prune ส่วนที่เหลือทิ้งไปได้
 </Callout>
+
+## Trade-offs
+
+| ตัวเลือก | Benefit | Cost |
+|---------|---------|------|
+| Partitioning table ขนาดใหญ่ | maintenance เร็วขึ้น (vacuum/rebuild index ต่อ partition), drop ข้อมูลเก่าเป็นกลุ่มก้อนได้เกือบทันที | query ต้องออกแบบให้ตรงกับ partition key, มี table ให้จัดการมากขึ้น |
+| ไม่ partition (table เดียว) | query และ schema เรียบง่าย ไม่ต้องคิดเรื่อง partition key | maintenance ช้าลงเรื่อย ๆ เมื่อ table โต, การลบข้อมูลเก่าต้อง `DELETE` ทีละ row |
+
+## Common Mistakes
+
+- **Partition table ตั้งแต่ยังเล็ก ทั้งที่ยังไม่ถึงขนาดที่ต้องการ** — ซื้อความซับซ้อนมาโดยไม่ได้ประโยชน์ รอจนกว่า table จะใหญ่จริง ๆ (หลายร้อยล้าน row) ก่อนค่อย partition
+- **เลือก partition key ที่ query ส่วนใหญ่ไม่ได้กรองด้วย** — planner ทำ prune ไม่ได้และต้อง scan ทุก partition อยู่ดี เลือก key ให้ตรงกับ query pattern จริง
+- **ลืมสร้าง default partition** — การ insert row ที่ไม่ตรงกับ partition ใดเลยจะล้มเหลวทันที ถ้าไม่มี default partition รองรับไว้
+
+> 💡 Real World Example
+>
+> **Instagram** — partition/shard table ขนาดมหึมาอย่าง post หรือ event ตามเวลา หรือ user ID เพื่อให้ drop หรือ archive partition เก่าเป็น operation ระดับ metadata ที่เร็วมาก แทนที่จะต้อง `DELETE` ทีละ row
+>
+> **Time-series/event logging platform** — ระบบเก็บ log หรือ metric จำนวนมากมักใช้ range partitioning ตามวันหรือเดือน เพื่อให้ retention policy ทำได้ด้วยการ drop partition แทนการ delete แบบสแกนทั้ง table
 
 export const quizPartitioning = [
   {
-    q: 'อะไรเป็นตัวตัดสินว่าแถวหนึ่งถูกเก็บอยู่ใน partition ใด?',
+    q: 'อะไรเป็นตัวตัดสินว่า row หนึ่งถูกเก็บอยู่ใน partition ใด?',
     options: [
-      'ลำดับที่แถวถูก insert เข้ามา',
+      'ลำดับที่ row ถูก insert เข้ามา',
       'ค่าของ partition key',
-      'connection ใดที่ insert แถวนั้น',
-      'ขนาดของแถวเป็น byte',
+      'connection ใดที่ insert row นั้น',
+      'ขนาดของ row เป็น byte',
     ],
     answer: 1,
   },
   {
     q: 'partition pruning ให้ planner ข้าม partition ได้เฉพาะเมื่อ...',
     options: [
-      'ตารางมี partition น้อยกว่าสี่ตัว',
+      'table มี partition น้อยกว่าสี่ตัว',
       'query กรองบน partition key ใน clause WHERE ของมัน',
       'คุณปิดใช้ index',
       'query ใช้ ORDER BY',
@@ -158,10 +177,10 @@ export const quizPartitioning = [
   {
     q: 'partitioning คุ้มค่าอย่างชัดเจนที่สุดสำหรับ workload แบบใด?',
     options: [
-      'ตาราง lookup เล็ก ๆ ไม่กี่ร้อยแถว',
-      'ตาราง time-series ขนาดใหญ่ที่ query ตามวันที่ ซึ่งข้อมูลเก่าถูกทิ้งเป็นกลุ่มก้อน',
-      'ตารางที่ถูกอ่านทีละแถวด้วย primary key เท่านั้นเสมอ',
-      'ตารางใด ๆ ก็ได้ เพราะ partitioning เร็วกว่าเสมอ',
+      'table lookup เล็ก ๆ ไม่กี่ร้อย row',
+      'table time-series ขนาดใหญ่ที่ query ตามวันที่ ซึ่งข้อมูลเก่าถูกทิ้งเป็นกลุ่มก้อน',
+      'table ที่ถูกอ่านทีละ row ด้วย primary key เท่านั้นเสมอ',
+      'table ใด ๆ ก็ได้ เพราะ partitioning เร็วกว่าเสมอ',
     ],
     answer: 1,
   },
