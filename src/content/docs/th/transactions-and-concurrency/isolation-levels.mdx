@@ -229,12 +229,12 @@ isolation คือการตัดทิ้ง anomaly จำเพาะอ�
 
 export const quizIso = [
   {
-    q: 'Which isolation level is the PostgreSQL default?',
+    q: 'isolation level ตัวไหนเป็น default ของ PostgreSQL?',
     options: ['Read Uncommitted', 'Read Committed', 'Repeatable Read', 'Serializable'],
     answer: 1,
   },
   {
-    q: 'What should an application do when a Serializable transaction fails with SQLSTATE 40001?',
+    q: 'แอปพลิเคชันควรทำอย่างไรเมื่อ Serializable transaction ล้มเหลวด้วย SQLSTATE 40001?',
     options: [
       'ลด isolation level ลงอย่างถาวร',
       'retry ทั้ง transaction ใหม่',
@@ -244,7 +244,7 @@ export const quizIso = [
     answer: 1,
   },
   {
-    q: 'Which anomaly does Repeatable Read prevent that Read Committed allows?',
+    q: 'anomaly ตัวไหนที่ Repeatable Read ป้องกันได้แต่ Read Committed ยังปล่อยให้เกิด?',
     options: [
       'dirty read',
       'non-repeatable read',

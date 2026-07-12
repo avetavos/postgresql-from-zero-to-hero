@@ -170,7 +170,7 @@ constraints อยู่ใน DDL ดังนั้นแอปพลิเค
 ## Common Mistakes
 
 - **พึ่งพา validation ระดับแอปพลิเคชันอย่างเดียว** — สคริปต์ ad-hoc, batch job หรือ service อื่นที่เขียนตรงเข้า database สามารถข้าม validation ของแอปได้เสมอ ต้องมี constraint ระดับฐานข้อมูลเป็นด่านสุดท้าย
-- **ลืมกำหนดพฤติกรรม `ON DELETE` ของ foreign key** — ถ้าไม่ตั้งใจเลือก `CASCADE` หรือ `RESTRICT` อาจได้ orphaned row ที่ชี้ไปยังของที่ไม่มีอยู่แล้ว หรือถูก cascade delete ลบข้อมูลเกินคาด
+- **ลืมกำหนดพฤติกรรม `ON DELETE` ของ foreign key** — โดย default foreign key จะเป็น `ON DELETE NO ACTION` (เทียบเท่า `RESTRICT`) ซึ่ง block การลบ parent row ที่ยังถูกอ้างถึงอยู่ และ raise foreign-key violation ออกมา ไม่ปล่อยให้เกิด orphaned row ดังนั้นความเสี่ยงจริงคือการเผลอเลือก `ON DELETE CASCADE` แล้วลบข้อมูลลูกเกินคาด ส่วน orphaned row ที่ชี้ไปยังของที่ไม่มีอยู่แล้วจะเกิดได้ก็ต่อเมื่อเผลอใช้ `ON DELETE SET NULL` โดยไม่ได้ตั้งใจ หรือ bypass constraint ไปเท่านั้น
 - **เพิ่ม `UNIQUE` constraint บน table ที่เขียนหนักโดยไม่คิดเรื่อง index** — `UNIQUE` สร้าง index ให้อัตโนมัติ ซึ่งเพิ่มต้นทุนทุกครั้งที่ insert/update บน table ที่มี write volume สูง ต้องวางแผนล่วงหน้า
 
 > 💡 Real World Example

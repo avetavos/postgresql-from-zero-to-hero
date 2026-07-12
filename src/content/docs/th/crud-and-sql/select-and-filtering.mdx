@@ -299,7 +299,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 export const quizSelect = [
   {
-    q: 'How do you correctly find rows where the born column is unknown?',
+    q: 'จะหา row ที่ column born ไม่มีค่า (unknown) ได้อย่างถูกต้องอย่างไร?',
     options: [
       'WHERE born = NULL',
       'WHERE born IS NULL',
@@ -309,27 +309,27 @@ export const quizSelect = [
     answer: 1,
   },
   {
-    q: 'What is true about LIMIT without an ORDER BY?',
+    q: 'ข้อไหนถูกต้องเกี่ยวกับ LIMIT ที่ไม่มี ORDER BY?',
     options: [
-      'It always returns the oldest rows',
-      'It returns an arbitrary, possibly changing subset',
-      'It raises an error',
-      'It sorts by primary key automatically',
+      'คืน row ที่เก่าที่สุดเสมอ',
+      'คืน subset แบบสุ่มที่อาจเปลี่ยนไปเรื่อย ๆ',
+      'เกิด error',
+      'sort ตาม primary key ให้อัตโนมัติ',
     ],
     answer: 1,
   },
   {
-    q: 'Which operator does a case-insensitive pattern match in PostgreSQL?',
+    q: 'operator ตัวไหนทำ pattern match แบบไม่สนตัวพิมพ์เล็กใหญ่ (case-insensitive) ใน PostgreSQL?',
     options: ['LIKE', 'ILIKE', 'BETWEEN', 'IN'],
     answer: 1,
   },
   {
-    q: 'What does OFFSET 1 do in a SELECT?',
+    q: 'OFFSET 1 ทำอะไรใน SELECT?',
     options: [
-      'Returns only the first row',
-      'Skips the first row of the ordered result',
-      'Limits the result to one row',
-      'Offsets the column positions',
+      'คืนแค่ row แรก',
+      'ข้าม row แรกของผลลัพธ์ที่ sort แล้ว',
+      'จำกัดผลลัพธ์ให้เหลือ row เดียว',
+      'เลื่อนตำแหน่งของ column',
     ],
     answer: 1,
   },

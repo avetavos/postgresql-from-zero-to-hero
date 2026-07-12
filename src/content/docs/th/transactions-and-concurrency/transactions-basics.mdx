@@ -267,7 +267,7 @@ export const txnFlow = `flowchart TD
 
 export const quizBasics = [
   {
-    q: 'What does ROLLBACK do to the statements run since BEGIN?',
+    q: 'ROLLBACK ทำอะไรกับ statement ที่รันไปตั้งแต่ BEGIN?',
     options: [
       'commit พวกมันให้เร็วขึ้น',
       'ทิ้งพวกมันราวกับว่าไม่เคยรันเลย',
@@ -277,7 +277,7 @@ export const quizBasics = [
     answer: 1,
   },
   {
-    q: 'What is the purpose of a SAVEPOINT?',
+    q: 'SAVEPOINT มีไว้เพื่ออะไร?',
     options: [
       'มัน commit บางส่วนของ transaction อย่างถาวร',
       'มันให้คุณ roll back ไปยังเครื่องหมายโดยไม่ละทิ้งทั้ง transaction',
@@ -287,7 +287,7 @@ export const quizBasics = [
     answer: 1,
   },
   {
-    q: 'When is a single statement run on its own committed automatically?',
+    q: 'statement เดี่ยว ๆ ที่รันแบบไม่อยู่ใน transaction จะถูก commit อัตโนมัติเมื่อไหร่?',
     options: [
       'ไม่มีทาง คุณต้องพิมพ์ COMMIT เสมอ',
       'เมื่อ connection อยู่ในโหมด auto-commit นอก BEGIN ใด ๆ',

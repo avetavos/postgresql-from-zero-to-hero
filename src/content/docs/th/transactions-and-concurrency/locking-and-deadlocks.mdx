@@ -189,7 +189,7 @@ deadlock ไม่ได้เกิดจากการ lock มากเก�
 
 export const quizLocks = [
   {
-    q: 'What does SELECT ... FOR UPDATE do?',
+    q: 'SELECT ... FOR UPDATE ทำอะไร?',
     options: [
       'คืน row เร็วขึ้นด้วยการข้าม snapshot',
       'อ่านและ lock row เพื่อให้คนอื่นต้องรอที่จะเปลี่ยนพวกมัน',
@@ -199,7 +199,7 @@ export const quizLocks = [
     answer: 1,
   },
   {
-    q: 'How does PostgreSQL resolve a deadlock between two transactions?',
+    q: 'PostgreSQL แก้ deadlock ระหว่างสอง transaction อย่างไร?',
     options: [
       'มันรอตลอดไปจนกว่าไคลเอนต์ตัวหนึ่งจะตัดการเชื่อมต่อ',
       'มันตรวจจับวงจรและ abort transaction หนึ่งเป็นเหยื่อ',
@@ -209,7 +209,7 @@ export const quizLocks = [
     answer: 1,
   },
   {
-    q: 'Which practice most reliably prevents deadlocks?',
+    q: 'แนวปฏิบัติไหนที่ป้องกัน deadlock ได้น่าเชื่อถือที่สุด?',
     options: [
       'ใช้ SELECT โดยไม่มี FOR UPDATE',
       'จับ lock ในลำดับที่สอดคล้องกันข้ามทุก transaction',

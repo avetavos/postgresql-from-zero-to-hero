@@ -274,27 +274,27 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 export const quizUpdateDelete = [
   {
-    q: 'What happens if you run UPDATE books SET copies_sold = 0; with no WHERE clause?',
+    q: 'จะเกิดอะไรขึ้นถ้ารัน UPDATE books SET copies_sold = 0; โดยไม่มี WHERE clause?',
     options: [
-      'Only the first row is updated',
-      'Every row in the table is set to 0',
-      'PostgreSQL refuses to run it',
-      'Nothing changes until you commit',
+      'อัปเดตแค่ row แรก',
+      'ทุก row ใน table ถูกตั้งเป็น 0',
+      'PostgreSQL ปฏิเสธไม่ยอมรัน',
+      'ยังไม่มีอะไรเปลี่ยนจนกว่าจะ commit',
     ],
     answer: 1,
   },
   {
-    q: 'Which clause lets an UPDATE or DELETE report exactly which rows it changed?',
+    q: 'clause ตัวไหนทำให้ UPDATE หรือ DELETE รายงานได้ว่าเปลี่ยน row ไหนไปบ้าง?',
     options: ['SET', 'RETURNING', 'WHERE', 'LIMIT'],
     answer: 1,
   },
   {
-    q: 'How can you make a risky DELETE reversible while you check the result?',
+    q: 'จะทำให้ DELETE ที่เสี่ยงสามารถย้อนกลับได้ระหว่างที่ยังตรวจผลอยู่ได้อย่างไร?',
     options: [
-      'Run it twice',
-      'Wrap it in a transaction and ROLLBACK if wrong',
-      'Add ORDER BY',
-      'Use DELETE ALL instead',
+      'รันซ้ำสองครั้ง',
+      'ห่อไว้ใน transaction แล้ว ROLLBACK ถ้าผิด',
+      'เพิ่ม ORDER BY',
+      'ใช้ DELETE ALL แทน',
     ],
     answer: 1,
   },

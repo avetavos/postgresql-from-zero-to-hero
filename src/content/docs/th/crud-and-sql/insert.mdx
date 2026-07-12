@@ -264,32 +264,32 @@ column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น Po
 
 export const quizInsert = [
   {
-    q: 'How do you read a server-generated id immediately after inserting?',
+    q: 'จะอ่านค่า id ที่ server สร้างให้ทันทีหลัง insert ได้อย่างไร?',
     options: [
-      'Run a separate SELECT max(id) afterwards',
-      'Append RETURNING id to the INSERT',
-      'Read it from the driver connection object',
-      'You cannot — ids are hidden',
+      'รัน SELECT max(id) แยกอีกทีทีหลัง',
+      'ต่อ RETURNING id ท้าย INSERT',
+      'อ่านจาก connection object ของ driver',
+      'อ่านไม่ได้ — id ถูกซ่อนไว้',
     ],
     answer: 1,
   },
   {
-    q: 'A column has DEFAULT 0 and is NOT NULL. What happens if you omit it from the column list?',
+    q: 'column หนึ่งมี DEFAULT 0 และเป็น NOT NULL จะเกิดอะไรขึ้นถ้าไม่ใส่ column นั้นใน column list?',
     options: [
-      'The insert fails',
-      'The column is set to NULL',
-      'The column takes its default value of 0',
-      'PostgreSQL prompts you for a value',
+      'insert ล้มเหลว',
+      'column ถูกตั้งเป็น NULL',
+      'column ใช้ค่า default คือ 0',
+      'PostgreSQL ถามหาค่าจากเรา',
     ],
     answer: 2,
   },
   {
-    q: 'Why pass values as placeholders ($1, %s) instead of concatenating them into the SQL string?',
+    q: 'ทำไมถึงควรส่งค่าผ่าน placeholder ($1, %s) แทนการ concatenate เข้าไปใน SQL string ตรง ๆ?',
     options: [
-      'It runs faster in every case',
-      'It avoids SQL injection and keeps types correct',
-      'It is required by the SQL standard',
-      'It lets you skip the column list',
+      'มันรันเร็วกว่าในทุกกรณี',
+      'ช่วยเลี่ยง SQL injection และคง type ให้ถูกต้อง',
+      'เป็นข้อบังคับของ SQL standard',
+      'ทำให้ข้าม column list ได้',
     ],
     answer: 1,
   },

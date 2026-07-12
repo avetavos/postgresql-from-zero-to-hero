@@ -168,7 +168,7 @@ export const mvccDiagram = `flowchart TD
 
 export const quizMvcc = [
   {
-    q: 'Under MVCC, what happens to a row when you UPDATE it?',
+    q: 'ภายใต้ MVCC เกิดอะไรขึ้นกับ row เมื่อเรา UPDATE มัน?',
     options: [
       'byte ของมันถูกเขียนทับที่เดิม',
       'เวอร์ชันใหม่ถูกเขียนและเวอร์ชันเก่าถูกทำเครื่องหมายว่าถูกแทนที่',
@@ -178,7 +178,7 @@ export const quizMvcc = [
     answer: 1,
   },
   {
-    q: 'Why does an ordinary SELECT not need to wait for a writer?',
+    q: 'ทำไม SELECT ธรรมดาถึงไม่ต้องรอ writer?',
     options: [
       'เพราะ writer ถูกหยุดชั่วคราวในระหว่างการอ่าน',
       'เพราะ reader ตอบจาก snapshot ที่สอดคล้องกันของข้อมูลที่ committed แล้ว',
@@ -188,7 +188,7 @@ export const quizMvcc = [
     answer: 1,
   },
   {
-    q: 'What problem do long-running transactions cause for MVCC?',
+    q: 'transaction ที่รันนาน ๆ สร้างปัญหาอะไรให้กับ MVCC?',
     options: [
       'พวกมันทำให้ snapshot เสียหาย',
       'พวกมันกัน VACUUM ไม่ให้ลบเวอร์ชันเก่าของ row ทำให้เกิดการบวม',

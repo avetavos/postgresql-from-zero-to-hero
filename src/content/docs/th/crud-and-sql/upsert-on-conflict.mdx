@@ -211,32 +211,32 @@ export const upsertDiagram = `flowchart TD
 
 export const quizUpsert = [
   {
-    q: 'What must exist on a column before ON CONFLICT (col) can detect a duplicate?',
+    q: 'column ต้องมีอะไรอยู่ก่อน ON CONFLICT (col) ถึงจะตรวจจับค่าซ้ำได้?',
     options: [
-      'A foreign key',
-      'A unique constraint or unique index',
-      'A NOT NULL constraint',
-      'A default value',
+      'foreign key',
+      'unique constraint หรือ unique index',
+      'NOT NULL constraint',
+      'default value',
     ],
     answer: 1,
   },
   {
-    q: 'In DO UPDATE, what does EXCLUDED.copies_sold refer to?',
+    q: 'ใน DO UPDATE ค่า EXCLUDED.copies_sold หมายถึงอะไร?',
     options: [
-      'The value currently stored in the existing row',
-      'The value you attempted to insert',
-      'Always zero',
-      'A random row from the table',
+      'ค่าที่เก็บอยู่ใน row เดิมตอนนี้',
+      'ค่าที่เราพยายาม insert เข้าไป',
+      'เป็น 0 เสมอ',
+      'row สุ่มจาก table',
     ],
     answer: 1,
   },
   {
-    q: 'What does ON CONFLICT (title) DO NOTHING do when the title already exists?',
+    q: 'ON CONFLICT (title) DO NOTHING ทำอะไรเมื่อ title นั้นมีอยู่แล้ว?',
     options: [
-      'Raises a unique violation error',
-      'Updates the existing row',
-      'Skips the insert, affecting zero rows',
-      'Deletes the existing row',
+      'เกิด unique violation error',
+      'อัปเดต row เดิม',
+      'ข้ามการ insert โดยไม่กระทบ row ใด ๆ',
+      'ลบ row เดิมทิ้ง',
     ],
     answer: 2,
   },
