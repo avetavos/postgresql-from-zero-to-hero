@@ -30,7 +30,7 @@ import ProgressTracker from '../../../components/ProgressTracker.tsx';
 | statement | statement | คำสั่ง SQL หนึ่งคำสั่ง |
 | operation | operation | ใช้แทน "การดำเนินการ" ในบริบททั่วไป |
 | transaction | transaction | ไม่แปลเป็นไทย |
-| lock | lock | ไม่แปลเป็น "ล็อก" (ยกเว้น "ล็อกอิน" ซึ่งเป็นคนละคำ ไม่เกี่ยวกับ database lock) |
+| lock | lock | ไม่แปลเป็น "ล็อก" (ยกเว้น "ล็อกอิน" ที่เป็นคนละคำ ไม่เกี่ยวกับ database lock) |
 | deadlock | deadlock | คงคำอังกฤษ |
 | isolation level | isolation level | ไม่แปลเป็นไทย |
 | planner | planner | ส่วนของ PostgreSQL ที่เลือก query plan |
@@ -61,7 +61,7 @@ import ProgressTracker from '../../../components/ProgressTracker.tsx';
 | ข้อจำกัด | constraint |
 | ล็อก (หมายถึง database lock) | lock |
 | ดำเนินการ (หมายถึง operation ทั่วไป) | operation / ทำงาน / รัน ตามบริบท |
-| ทำการ + verb (เช่น "ทำการรัน") | ตัด "ทำการ" ออก แล้วใช้ verb ตรง ๆ ("รัน") |
+| ทำการ + verb (เช่น "รัน") | ตัด "ทำการ" ออก แล้วใช้ verb ตรง ๆ ("รัน") |
 
 <Callout title="ทำไมคำเหล่านี้ไม่แปลเป็นไทยทั้งหมด">
 Developer ไทยที่ทำงานกับ PostgreSQL จริงแทบไม่มีใครพูดว่า "ไปดูที่ตารางแถวนี้ที่มีดัชนีติดอยู่" — ทุกคนพูดว่า "table", "row", "index" ตรง ๆ เพราะนั่นคือคำที่ปรากฏใน error message, documentation, และโค้ดจริงทุกวัน course นี้จึงรักษาคำศัพท์เทคนิคไว้เป็นภาษาอังกฤษ แล้วใช้ภาษาไทยสำหรับอธิบายแนวคิดและเชื่อมประโยค เพื่อให้สิ่งที่คุณอ่านตรงกับสิ่งที่คุณจะพูดและเขียนในงานจริง

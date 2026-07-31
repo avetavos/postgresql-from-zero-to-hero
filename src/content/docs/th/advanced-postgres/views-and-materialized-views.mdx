@@ -11,13 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-เมื่อ query ที่ซับซ้อนตัวเดิมโผล่มาเรื่อย ๆ ทั่วทั้งแอปพลิเคชันของคุณ การคัดลอก SQL ของมันไปทุกที่นั้นเปราะบาง PostgreSQL ให้คุณตั้งชื่อให้ query แล้วใช้ชื่อนั้นเหมือน table มีสองแบบที่พฤติกรรมต่างกันมาก คือ **view** จะรัน query เบื้องหลังทุกครั้งที่คุณอ่านมัน ส่วน **materialized view** จะเก็บผลลัพธ์ไว้และคำนวณใหม่เฉพาะเมื่อคุณสั่ง
+เมื่อ query ที่ซับซ้อนตัวเดิมโผล่มาเรื่อย ๆ ทั่วทั้งแอปพลิเคชันของคุณ การก็อป SQL ชุดนั้นไปวางทุกที่คือความเปราะบาง PostgreSQL ให้คุณตั้งชื่อให้ query แล้วใช้ชื่อนั้นเหมือน table มีสองแบบที่พฤติกรรมต่างกันมาก คือ **view** จะรัน query เบื้องหลังใหม่ทุกครั้งที่คุณอ่าน ส่วน **materialized view** จะเก็บผลลัพธ์ไว้และคำนวณใหม่เฉพาะเมื่อคุณสั่ง
 
 เราใช้ table `authors` และ `books` จากโมดูล CRUD ซ้ำสำหรับตัวอย่างด้านล่าง
 
 ## view คือ query ที่ถูกเก็บไว้
 
-`CREATE VIEW` บันทึก `SELECT` ไว้ภายใต้ชื่อหนึ่ง การอ่าน view จะรัน query นั้นใหม่กับข้อมูลปัจจุบัน ดังนั้นผลลัพธ์ของมันจึงเป็นปัจจุบันเสมอ ไม่มีอะไรถูกเก็บไว้นอกจากตัวนิยาม (definition)
+`CREATE VIEW` บันทึก `SELECT` ไว้ภายใต้ชื่อหนึ่ง การอ่าน view จะรัน query นั้นใหม่กับข้อมูลปัจจุบัน ผลลัพธ์จึงเป็นข้อมูลล่าสุดเสมอ และไม่มีอะไรถูกเก็บไว้นอกจากตัวนิยาม (definition)
 
 ```sql
 CREATE VIEW author_book_counts AS
@@ -34,7 +34,7 @@ GROUP BY a.id, a.name;
 CREATE VIEW
 ```
 
-ตอนนี้ query มันได้ราวกับว่ามันเป็น table:
+ตอนนี้ query view นี้ได้เหมือนเป็น table เลย:
 
 ```sql
 SELECT name, book_count, total_sold
@@ -55,7 +55,7 @@ ORDER BY total_sold DESC;
 
 ## materialized view แคชผลลัพธ์ไว้
 
-`CREATE MATERIALIZED VIEW` รัน query หนึ่งครั้งและเก็บ row ต่าง ๆ ไว้บนดิสก์ เหมือนภาพ snapshot การอ่านจึงถูกพอ ๆ กับการอ่าน table — แต่ข้อมูลถูกแช่แข็งไว้ ณ ขณะที่มันถูกสร้างหรือถูก refresh ครั้งล่าสุด
+`CREATE MATERIALIZED VIEW` รัน query หนึ่งครั้งและเก็บ row ต่าง ๆ ไว้บนดิสก์ เหมือนภาพ snapshot การอ่านจึงถูกพอ ๆ กับการอ่าน table — แต่ข้อมูลจะแช่แข็งอยู่ ณ ตอนที่สร้างหรือ refresh ครั้งล่าสุด
 
 ```sql
 CREATE MATERIALIZED VIEW author_book_counts_cached AS
@@ -72,7 +72,7 @@ GROUP BY a.id, a.name;
 SELECT 3
 ```
 
-ถ้าตอนนี้คุณ insert หนังสือใหม่ materialized view จะ**ไม่**เปลี่ยน คุณทำให้มันเป็นปัจจุบันด้วย `REFRESH`:
+ถ้าตอนนี้คุณ insert หนังสือใหม่ materialized view จะ**ไม่**เปลี่ยน คุณต้องสั่ง `REFRESH` เองเพื่อดึงข้อมูลใหม่:
 
 ```sql
 REFRESH MATERIALIZED VIEW author_book_counts_cached;
@@ -82,7 +82,7 @@ REFRESH MATERIALIZED VIEW author_book_counts_cached;
 REFRESH MATERIALIZED VIEW
 ```
 
-`REFRESH` ธรรมดาจะจับ lock ที่บล็อกการอ่านขณะที่มันสร้างใหม่ หากต้องการให้ view ยังอ่านได้ระหว่าง refresh ให้เพิ่ม `CONCURRENTLY` — สิ่งนี้ต้องมี unique index บน materialized view ก่อน:
+`REFRESH` ธรรมดาจะจับ lock ที่บล็อกการอ่านตลอดช่วงที่สร้างใหม่ หากต้องการให้ view ยังอ่านได้ระหว่าง refresh ให้เพิ่ม `CONCURRENTLY` — สิ่งนี้ต้องมี unique index บน materialized view ก่อน:
 
 ```sql
 CREATE UNIQUE INDEX idx_abc_cached_id ON author_book_counts_cached (id);
@@ -117,37 +117,37 @@ export const viewDiagram = `flowchart LR
 |-------------------------------------------|-----------------------|--------------------------------|
 | ผลลัพธ์เป็นปัจจุบันเสมอหรือไม่?             | ใช่                   | เฉพาะหลัง refresh           |
 | การอ่านแต่ละครั้งมีต้นทุนแค่ไหน?               | ต้นทุน query เต็ม       | ถูก (อ่าน row ที่เก็บไว้)      |
-| มันใช้ดิสก์เก็บผลลัพธ์หรือไม่?             | ไม่                    | ใช่                            |
+| ใช้ดิสก์เก็บผลลัพธ์หรือไม่?             | ไม่                    | ใช่                            |
 | ทำ index ให้ผลลัพธ์โดยตรงได้หรือไม่?        | ไม่                    | ได้                            |
 | เหมาะเมื่อ                                 | ข้อมูลเปลี่ยนบ่อย    | query มีต้นทุนสูง และยอมรับความล้าสมัยได้  |
 
 ใช้ view ธรรมดาเพื่อจัดระเบียบและนำ query ที่มีต้นทุนยอมรับได้ในทุกการอ่านมาใช้ซ้ำ หยิบ materialized view มาใช้เมื่อ query มีต้นทุนสูงจริง ๆ (join หนัก ๆ การ aggregate บน table ใหญ่) และแอปพลิเคชันของคุณทนกับผลลัพธ์ที่ตามหลังอยู่หลายนาทีหรือหลายชั่วโมงได้
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
-- materialized view ล้าสมัยโดยนิยามจนกว่าคุณจะ refresh มัน จงตั้งเวลา refresh (cron job, scheduled task หรือ trigger) ให้สอดคล้องกับความสดใหม่ที่ข้อมูลต้องการ
-- `REFRESH MATERIALIZED VIEW CONCURRENTLY` ต้องมี unique index บน view และทำงานมากกว่า แต่มันปล่อยให้การอ่านดำเนินต่อระหว่างการสร้างใหม่ได้ การ refresh ธรรมดาเร็วกว่าแต่บล็อกผู้อ่าน
-- view ธรรมดาไม่เพิ่มพื้นที่จัดเก็บและไม่มีความล้าสมัย แต่มันก็ไม่เพิ่มความเร็วเช่นกัน — การอ่านแต่ละครั้งรัน query เต็มใหม่ มันเป็นเรื่องของการนำกลับมาใช้ซ้ำและความอ่านง่าย ไม่ใช่ประสิทธิภาพ
+- materialized view ล้าสมัยโดยนิยามจนกว่าคุณจะสั่ง refresh ดังนั้นตั้งตารางเวลา refresh (cron job, scheduled task หรือ trigger) ให้สอดคล้องกับความสดใหม่ที่ข้อมูลต้องการ
+- `REFRESH MATERIALIZED VIEW CONCURRENTLY` ต้องมี unique index บน view และทำงานหนักกว่า แต่ปล่อยให้อ่านต่อได้ระหว่างสร้างใหม่ การ refresh ธรรมดาเร็วกว่าแต่บล็อกผู้อ่าน
+- view ธรรมดาไม่เพิ่มพื้นที่จัดเก็บและไม่มีความล้าสมัย แต่ก็ไม่ได้ช่วยให้เร็วขึ้นเช่นกัน เพราะการอ่านแต่ละครั้งรัน query เต็มใหม่ ประโยชน์อยู่ที่การใช้ซ้ำและความอ่านง่าย ไม่ใช่ประสิทธิภาพ
 - โดยทั่วไปคุณเขียนผ่าน view ที่ aggregate หรือ join ไม่ได้ view แบบ table เดียวง่าย ๆ อาจ update ได้ แต่ทันทีที่คุณเพิ่ม `GROUP BY` หรือ join ให้ถือว่า view นั้นเป็นแบบอ่านอย่างเดียว
 
 <Callout title="สดใหม่ versus เร็ว">
 การตัดสินใจทั้งหมดสรุปลงที่การแลกเปลี่ยน view ให้ความถูกต้องฟรี ๆ และจ่ายในทุกการอ่าน materialized view ให้ความเร็วและขอให้คุณจัดการความล้าสมัยด้วยการ refresh เลือกข้างของการแลกเปลี่ยนที่ฟีเจอร์ของคุณต้องการจริง ๆ
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | `VIEW` ธรรมดา | ผลลัพธ์เป็นปัจจุบันเสมอ ไม่ใช้พื้นที่ดิสก์เพิ่ม | รัน query เบื้องหลังใหม่ทุกครั้งที่อ่าน ต้นทุนเต็มทุก request |
 | Materialized view | อ่านเร็วเพราะเป็นการอ่าน row ที่เก็บไว้ ทำ index บนผลลัพธ์ได้ | ข้อมูลล้าสมัยได้จนกว่าจะ `REFRESH` และตัว refresh เองก็มีต้นทุน |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
-- **คาดหวังข้อมูลสดจาก materialized view** — มันสดใหม่แค่ ณ ตอนที่ `REFRESH` ล่าสุดเท่านั้น ถ้าต้องการข้อมูล real-time ให้ใช้ view ธรรมดาหรือ query ตรง table แทน
+- **คาดหวังข้อมูลสดจาก materialized view** — ข้อมูลสดแค่ ณ ตอน `REFRESH` ล่าสุดเท่านั้น ถ้าต้องการข้อมูล real-time ให้ใช้ view ธรรมดาหรือ query ตรง table แทน
 - **รัน `REFRESH MATERIALIZED VIEW` ธรรมดาบน production โดยไม่คิด** — คำสั่งนี้จับ lock ที่บล็อกการอ่านระหว่างสร้างใหม่ ถ้าต้องการ non-blocking refresh ต้องใช้ `CONCURRENTLY` ร่วมกับ unique index บน materialized view นั้น
 - **ใช้ materialized view กับข้อมูลที่เปลี่ยนทุกวินาที** — ถ้าข้อมูลเปลี่ยนเร็วมาก view ธรรมดาหรือ query ตรง ๆ จะง่ายกว่าและถูกต้องเสมอ ไม่ต้องมาคอยจัดการเรื่อง refresh schedule
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Dashboard วิเคราะห์ข้อมูลและเครื่องมือ reporting** — ที่สร้างบน PostgreSQL มักใช้ materialized view เพื่อ pre-compute การ aggregate ที่มีต้นทุนสูง แล้ว refresh ตามตารางเวลาแทนที่จะคำนวณใหม่ทุก request
 >
@@ -157,15 +157,15 @@ export const quizViews = [
   {
     q: 'เกิดอะไรขึ้นเมื่อคุณ SELECT จาก view ธรรมดา (ไม่ใช่ materialized)?',
     options: [
-      'มันคืน row ที่เก็บไว้บนดิสก์จากการ refresh ครั้งล่าสุด',
-      'มันรัน query เบื้องหลังใหม่กับข้อมูลปัจจุบัน',
-      'มันคืนผลลัพธ์ว่างเสมอจนกว่าจะ refresh',
-      'มันแก้ไข table เบื้องหลัง',
+      'คืน row ที่เก็บไว้บนดิสก์จากการ refresh ครั้งล่าสุด',
+      'รัน query เบื้องหลังใหม่กับข้อมูลปัจจุบัน',
+      'คืนผลลัพธ์ว่างเสมอจนกว่าจะ refresh',
+      'แก้ไข table เบื้องหลัง',
     ],
     answer: 1,
   },
   {
-    q: 'หลังจาก insert row ใหม่ลงใน table พื้นฐาน materialized view สะท้อนมันอย่างไร?',
+    q: 'หลังจาก insert row ใหม่ลงใน table พื้นฐาน materialized view จะเห็น row นั้นเมื่อไหร่?',
     options: [
       'โดยอัตโนมัติและทันที',
       'ไม่เลย materialized view เป็น snapshot แบบอ่านอย่างเดียวตลอดไป',

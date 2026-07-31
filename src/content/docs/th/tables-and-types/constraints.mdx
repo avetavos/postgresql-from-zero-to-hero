@@ -11,13 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ชนิดข้อมูลตัดสินว่า column สามารถเก็บค่าแบบใดได้ ส่วน **constraints** ตัดสินว่าค่าและชุดค่าผสมใดที่ได้รับอนุญาตจริง ๆ constraint คือกฎที่เซิร์ฟเวอร์ตรวจสอบในทุกการ insert และ update โดยปฏิเสธสิ่งใดก็ตามที่ละเมิดมัน เนื่องจากฐานข้อมูลบังคับใช้มัน constraints จึงยังคงอยู่ไม่ว่าแอปพลิเคชันหรือบุคคลใดจะเป็นผู้เขียนข้อมูล — มันเป็นกระดูกสันหลังของความสมบูรณ์ของข้อมูล
+ชนิดข้อมูลตัดสินว่า column สามารถเก็บค่าแบบใดได้ ส่วน **constraints** ตัดสินว่าค่าและชุดค่าผสมใดที่ได้รับอนุญาตจริง ๆ constraint คือกฎที่ server ตรวจทุกครั้งที่ insert และ update แล้วปฏิเสธทุกอย่างที่ละเมิดกฎ เพราะฐานข้อมูลเป็นคนบังคับใช้เอง constraint จึงมีผลเสมอไม่ว่าแอปพลิเคชันหรือคนไหนจะเป็นผู้เขียนข้อมูล นี่คือกระดูกสันหลังของความสมบูรณ์ของข้อมูล
 
 เราจะจำลองร้านค้าจิ๋ว ๆ ที่มี `customers` และ `orders` เพื่อดู constraint แต่ละชนิดทำงาน
 
 ## NOT NULL และ DEFAULT
 
-constraint แบบ `NOT NULL` ห้ามการไม่มีค่า ดังนั้น column นั้นต้องถูกเติมเสมอ ส่วน `DEFAULT` จัดหาค่าให้เมื่อการ insert ละเว้น column นั้นไป ทั้งคู่จับคู่กันได้อย่างเป็นธรรมชาติ: default ที่สมเหตุสมผลบวกกับ `NOT NULL` หมายความว่า column นั้นมีค่าอยู่เสมอโดยไม่บังคับให้ทุกการ insert ต้องระบุมันให้ชัดเจน
+constraint แบบ `NOT NULL` ห้ามการไม่มีค่า ดังนั้น column นั้นต้องถูกเติมเสมอ ส่วน `DEFAULT` จัดหาค่าให้เมื่อการ insert ละเว้น column นั้นไป ทั้งคู่จับคู่กันได้อย่างเป็นธรรมชาติ: default ที่สมเหตุสมผลบวกกับ `NOT NULL` หมายความว่า column นั้นมีค่าอยู่เสมอโดยไม่ต้องบังคับให้ทุกการ insert ระบุค่าเอง
 
 ```sql
 CREATE TABLE customers (
@@ -31,11 +31,11 @@ CREATE TABLE customers (
 
 ## PRIMARY KEY
 
-`PRIMARY KEY` ทำเครื่องหมาย column (หรือหลาย column) ที่ระบุ row ได้อย่างไม่ซ้ำกัน มันเป็นรูปแบบย่อของ `NOT NULL` บวก `UNIQUE` และ table หนึ่งมีได้เพียงตัวเดียว column `id` ข้างบนคือ primary key ของ `customers`
+`PRIMARY KEY` ทำเครื่องหมาย column (หรือหลาย column) ที่ระบุ row ได้อย่างไม่ซ้ำกัน ถือเป็นรูปแบบย่อของ `NOT NULL` บวก `UNIQUE` และ table หนึ่งมีได้เพียงตัวเดียว column `id` ข้างบนคือ primary key ของ `customers`
 
 ## UNIQUE
 
-constraint แบบ `UNIQUE` ห้ามค่าที่ซ้ำกันใน column ขณะที่ยังคงอนุญาต null ได้ มันเป็นวิธีแสดงกฎอย่าง "ลูกค้าสองคนใช้ email ร่วมกันไม่ได้" โดยไม่ทำให้ column นั้นเป็น primary key
+constraint แบบ `UNIQUE` ห้ามค่าที่ซ้ำกันใน column แต่ยังยอมให้มี null ได้ นี่คือวิธีเขียนกฎอย่าง "ลูกค้าสองคนใช้ email ร่วมกันไม่ได้" โดยไม่ทำให้ column นั้นเป็น primary key
 
 ```sql
 ALTER TABLE customers
@@ -43,11 +43,11 @@ ALTER TABLE customers
   ADD CONSTRAINT customers_email_unique UNIQUE (email);
 ```
 
-การตั้งชื่อ constraint ว่า `customers_email_unique` นั้นจะทำหรือไม่ก็ได้ แต่มันคุ้มค่า: ข้อความ error และคำสั่ง `ALTER TABLE` ในภายหลังสามารถอ้างถึงมันด้วยชื่อแทนที่จะเป็นป้ายที่สร้างขึ้นอัตโนมัติ
+การตั้งชื่อ constraint ว่า `customers_email_unique` นั้นจะทำหรือไม่ก็ได้ แต่คุ้มมาก เพราะข้อความ error และคำสั่ง `ALTER TABLE` ทีหลังจะอ้างถึงด้วยชื่อนี้ แทนที่จะเป็นป้ายที่ระบบสร้างให้อัตโนมัติ
 
 ## CHECK
 
-constraint แบบ `CHECK` ทดสอบนิพจน์กับแต่ละ row และปฏิเสธการเขียนหากมันประเมินค่าได้เป็น false ใช้มันเพื่อเข้ารหัสกฎทางธุรกิจที่ชนิดเพียงอย่างเดียวแสดงไม่ได้ เช่น ราคาที่ต้องเป็นบวก
+constraint แบบ `CHECK` ทดสอบนิพจน์กับแต่ละ row และปฏิเสธการเขียนถ้านิพจน์ประเมินได้เป็น false ใช้เขียนกฎทางธุรกิจที่ชนิดเพียงอย่างเดียวแสดงไม่ได้ เช่น ราคาที่ต้องเป็นบวก
 
 ```sql
 CREATE TABLE orders (
@@ -90,9 +90,9 @@ export const fkDiagram = `flowchart LR
 
 <Mermaid code={fkDiagram} title="orders.customer_id อ้างถึง customers.id" />
 
-## รันมันจาก driver
+## รันจาก driver
 
-constraints อยู่ใน DDL ดังนั้นแอปพลิเคชันจึงมักเพิ่มมันผ่าน migration คำสั่งนี้คือ SQL เดียวกับที่คุณจะพิมพ์ใน `psql` เพียงแต่ส่งผ่าน driver เท่านั้น
+constraints อยู่ใน DDL แอปพลิเคชันจึงมักเพิ่มผ่าน migration คำสั่งนี้คือ SQL เดียวกับที่คุณจะพิมพ์ใน `psql` เพียงแต่ส่งผ่าน driver เท่านั้น
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -146,34 +146,34 @@ constraints อยู่ใน DDL ดังนั้นแอปพลิเค
   </TabItem>
 </Tabs>
 
-**ใน pgAdmin:** constraints ของ table จะปรากฏใต้โหนด Constraints ของมันในแผนผัง browser และ dialog Properties มีแท็บสำหรับ primary key, foreign key, check และ unique constraint หากคุณชอบใช้ฟอร์มมากกว่า SQL
+**ใน pgAdmin:** constraints ของ table จะปรากฏใต้โหนด Constraints ของ table นั้นในแผนผัง browser และ dialog Properties มีแท็บสำหรับ primary key, foreign key, check และ unique constraint หากคุณชอบใช้ฟอร์มมากกว่า SQL
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - foreign key บังคับใช้ referential integrity ให้คุณ ดังนั้นฐานข้อมูลจะไม่มีวันถือ order สำหรับลูกค้าที่ไม่มีอยู่จริง การพึ่งพาโค้ดของแอปพลิเคชันเพียงอย่างเดียวเพื่อรักษาความถูกต้องของการอ้างอิงจะล้มเหลวในที่สุด
 - ตั้งชื่อ constraints ของคุณให้ชัดเจน อย่าง `orders_total_positive` แทนที่จะยอมรับชื่อที่สร้างขึ้นอัตโนมัติ ชื่อที่ชัดเจนทำให้ข้อความ error อ่านได้และทำให้การเปลี่ยนแปลง `ALTER TABLE` ในภายหลังเป็นเรื่องตรงไปตรงมา
 - เลือกพฤติกรรม `ON DELETE` อย่างตั้งใจ `CASCADE` ทำความสะอาด row ที่ขึ้นต่อกันโดยอัตโนมัติแต่อาจลบมากกว่าที่คุณคาด ส่วน `RESTRICT` คือค่าเริ่มต้นที่ปลอดภัยกว่าเมื่อคุณไม่แน่ใจ
-- constraint แบบ `CHECK` สามารถอ้างถึงหลาย column ของ row เดียวกันได้ ดังนั้นคุณสามารถเข้ารหัสกฎอย่างส่วนลดที่ต้องไม่เกิน total แต่มันมอง row หรือ table อื่นไม่ได้
-- การเพิ่ม constraint ลงใน table ที่มีข้อมูลอยู่แล้วจะล้มเหลวหาก row ที่มีอยู่ละเมิดมัน ทำความสะอาดข้อมูลก่อน แล้วจึงเพิ่ม constraint
+- constraint แบบ `CHECK` สามารถอ้างถึงหลาย column ของ row เดียวกันได้ ดังนั้นคุณสามารถเข้ารหัสกฎอย่างส่วนลดที่ต้องไม่เกิน total แต่มอง row อื่นหรือ table อื่นไม่ได้
+- การเพิ่ม constraint ลงใน table ที่มีข้อมูลอยู่แล้วจะล้มเหลวถ้ามี row เดิมละเมิดกฎอยู่ ทำความสะอาดข้อมูลก่อน แล้วจึงเพิ่ม constraint
 
 <Callout title="ปล่อยให้ฐานข้อมูลเป็นคนปฏิเสธ">
-ทุก constraint ที่คุณเพิ่มคือกฎที่ฐานข้อมูลบังคับใช้แทนคุณ ทุกครั้ง สำหรับผู้เขียนทุกคน ผลักดันกฎความสมบูรณ์ลงไปใน schema แทนที่จะกระจายมันไปทั่วโค้ดของแอปพลิเคชัน แล้วข้อมูลเสีย ๆ ทั้งจำพวกก็จะกลายเป็นสิ่งที่เก็บไม่ได้เลย
+ทุก constraint ที่คุณเพิ่มคือกฎที่ฐานข้อมูลบังคับใช้แทนคุณ ทุกครั้ง สำหรับผู้เขียนทุกคน ผลักดันกฎความสมบูรณ์ลงไปใน schema แทนที่จะกระจายไปทั่วโค้ดแอปพลิเคชัน แล้วข้อมูลเสีย ๆ ทั้งจำพวกก็จะกลายเป็นสิ่งที่เก็บไม่ได้เลย
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | บังคับ invariant ด้วย constraint ในฐานข้อมูล (`CHECK`, `UNIQUE`, `FOREIGN KEY`) | ถูกต้องเสมอไม่ว่า client หรือ service ไหนเขียนข้อมูล | เปลี่ยนกฎทีหลังต้องรัน migration และอาจกระทบ row เดิม |
 | validate เฉพาะใน application code | เปลี่ยนกฎได้เร็ว ไม่ต้องแตะ schema | ข้อมูลเสียหลุดเข้ามาได้ง่ายผ่านสคริปต์ตรง ๆ, service อื่น หรือ migration ที่ลืมเช็ค |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **พึ่งพา validation ระดับแอปพลิเคชันอย่างเดียว** — สคริปต์ ad-hoc, batch job หรือ service อื่นที่เขียนตรงเข้า database สามารถข้าม validation ของแอปได้เสมอ ต้องมี constraint ระดับฐานข้อมูลเป็นด่านสุดท้าย
 - **ลืมกำหนดพฤติกรรม `ON DELETE` ของ foreign key** — โดย default foreign key จะเป็น `ON DELETE NO ACTION` (เทียบเท่า `RESTRICT`) ซึ่ง block การลบ parent row ที่ยังถูกอ้างถึงอยู่ และ raise foreign-key violation ออกมา ไม่ปล่อยให้เกิด orphaned row ดังนั้นความเสี่ยงจริงคือการเผลอเลือก `ON DELETE CASCADE` แล้วลบข้อมูลลูกเกินคาด ส่วน orphaned row ที่ชี้ไปยังของที่ไม่มีอยู่แล้วจะเกิดได้ก็ต่อเมื่อเผลอใช้ `ON DELETE SET NULL` โดยไม่ได้ตั้งใจ หรือ bypass constraint ไปเท่านั้น
 - **เพิ่ม `UNIQUE` constraint บน table ที่เขียนหนักโดยไม่คิดเรื่อง index** — `UNIQUE` สร้าง index ให้อัตโนมัติ ซึ่งเพิ่มต้นทุนทุกครั้งที่ insert/update บน table ที่มี write volume สูง ต้องวางแผนล่วงหน้า
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **แพลตฟอร์ม e-commerce** — มักใช้ `CHECK (price >= 0)` และ foreign key ระหว่าง orders กับ customers ที่ระดับฐานข้อมูล เพื่อไม่ให้ web app, batch job หรือสคริปต์ของแอดมินตัวไหนเขียนข้อมูลที่ไม่สอดคล้องกันเข้าไปได้เลย
 >

@@ -11,13 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-table บาง table โตขึ้นไม่มีขีดจำกัด table ของ event, log line, หรือค่าจาก sensor สามารถถึงพันล้าน row ได้ และเมื่อขนาดเท่านั้นทุกอย่างก็ยากขึ้น: index พองตัว, งาน maintenance รันเป็นชั่วโมง, และการลบข้อมูลเก่าก็ lock table ไว้นานแสนนาน **Partitioning** จัดการเรื่องนี้ด้วยการแบ่ง table เชิงตรรกะขนาดมหึมาหนึ่ง table ออกเป็น table ทางกายภาพที่เล็กกว่าหลาย table ในขณะที่ query ของคุณยังคงเห็น table เดียว
+table บาง table โตขึ้นไม่มีขีดจำกัด table ของ event, log line, หรือค่าจาก sensor สามารถถึงพันล้าน row ได้ และเมื่อขนาดเท่านั้นทุกอย่างก็ยากขึ้น: index พองตัว, งาน maintenance รันเป็นชั่วโมง, และการลบข้อมูลเก่าก็ lock table ไว้นานแสนนาน **Partitioning** จัดการเรื่องนี้ด้วยการแบ่ง table เชิงตรรกะขนาดมหึมาหนึ่ง table ออกเป็น table ทางกายภาพที่เล็กกว่าหลาย table โดยที่ query ของคุณยังเห็นเป็น table เดียวเหมือนเดิม
 
-**Declarative partitioning** ของ PostgreSQL ให้คุณกำหนดกฎการแบ่งเพียงครั้งเดียว คุณเขียนและอ่านจาก table parent ตามปกติ และเซิร์ฟเวอร์จะ route แต่ละ row ไปยัง partition ที่ถูกต้องโดยทำเบื้องหลัง
+**Declarative partitioning** ของ PostgreSQL ให้คุณกำหนดกฎการแบ่งเพียงครั้งเดียว คุณเขียนและอ่านจาก table parent ตามปกติ และ server จะ route แต่ละ row ไปยัง partition ที่ถูกต้องให้เองเบื้องหลัง
 
 ## table เชิงตรรกะหนึ่ง partition จำนวนมาก
 
-คุณประกาศ table parent ให้เป็นแบบ partitioned แล้วให้ **partition key** แก่มัน — column ที่ค่าของมันตัดสินว่า row หนึ่งเป็นของ partition ใด parent เองไม่ถือข้อมูลใด ๆ มันเป็นชั้น routing ที่อยู่เหนือ child partition ของมัน
+คุณประกาศ table parent ให้เป็นแบบ partitioned แล้วกำหนด **partition key** ให้ — column ที่ค่าในนั้นตัดสินว่า row หนึ่งไปอยู่ partition ไหน ตัว parent เองไม่เก็บข้อมูลเลย แต่ทำหน้าที่เป็นชั้น routing อยู่เหนือ child partition
 
 export const partDiagram = `flowchart TD
   Parent[events - logical parent table] --> P1[events_2024_q1]
@@ -64,7 +64,7 @@ INSERT INTO events (created_at, kind, payload)
 VALUES ('2024-02-14', 'signup', '{"plan": "pro"}');
 ```
 
-ข้อสังเกตเกี่ยวกับ partition key: มันต้องเป็นส่วนหนึ่งของ primary key บน table ที่ partition ซึ่งเป็นเหตุผลที่ตัวอย่างใช้ `GENERATED ALWAYS AS IDENTITY` โดยไม่มี `PRIMARY KEY` แบบเดี่ยวบน `id` เพียงตัวเดียว
+ข้อสังเกตเกี่ยวกับ partition key: ต้องเป็นส่วนหนึ่งของ primary key บน table ที่ partition ไว้ จึงเป็นเหตุผลที่ตัวอย่างใช้ `GENERATED ALWAYS AS IDENTITY` โดยไม่มี `PRIMARY KEY` แบบเดี่ยวบน `id` เพียงตัวเดียว
 
 ## list และ hash partitioning
 
@@ -114,40 +114,40 @@ WHERE created_at >= '2024-02-01' AND created_at < '2024-03-01';
 
 ## partitioning ช่วยเมื่อใด
 
-Partitioning ไม่ได้มาฟรี: มี table ให้จัดการมากขึ้น มีชั้น routing ในทุกการเขียน และ query ที่มองข้าม key อาจช้าลงได้ มันคุ้มค่าเมื่อ:
+Partitioning ไม่ได้มาฟรี: มี table ให้จัดการมากขึ้น มีชั้น routing ในทุกการเขียน และ query ที่มองข้าม key อาจช้าลงได้ จะคุ้มค่าก็ต่อเมื่อ:
 
 - table ใหญ่จริง ๆ — คิดถึงหลายร้อยล้าน row ขึ้นไป
 - query ส่วนใหญ่กรองบนมิติเดียวที่คุณ partition ตามได้ ซึ่งโดยปกติคือเวลา
 - คุณทิ้งข้อมูลเก่าเป็นกลุ่มก้อน การ detach หรือ drop ทั้ง partition แทบจะทันที เทียบกับ `DELETE` ที่ scan และ lock หลายล้าน row
 
-ไม่กี่ล้าน row พร้อม index ที่ดีไม่ต้องการ partitioning การเพิ่มมันเร็วเกินไปก็แค่ซื้อความซับซ้อนมาโดยไม่ได้ประโยชน์
+ไม่กี่ล้าน row พร้อม index ที่ดีไม่ต้องการ partitioning การรีบใส่ partitioning เร็วเกินไปคือการซื้อความซับซ้อนมาเปล่า ๆ
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - เลือก partition key ให้ตรงกับ query pattern หลักของคุณ ถ้าคุณ query ตามวันที่ ก็ partition ตามวันที่เพื่อให้ pruning ทำงานได้
 - Pruning เกิดขึ้นเฉพาะเมื่อ partition key ปรากฏใน clause `WHERE` เท่านั้น query ที่กรองบนสิ่งอื่นจะ scan ทุก partition
 - สร้าง partition ในอนาคตไว้ล่วงหน้า หรือทำให้เป็นอัตโนมัติ การ insert ที่ไม่มี partition ตรงกันจะล้มเหลว เว้นแต่คุณจะมี default partition
 - การทิ้งข้อมูลเก่าด้วยการ detach หรือ drop ทั้ง partition เร็วและเบากว่า `DELETE` แบบทีละ row อย่างมหาศาล
-- ทำ index บน partition ไม่ใช่แค่บน parent index ที่กำหนดบน parent ที่ partition จะถูกสร้างบนแต่ละ partition โดยอัตโนมัติ ซึ่งเป็นวิธีง่าย ๆ ในการรักษาให้สอดคล้องกัน
+- ทำ index ที่ระดับ partition ไม่ใช่แค่ที่ parent ถ้าสร้าง index ไว้บน parent ที่ partition แล้ว PostgreSQL จะสร้างต่อลงไปในทุก partition ให้อัตโนมัติ เป็นวิธีง่าย ๆ ในการรักษาให้สอดคล้องกัน
 
 <Callout title="table เดิม ปัญหาที่เล็กลง">
-Partitioning ไม่ได้ทำให้ table เล็กลง — ข้อมูลของคุณยังใหญ่เท่าเดิม มันทำให้แต่ละ *operation* เล็กลงด้วยการทำให้แน่ใจว่า query, index, และการ delete เป็นกลุ่มก้อนแตะเฉพาะส่วนที่ต้องการ ทักษะคือการเลือก partition key ที่ตรงกับวิธีที่คุณ query จริง ๆ เพื่อให้ planner ทำ prune ส่วนที่เหลือทิ้งไปได้
+Partitioning ไม่ได้ทำให้ table เล็กลง — ข้อมูลของคุณยังใหญ่เท่าเดิม แต่ทำให้แต่ละ *operation* เล็กลงด้วยการทำให้แน่ใจว่า query, index, และการ delete เป็นกลุ่มก้อนแตะเฉพาะส่วนที่ต้องการ ทักษะคือการเลือก partition key ที่ตรงกับวิธีที่คุณ query จริง ๆ เพื่อให้ planner ทำ prune ส่วนที่เหลือทิ้งไปได้
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | Partitioning table ขนาดใหญ่ | maintenance เร็วขึ้น (vacuum/rebuild index ต่อ partition), drop ข้อมูลเก่าเป็นกลุ่มก้อนได้เกือบทันที | query ต้องออกแบบให้ตรงกับ partition key, มี table ให้จัดการมากขึ้น |
 | ไม่ partition (table เดียว) | query และ schema เรียบง่าย ไม่ต้องคิดเรื่อง partition key | maintenance ช้าลงเรื่อย ๆ เมื่อ table โต, การลบข้อมูลเก่าต้อง `DELETE` ทีละ row |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **Partition table ตั้งแต่ยังเล็ก ทั้งที่ยังไม่ถึงขนาดที่ต้องการ** — ซื้อความซับซ้อนมาโดยไม่ได้ประโยชน์ รอจนกว่า table จะใหญ่จริง ๆ (หลายร้อยล้าน row) ก่อนค่อย partition
 - **เลือก partition key ที่ query ส่วนใหญ่ไม่ได้กรองด้วย** — planner ทำ prune ไม่ได้และต้อง scan ทุก partition อยู่ดี เลือก key ให้ตรงกับ query pattern จริง
 - **ลืมสร้าง default partition** — การ insert row ที่ไม่ตรงกับ partition ใดเลยจะล้มเหลวทันที ถ้าไม่มี default partition รองรับไว้
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Instagram** — partition/shard table ขนาดมหึมาอย่าง post หรือ event ตามเวลา หรือ user ID เพื่อให้ drop หรือ archive partition เก่าเป็น operation ระดับ metadata ที่เร็วมาก แทนที่จะต้อง `DELETE` ทีละ row
 >
@@ -168,7 +168,7 @@ export const quizPartitioning = [
     q: 'partition pruning ให้ planner ข้าม partition ได้เฉพาะเมื่อ...',
     options: [
       'table มี partition น้อยกว่าสี่ตัว',
-      'query กรองบน partition key ใน clause WHERE ของมัน',
+      'query กรองด้วย partition key ใน WHERE clause',
       'คุณปิดใช้ index',
       'query ใช้ ORDER BY',
     ],

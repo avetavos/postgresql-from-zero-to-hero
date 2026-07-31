@@ -11,20 +11,20 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ปัญหาที่เจอจริง: ระบบที่มี transaction ทำงานพร้อมกันหลายตัวมักเจอบั๊กที่เกิดเป็นครั้งคราวและสืบสวนยาก เพราะผลลัพธ์ขึ้นอยู่กับจังหวะเวลา เมื่อ transaction หลายตัวทำงานพร้อมกัน พวกมันอาจรบกวนกันในแบบที่ให้ผลลัพธ์น่าประหลาดใจ **isolation level** คือลูกบิดที่ควบคุมว่าหนึ่ง transaction จะถูกปกป้องจากงานที่กำลังดำเนินอยู่ของตัวอื่นมากแค่ไหน หมุนลูกบิดขึ้นจะป้องกัน anomaly ได้มากขึ้น แต่ทำให้ conflict มีโอกาส fail และต้อง retry มากขึ้น
+ปัญหาที่เจอจริง: ระบบที่มี transaction ทำงานพร้อมกันหลายตัวมักเจอบั๊กที่เกิดเป็นครั้งคราวและสืบสวนยาก เพราะผลลัพธ์ขึ้นอยู่กับจังหวะเวลา เมื่อ transaction หลายตัวทำงานพร้อมกัน ก็อาจรบกวนกันจนได้ผลลัพธ์น่าประหลาดใจ **isolation level** คือลูกบิดที่คุมว่า transaction หนึ่งจะถูกกันออกจากงานที่ transaction อื่นกำลังทำอยู่มากแค่ไหน หมุนลูกบิดขึ้นจะป้องกัน anomaly ได้มากขึ้น แต่ทำให้ conflict มีโอกาส fail และต้อง retry มากขึ้น
 
 ## anomaly ต่าง ๆ
 
-มาตรฐาน SQL ตั้งชื่อชุดของปรากฏการณ์ที่ isolation ระดับอ่อนกว่ายอมให้เกิดได้ ระดับต่าง ๆ ของ PostgreSQL ถูกนิยามด้วยว่ามันห้ามปรากฏการณ์ใดบ้าง
+มาตรฐาน SQL ตั้งชื่อชุดของปรากฏการณ์ที่ isolation ระดับอ่อนกว่ายอมให้เกิดได้ ระดับต่าง ๆ ของ PostgreSQL นิยามกันด้วยว่าห้ามปรากฏการณ์ไหนบ้าง
 
 - **dirty read** — การอ่าน row ที่ transaction อื่นเปลี่ยนแปลงแต่ยังไม่ได้ commit PostgreSQL ไม่เคยยอมให้เกิดสิ่งนี้ในระดับใด ๆ
-- **non-repeatable read** — การอ่าน row เดียวกันสองครั้งใน transaction เดียวแล้วได้ค่าที่ committed แตกต่างกัน เพราะ transaction อื่นเปลี่ยนมันในระหว่างนั้น
-- **phantom read** — การรันการค้นหาเดียวกันสองครั้งแล้วพบ row ที่ไม่มีอยู่ในครั้งแรก เพราะ transaction อื่น insert พวกมันเข้ามา
+- **non-repeatable read** — การอ่าน row เดียวกันสองครั้งใน transaction เดียวแล้วได้ค่าที่ committed แตกต่างกัน เพราะ transaction อื่นแก้ค่าไประหว่างนั้น
+- **phantom read** — การรันการค้นหาเดียวกันสองครั้งแล้วพบ row ที่ไม่มีอยู่ในครั้งแรก เพราะ transaction อื่น insert row เข้ามาระหว่างนั้น
 - **write skew** — สอง transaction ต่างก็อ่านชุดของ row ที่ซ้อนทับกัน แล้วต่างก็เขียนตามสิ่งที่ตัวเองอ่าน ให้ผลลัพธ์ที่ลำดับ serial เดี่ยว ๆ ไม่อาจสร้างขึ้นได้
 
 ## สามระดับที่คุณเลือกได้
 
-PostgreSQL มีระดับที่ใช้งานได้สามระดับ (ชื่อมาตรฐานตัวที่สี่คือ Read Uncommitted มีอยู่จริงแต่ที่นี่มันทำงานเหมือน Read Committed เพราะ dirty read ไม่เคยถูกอนุญาต)
+PostgreSQL มีระดับที่ใช้งานได้สามระดับ (ชื่อมาตรฐานตัวที่สี่คือ Read Uncommitted มีอยู่จริงแต่ใน PostgreSQL ทำงานเหมือน Read Committed เพราะไม่เคยอนุญาต dirty read)
 
 ```text
 Isolation level   | Dirty read | Non-repeatable read | Phantom read | Write skew
@@ -34,11 +34,11 @@ Repeatable Read   | No         | No                  | No           | Possible
 Serializable      | No         | No                  | No           | No
 ```
 
-Read Committed คือค่าเริ่มต้น แต่ละคำสั่งในระดับนี้เห็น snapshot ใหม่ของข้อมูลทั้งหมดที่ committed ก่อนคำสั่งนั้นเริ่ม ซึ่งเป็นเหตุที่การอ่านสองครั้งใน transaction เดียวกันให้ค่าไม่ตรงกันได้
+Read Committed คือค่าเริ่มต้น แต่ละคำสั่งในระดับนี้เห็น snapshot ใหม่ของข้อมูลทั้งหมดที่ committed ก่อนคำสั่งนั้นเริ่ม จึงเป็นเหตุผลที่การอ่านสองครั้งใน transaction เดียวกันให้ค่าไม่ตรงกันได้
 
 ## การตั้งระดับ
 
-คุณยกระดับของ transaction ด้วย `SET TRANSACTION ISOLATION LEVEL` สั่งทันทีหลัง `BEGIN` และก่อนที่จะมีการอ่านหรือเขียนข้อมูลใด ๆ driver ต่าง ๆ เปิดเผยแนวคิดเดียวกันนี้ผ่าน transaction options ของพวกมัน
+คุณยกระดับของ transaction ด้วย `SET TRANSACTION ISOLATION LEVEL` สั่งทันทีหลัง `BEGIN` และก่อนที่จะมีการอ่านหรือเขียนข้อมูลใด ๆ driver ต่าง ๆ เปิดเผยแนวคิดเดียวกันนี้ผ่าน transaction options ของแต่ละตัว
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -97,7 +97,7 @@ Read Committed คือค่าเริ่มต้น แต่ละคำ�
 
 ## ระดับหนึ่ง ๆ ตัดสินใจว่าจะยอมให้อะไรได้บ้างอย่างไร
 
-การตัดสินใจมีรูปร่างเดียวกันทุกครั้ง คือเมื่อคำสั่งอ่านข้อมูล ระดับจะกำหนดว่ามันเห็น snapshot ใด และว่าการ commit ที่ขัดแย้งกันโดยคนอื่นจะส่งผลต่อผลลัพธ์ได้หรือไม่
+การตัดสินใจมีรูปร่างเดียวกันทุกครั้ง คือเมื่อคำสั่งอ่านข้อมูล isolation level จะกำหนดว่าคำสั่งนั้นเห็น snapshot ไหน และว่าการ commit ที่ขัดแย้งกันโดยคนอื่นจะส่งผลต่อผลลัพธ์ได้หรือไม่
 
 export const isoFlow = `flowchart TD
   A[Statement reads data] --> B{Isolation level}
@@ -112,7 +112,7 @@ export const isoFlow = `flowchart TD
 
 ## Serializable และการ retry
 
-Serializable คือระดับที่แข็งแกร่งที่สุด PostgreSQL รับประกันว่าผลลัพธ์จะเป็นเสมือน transaction ที่ทำงานพร้อมกันได้รันต่อ ๆ กันตามลำดับใดลำดับหนึ่ง เพื่อทำเช่นนี้ มันเฝ้าระวังรูปแบบที่อันตราย และเมื่อตรวจพบ มันจะ abort transaction หนึ่งด้วย **serialization failure** (SQLSTATE `40001`) นั่นไม่ใช่บั๊ก แต่เป็นระดับที่กำลังทำหน้าที่ของมัน แอปพลิเคชันของคุณต้องจับ error นั้นและรัน transaction ใหม่อีกครั้ง
+Serializable คือระดับที่แข็งแกร่งที่สุด PostgreSQL รับประกันว่าผลลัพธ์จะเป็นเสมือน transaction ที่ทำงานพร้อมกันได้รันต่อ ๆ กันตามลำดับใดลำดับหนึ่ง เพื่อทำแบบนั้น PostgreSQL จะเฝ้าระวังรูปแบบที่อันตราย และเมื่อตรวจพบก็จะ abort transaction หนึ่งด้วย **serialization failure** (SQLSTATE `40001`) นั่นไม่ใช่บั๊ก แต่คือ isolation level ที่กำลังทำหน้าที่ของตัวเอง แอปพลิเคชันของคุณต้องจับ error นั้นและรัน transaction ใหม่อีกครั้ง
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -197,31 +197,31 @@ DETAIL:  Reason code: ...
 HINT:  The transaction might succeed if retried.
 ```
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - Read Committed คือค่าเริ่มต้นที่เหมาะกับ workload ส่วนใหญ่ จงยกระดับเมื่อคุณมี anomaly จริง ๆ ที่ต้องป้องกันเท่านั้น
-- ที่ระดับ Serializable (และ Repeatable Read สำหรับ write conflict) ให้ห่อ transaction ไว้ในลูป retry ที่รันมันใหม่เมื่อเจอ SQLSTATE `40001` เสมอ คำแนะนำใน error ยังบอกคุณเช่นนั้นด้วย
-- ตั้ง isolation level ที่จุดเริ่มต้นสุดของ transaction เมื่อมีการเข้าถึงข้อมูลแล้ว คุณจะเปลี่ยนมันไม่ได้
-- ระดับที่สูงกว่าไม่ได้ "ถูกต้องกว่า" แบบฟรี ๆ มันแลกโอกาส abort ที่สูงขึ้นกับการรับประกันที่แข็งแกร่งขึ้น ดังนั้นจงวัดผลก่อนจะหยิบ Serializable มาใช้ทุกที่
+- ที่ระดับ Serializable (และ Repeatable Read สำหรับ write conflict) ให้ห่อ transaction ไว้ในลูป retry ที่รัน transaction ใหม่เมื่อเจอ SQLSTATE `40001` เสมอ คำแนะนำใน error ยังบอกคุณเช่นนั้นด้วย
+- ตั้ง isolation level ที่จุดเริ่มต้นสุดของ transaction เมื่อมีการเข้าถึงข้อมูลแล้ว คุณจะเปลี่ยนไม่ได้อีก
+- ระดับที่สูงกว่าไม่ได้ "ถูกต้องกว่า" แบบฟรี ๆ แต่แลกโอกาส abort ที่สูงขึ้นกับการรับประกันที่แข็งแกร่งขึ้น ดังนั้นจงวัดผลก่อนจะหยิบ Serializable มาใช้ทุกที่
 
 <Callout title="เลือกระดับที่อ่อนที่สุดที่ยังถูกต้อง">
-isolation คือการตัดทิ้ง anomaly จำเพาะออกไป ไม่ใช่การเข้มงวดให้สุดทาง จงระบุว่า anomaly ใดจะทำให้ตรรกะของคุณพังจริง ๆ เลือกระดับต่ำสุดที่ห้ามมัน และเพิ่มลูป retry หากระดับนั้น abort ได้ ถูกต้องและประหยัด ชนะ เข้มงวดและช้า
+isolation คือการตัดทิ้ง anomaly จำเพาะออกไป ไม่ใช่การเข้มงวดให้สุดทาง จงระบุว่า anomaly ใดจะทำให้ตรรกะของคุณพังจริง ๆ เลือกระดับต่ำสุดที่ห้าม anomaly นั้น และเพิ่มลูป retry หากระดับนั้น abort ได้ ถูกต้องและประหยัด ชนะ เข้มงวดและช้า
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | Serializable (เข้มงวดที่สุด) | ป้องกัน anomaly ได้ครบทุกแบบ รวมถึง write skew ผลลัพธ์เสมือนรันตามลำดับเดียว | throughput ต่ำลง เพราะมี conflict ที่ทำให้ต้อง abort และ retry บ่อยขึ้นภายใต้ contention |
 | Read Committed (ค่าเริ่มต้น) | throughput สูง แทบไม่มี abort จาก isolation conflict | ยอมให้ non-repeatable read, phantom read และ write skew เกิดขึ้นได้ |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **เลือก Serializable ทุกที่ "เพื่อความปลอดภัย" โดยไม่เตรียม retry logic** — Serializable ต้อง abort transaction ด้วย SQLSTATE `40001` เป็นเรื่องปกติ ถ้าไม่มีลูป retry แอปจะพังกลางทาง
 - **ไม่ห่อ transaction ระดับ Serializable ไว้ในลูป retry** — transaction จะ fail ทันทีที่เจอ conflict ครั้งแรกโดยไม่มีโอกาสสำเร็จเลย
 - **คิดว่าระดับที่สูงกว่า "ถูกต้องกว่า" เสมอ** — แต่ละระดับป้องกันเฉพาะ anomaly บางชนิด การเข้าใจว่า anomaly ไหนที่ระดับนั้นป้องกันสำคัญกว่าการเลือกระดับสูงสุดแบบไม่คิด
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **ระบบ ledger ของธนาคาร** — transaction โอนยอดเงินที่กระทบยอดคงเหลือมักรันที่ Serializable โดยเฉพาะ เพื่อป้องกัน write skew ระหว่างสองบัญชีที่อ่าน-เขียนพร้อมกัน ยอมรับ overhead ของการ retry เป็นต้นทุนของความถูกต้อง
 >
@@ -239,7 +239,7 @@ export const quizIso = [
       'ลด isolation level ลงอย่างถาวร',
       'retry ทั้ง transaction ใหม่',
       'เพิกเฉยต่อ error แล้วทำต่อ',
-      'รีสตาร์ทเซิร์ฟเวอร์ฐานข้อมูล',
+      'รีสตาร์ท database server',
     ],
     answer: 1,
   },

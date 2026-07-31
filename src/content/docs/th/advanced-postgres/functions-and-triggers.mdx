@@ -1,6 +1,6 @@
 ---
 title: Functions และ triggers
-description: เขียน PL/pgSQL function เล็ก ๆ ที่คืนค่าด้วย CREATE FUNCTION ... LANGUAGE plpgsql แล้วต่อ trigger เพื่อให้มันรันโดยอัตโนมัติ — เพื่อให้ updated_at เป็นปัจจุบันหรือเพื่อ audit ทุกการ insert
+description: เขียน PL/pgSQL function เล็ก ๆ ที่คืนค่าด้วย CREATE FUNCTION ... LANGUAGE plpgsql แล้วต่อ trigger เพื่อให้รันเองอัตโนมัติ — เพื่อให้ updated_at เป็นปัจจุบันหรือเพื่อ audit ทุกการ insert
 sidebar:
   order: 5
 ---
@@ -11,7 +11,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-จนถึงตอนนี้ตรรกะทุกชิ้นอยู่ในแอปพลิเคชันของคุณ PostgreSQL ก็รันตรรกะเองได้เช่นกัน คือ **function** เป็นบล็อกของโค้ดที่มีชื่อและนำกลับมาใช้ซ้ำได้ซึ่งถูกเก็บไว้ในฐานข้อมูล และ **trigger** เป็นกฎที่สั่งให้ function ทำงานอัตโนมัติทุกครั้งที่ row เปลี่ยนแปลง เมื่อรวมกันแล้วมันทำให้คุณบังคับใช้พฤติกรรมในที่เดียวได้ ไม่ว่าแอปพลิเคชันหรือคนใดจะมาแตะ table นั้น
+จนถึงตอนนี้ตรรกะทุกชิ้นอยู่ในแอปพลิเคชันของคุณ PostgreSQL ก็รันตรรกะเองได้เช่นกัน คือ **function** เป็นบล็อกของโค้ดที่มีชื่อและนำกลับมาใช้ซ้ำได้ซึ่งถูกเก็บไว้ในฐานข้อมูล และ **trigger** เป็นกฎที่สั่งให้ function ทำงานอัตโนมัติทุกครั้งที่ row เปลี่ยนแปลง พอรวมสองอย่างเข้าด้วยกัน คุณก็บังคับใช้พฤติกรรมจากที่เดียวได้ ไม่ว่าแอปพลิเคชันหรือคนใดจะมาแตะ table นั้น
 
 เราทำงานกับ table `products` ที่ติดตามว่าแต่ละ row ถูกเปลี่ยนครั้งล่าสุดเมื่อใด
 
@@ -26,7 +26,7 @@ CREATE TABLE products (
 
 ## PL/pgSQL function เล็ก ๆ
 
-`CREATE FUNCTION` กับ `LANGUAGE plpgsql` นิยาม function ในภาษาเชิงกระบวนการ (procedural language) ของ PostgreSQL PL/pgSQL เพิ่มตัวแปร เงื่อนไข และลูปบนตัว SQL นี่คือ function ที่มุ่งเฉพาะเรื่องซึ่งคืนค่า: มันใช้ส่วนลดเป็นเปอร์เซ็นต์กับราคา
+`CREATE FUNCTION` กับ `LANGUAGE plpgsql` นิยาม function ในภาษาเชิงกระบวนการ (procedural language) ของ PostgreSQL PL/pgSQL เพิ่มตัวแปร เงื่อนไข และลูปบนตัว SQL นี่คือ function เล็ก ๆ ที่ทำงานเดียวและคืนค่า คือใช้ส่วนลดเป็นเปอร์เซ็นต์กับราคา
 
 ```sql
 CREATE FUNCTION apply_discount(price numeric, percent numeric)
@@ -46,7 +46,7 @@ $$;
 CREATE FUNCTION
 ```
 
-ตัว `$$` คือ dollar quoting — มันคั่นเนื้อหา (body) ของ function เพื่อให้คุณไม่ต้อง escape เครื่องหมายคำพูดข้างใน เรียก function เหมือนฟังก์ชันในตัวใด ๆ:
+ตัว `$$` คือ dollar quoting ที่คั่นเนื้อหา (body) ของ function เพื่อให้คุณไม่ต้อง escape เครื่องหมายคำพูดข้างใน เรียก function เหมือนฟังก์ชันในตัวใด ๆ:
 
 ```sql
 SELECT name, price, apply_discount(price, 15) AS sale_price
@@ -63,7 +63,7 @@ FROM products;
 
 ## trigger function
 
-trigger ต้องการ function ที่คืนชนิดพิเศษ `trigger` ภายในมัน record โดยปริยาย `NEW` ถือ row ที่กำลังถูก insert หรือ update และ `OLD` ถือเวอร์ชันก่อนหน้าเมื่อเป็นการ update function นี้ประทับเวลาปัจจุบันลงบน `updated_at` ก่อนที่ row จะถูกเขียน
+trigger ต้องการ function ที่คืนชนิดพิเศษ `trigger` ภายใน function นั้น record โดยปริยายชื่อ `NEW` จะถือ row ที่กำลัง insert หรือ update อยู่ ส่วน `OLD` ถือเวอร์ชันก่อนหน้าเมื่อเป็นการ update ตัวอย่างนี้ประทับเวลาปัจจุบันลงบน `updated_at` ก่อนที่ row จะถูกเขียนจริง
 
 ```sql
 CREATE FUNCTION set_updated_at()
@@ -81,7 +81,7 @@ $$;
 CREATE FUNCTION
 ```
 
-trigger แบบ `BEFORE` ต้อง `RETURN NEW` — row ที่มันคืนคือ row ที่ถูกเก็บจริง ๆ ดังนั้นนี่คือวิธีที่ trigger แก้ไขข้อมูลขาเข้าได้
+trigger แบบ `BEFORE` ต้อง `RETURN NEW` — row ที่ function คืนกลับมาคือ row ที่ถูกเก็บจริง ดังนั้นนี่คือวิธีที่ trigger แก้ไขข้อมูลขาเข้าได้
 
 ## การต่อ trigger
 
@@ -149,7 +149,7 @@ trigger แบบ `AFTER` ทำงานเมื่อ row ถูกเขี�
 
 ## trigger จุดชนวนอย่างไร
 
-ลำดับเป็นแบบเดียวกันเสมอ: คำสั่งเขียนมาถึง PostgreSQL ตรวจพบว่ามันตรงกับเหตุการณ์ของ trigger, trigger function ทำงาน และ operation เดินหน้าต่อด้วยสิ่งที่ function คืนกลับมา
+ลำดับเป็นแบบเดียวกันเสมอ: คำสั่งเขียนมาถึง PostgreSQL ตรวจพบว่าตรงกับเหตุการณ์ของ trigger, trigger function จึงทำงาน และ operation เดินหน้าต่อด้วยสิ่งที่ function คืนกลับมา
 
 export const triggerDiagram = `flowchart TD
   W[INSERT or UPDATE on products] --> E{Matches a trigger event}
@@ -161,31 +161,31 @@ export const triggerDiagram = `flowchart TD
 
 <Mermaid code={triggerDiagram} title="การเขียนจุดชนวน trigger ที่ตรงกัน ซึ่งรัน function" />
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
-- trigger ซ่อนตรรกะจากใครก็ตามที่อ่านโค้ดแอปพลิเคชัน จงบันทึกเอกสารของทุก trigger — ว่ามันทำอะไรและอยู่บน table ใด — เพื่อให้ timestamp ที่อัปเดต "อย่างมหัศจรรย์" ไม่เป็นปริศนา
+- trigger ซ่อนตรรกะจากใครก็ตามที่อ่านโค้ดแอปพลิเคชัน จงบันทึกเอกสารของทุก trigger — ว่าทำอะไรและอยู่บน table ไหน — เพื่อให้ timestamp ที่อัปเดต "อย่างมหัศจรรย์" ไม่เป็นปริศนา
 - ทำให้ function เล็กและมีหน้าที่เดียว function ที่ตรวจสอบ input นั้นทดสอบและนำกลับมาใช้ซ้ำได้ง่าย ส่วน function ที่ทำห้าอย่างไม่เกี่ยวกันจะกลายเป็นความยุ่งเหยิงแบบเดียวกับที่คุณพยายามหลีกเลี่ยง
 - เลือก `BEFORE` เพื่อแก้ไขหรือตรวจสอบ row ขาเข้า (คุณเปลี่ยน `NEW` ได้) และ `AFTER` สำหรับผลข้างเคียงอย่างการ logging ที่ควรเกิดขึ้นเฉพาะเมื่อการเขียนสำเร็จ
 - trigger function แบบ row-level ของ `BEFORE` ต้อง `RETURN NEW` เพื่อปล่อยให้ row ผ่าน การคืน `NULL` จะยกเลิก operation สำหรับ row นั้นอย่างเงียบ ๆ ซึ่งบางครั้งมีประโยชน์แต่ก็ชวนประหลาดใจ
 
 <Callout title="ตรรกะที่รันเสมอ">
-จุดแข็งของ trigger คือมันถูกข้ามไม่ได้ — ทุกการ insert หรือ update จะผ่านมัน ไม่ว่า client ใดเป็นคนเปลี่ยนแปลง จุดแข็งเดียวกันนั้นก็เป็นอันตรายของมัน คือพฤติกรรมไปอยู่ในที่ที่โค้ดแอปพลิเคชันไม่เคยกล่าวถึง จงใช้ trigger สำหรับ invariant ที่คุณต้องการบังคับใช้ทุกที่อย่างแท้จริง และจงเขียนมันบันทึกไว้
+จุดแข็งของ trigger คือข้ามไม่ได้ ทุกการ insert หรือ update ต้องผ่าน trigger เสมอ ไม่ว่า client ตัวไหนเป็นคนแก้ข้อมูล แต่จุดแข็งเดียวกันนี้ก็เป็นอันตราย เพราะพฤติกรรมไปอยู่ในที่ที่โค้ดแอปพลิเคชันไม่เคยพูดถึง ใช้ trigger กับ invariant ที่คุณต้องการบังคับทุกที่จริง ๆ และเขียนบันทึกไว้เสมอ
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | function/trigger ในฐานข้อมูล | บังคับใช้เสมอไม่ว่า client หรือ script ไหนจะเขียน table | อ่าน ทดสอบ และ debug ยากกว่าโค้ดแอปพลิเคชัน มองไม่เห็นจาก codebase ของแอป |
 | logic ในแอปพลิเคชัน | อ่านง่าย เขียน test ได้ตรงไปตรงมา ใช้ version control และ tooling ปกติ | ไม่ถูกบังคับใช้ถ้ามี client หรือ script อื่นเขียนข้อมูลตรง ๆ โดยข้ามแอปนั้นไป |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **ใส่ business logic ที่ซับซ้อนไว้ใน trigger** — logic ที่ซับซ้อนควรอยู่ในแอปพลิเคชันที่คนอ่าน codebase มองเห็นได้ ไม่ใช่ซ่อนอยู่ใน trigger ที่ไม่มีใครนึกถึง
 - **ลืมว่ามี trigger อยู่** — แล้วงงว่าทำไม row เปลี่ยนแปลงโดยที่ไม่มีโค้ดส่วนไหนในแอปสั่งให้เปลี่ยน จงบันทึกเอกสารของทุก trigger ไว้ให้ชัดเจน
-- **เขียน trigger ที่ทำงานช้า** — ทุก insert/update บน table นั้นจะช้าลงตามไปด้วยอย่างเงียบ ๆ เพราะ trigger รันแทรกอยู่ในทุก write ไม่ใช่แค่ query ที่เรียกมันตรง ๆ
+- **เขียน trigger ที่ทำงานช้า** — ทุก insert/update บน table นั้นจะช้าลงตามไปด้วยอย่างเงียบ ๆ เพราะ trigger รันแทรกอยู่ในทุก write ไม่ใช่แค่ query ที่เรียกใช้ตรง ๆ
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Audit logging** — เป็นเหตุผลคลาสสิกที่ทีมใช้ trigger เพราะต้องบันทึกทุกการเปลี่ยนแปลงไม่ว่า client หรือ script ไหนจะเขียน table นั้น ถ้าฝากไว้ที่โค้ดแอปพลิเคชันอย่างเดียว การเขียนที่ข้ามแอปไปจะไม่ถูกบันทึก
 >
@@ -210,10 +210,10 @@ export const quizFunctions = [
   {
     q: 'ทำไม trigger แบบ AFTER จึงเป็นทางเลือกที่ถูกต้องสำหรับการเขียน audit log?',
     options: [
-      'มันรันก่อนการตรวจสอบจึงเร็วกว่า',
-      'มันแก้ไข row ขาเข้าได้',
-      'มันรันเฉพาะเมื่อการเขียนสำเร็จแล้วเท่านั้น',
-      'มันยกเลิก operation โดยค่าตั้งต้น',
+      'รันก่อนการตรวจสอบจึงเร็วกว่า',
+      'แก้ไข row ขาเข้าได้',
+      'รันเฉพาะเมื่อการเขียนสำเร็จแล้วเท่านั้น',
+      'ยกเลิก operation โดยค่าตั้งต้น',
     ],
     answer: 2,
   },

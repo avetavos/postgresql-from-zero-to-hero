@@ -1,6 +1,6 @@
 ---
 title: การ update และ delete
-description: เปลี่ยน row ด้วย UPDATE และลบมันด้วย DELETE — ใช้ WHERE clause เสมอ, ทำไม WHERE ที่หายไปจึงอันตราย และการใช้ RETURNING เพื่อยืนยัน
+description: เปลี่ยน row ด้วย UPDATE และลบด้วย DELETE — ใช้ WHERE clause เสมอ, ทำไม WHERE ที่หายไปจึงอันตราย และการใช้ RETURNING เพื่อยืนยัน
 sidebar:
   order: 4
 ---
@@ -10,7 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-สองคำกริยา CRUD สุดท้ายเปลี่ยนแปลงข้อมูลที่มีอยู่ `UPDATE` ตั้งค่า column ใหม่บน row ที่ตรงกับเงื่อนไข และ `DELETE` ลบ row ที่ตรงกัน ทั้งคู่พึ่งพา `WHERE` clause ที่คุณเรียนมาสำหรับ `SELECT` อย่างมาก — และทั้งคู่กลายเป็นความผิดพลาดที่สร้างความเสียหายหากคุณลืมมัน
+สองคำกริยา CRUD สุดท้ายเปลี่ยนแปลงข้อมูลที่มีอยู่ `UPDATE` ตั้งค่า column ใหม่บน row ที่ตรงกับเงื่อนไข และ `DELETE` ลบ row ที่ตรงกัน ทั้งคู่พึ่งพา `WHERE` clause ที่คุณเรียนมาสำหรับ `SELECT` อย่างมาก — และทั้งคู่กลายเป็นความผิดพลาดที่สร้างความเสียหายหากคุณลืมใส่
 
 เราใช้ table `authors` และ `books` กันต่อไป
 
@@ -62,11 +62,11 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ค่าใหม่สามารถอ้างถึงค่าเก่าได้ ดังที่ `copies_sold + 500` แสดงให้เห็น คุณสามารถตั้งค่าหลาย column พร้อมกันได้โดยคั่นการกำหนดค่าแต่ละอันด้วยเครื่องหมายจุลภาค
 
-**ใน pgAdmin:** รันสิ่งนี้ใน Query Tool แผงข้อความจะรายงานว่า `UPDATE 1` ซึ่งเป็นจำนวน row ที่ถูกเปลี่ยน
+**ใน pgAdmin:** รันสิ่งนี้ใน Query Tool แผงข้อความจะรายงานว่า `UPDATE 1` ที่เป็นจำนวน row ที่ถูกเปลี่ยน
 
 ## การยืนยันการเปลี่ยนแปลงด้วย RETURNING
 
-เช่นเดียวกับ `INSERT` ทั้ง `UPDATE` และ `DELETE` รองรับ `RETURNING` นี่เป็นวิธีที่สะอาดที่สุดในการดูว่า row ใดถูกเปลี่ยนแปลงเป๊ะ ๆ และค่าใหม่ของมันคืออะไร
+เช่นเดียวกับ `INSERT` ทั้ง `UPDATE` และ `DELETE` รองรับ `RETURNING` นี่เป็นวิธีที่สะอาดที่สุดในการดูว่า row ใดถูกเปลี่ยนแปลงเป๊ะ ๆ และค่าใหม่เป็นอะไร
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -237,9 +237,9 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-ภายใน transaction ไม่มีอะไรถาวรจนกว่าคุณจะ `COMMIT` ส่วน `ROLLBACK` จะทิ้งการเปลี่ยนแปลงไป transaction จะมีบทเรียนเต็ม ๆ ของมันเองในภายหลังของคอร์ส
+ภายใน transaction ไม่มีอะไรถาวรจนกว่าคุณจะ `COMMIT` ส่วน `ROLLBACK` จะทิ้งการเปลี่ยนแปลงไป transaction มีบทเรียนเต็ม ๆ ของตัวเองอยู่ช่วงหลังของคอร์ส
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - ใส่ `WHERE` clause บน `UPDATE` และ `DELETE` เสมอ เว้นแต่คุณตั้งใจจริง ๆ ที่จะแตะต้องทุก row การลืม `WHERE` จะเขียนทับหรือล้าง table ทั้งหมดให้ว่างเปล่า
 - แสดงตัวอย่างคำสั่งที่สร้างความเสียหายล่วงหน้าโดยการรัน `SELECT count(*) ... WHERE ...` ที่ตรงกันก่อน เพื่อยืนยันว่าคุณกำลังจะกระทบกี่ row
@@ -248,10 +248,10 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 - `DELETE` อาจล้มเหลวได้ถ้า table อื่นอ้างถึง row นั้นผ่าน foreign key คุณจะกลับมาเจอเรื่องนี้อีกในโมดูล join และความสัมพันธ์
 
 <Callout title="WHERE ไม่ใช่ตัวเลือกในทางปฏิบัติ">
-อุบัติเหตุบน production ที่พบบ่อยที่สุดอันดับหนึ่งกับ SQL คือ `UPDATE` หรือ `DELETE` ที่รันโดยไม่มี `WHERE` clause สร้างความเคยชินให้กล้ามเนื้อจดจำ: พิมพ์ `WHERE` ก่อน แล้วค่อยพิมพ์ค่าทีหลัง เมื่อสงสัย ให้ทำมันภายใน transaction ที่คุณ rollback ได้
+อุบัติเหตุบน production ที่พบบ่อยที่สุดอันดับหนึ่งกับ SQL คือ `UPDATE` หรือ `DELETE` ที่รันโดยไม่มี `WHERE` clause สร้างความเคยชินให้กล้ามเนื้อจดจำ: พิมพ์ `WHERE` ก่อน แล้วค่อยพิมพ์ค่าทีหลัง เมื่อสงสัย ให้ทำใน transaction ที่ rollback ได้
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
@@ -260,13 +260,13 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 | ห่อไว้ใน transaction แล้ว `ROLLBACK` ได้ | มีทางหนีฉุกเฉินก่อน `COMMIT` จริง | ต้องจำเปิด/ปิด transaction และตรวจผลก่อน commit ทุกครั้ง |
 | รันตรง ๆ นอก transaction | เร็ว ไม่ต้องจัดการ transaction | ไม่มีปุ่ม undo ถ้าผลลัพธ์ผิดพลาด |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **รัน `UPDATE`/`DELETE` โดยไม่มี `WHERE` clause** — กระทบทุก row ใน table ทันที ให้สร้างนิสัยพิมพ์ `WHERE` ก่อนแล้วค่อยเติมเงื่อนไข
-- **ไม่ทดสอบเงื่อนไขด้วย `SELECT` ก่อน** — ควรรัน `SELECT count(*) ... WHERE ...` ที่ตรงกันก่อนเสมอ เพื่อยืนยันจำนวน row ที่จะถูกกระทบ ก่อนสลับเป็น `UPDATE`/`DELETE`
+- **ไม่ทดสอบเงื่อนไขด้วย `SELECT` ก่อน** — ควรรัน `SELECT count(*) ... WHERE ...` ที่ตรงกันก่อนเสมอ เพื่อยืนยันจำนวน row ที่จะโดนผลกระทบ ก่อนสลับเป็น `UPDATE`/`DELETE`
 - **คิดว่า `DELETE` คืนพื้นที่ดิสก์ทันที** — `DELETE` แค่ทำเครื่องหมาย row ว่าตายแล้ว การคืนพื้นที่จริงเป็นหน้าที่ของ `VACUUM`
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **กระบวนการเปลี่ยนแปลงข้อมูล production ของ GitLab** — กำหนดให้ dry-run คำสั่ง SQL ที่ทำลายข้อมูล (destructive) ด้วยเวอร์ชัน `SELECT` ก่อนเสมอ แล้วให้ทีมรีวิวจำนวน row ก่อนอนุมัติให้รัน `UPDATE`/`DELETE` จริง
 >

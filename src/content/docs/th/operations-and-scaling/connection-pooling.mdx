@@ -11,15 +11,15 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ปัญหาในโปรดักชันจำนวนมากอย่างน่าประหลาดใจสืบย้อนกลับไปที่ข้อเท็จจริงหนึ่ง: ใน PostgreSQL ทุก client connection ได้รับการรองรับโดย process ของระบบปฏิบัติการของตัวเองบนเซิร์ฟเวอร์ connection ไม่กี่ตัวแทบไม่มีต้นทุนอะไร แต่ไม่กี่พันตัวกินหน่วยความจำและ overhead ในการ scheduling อย่างมาก และเซิร์ฟเวอร์จะช้าลงจนคืบคลานก่อนที่งานที่มีประโยชน์จะหมดลงเสียอีก
+ปัญหาในโปรดักชันจำนวนมากอย่างน่าประหลาดใจสืบย้อนกลับไปที่ข้อเท็จจริงหนึ่ง: ใน PostgreSQL ทุก client connection จะมี process ของระบบปฏิบัติการเป็นของตัวเองอยู่ฝั่ง server ถ้ามีไม่กี่ connection ก็แทบไม่มีต้นทุนอะไร แต่พอถึงหลักพัน จะกินหน่วยความจำและ overhead ในการ scheduling อย่างมาก จน server ช้าลงจนคืบคลานก่อนที่งานจริงจะหมดเสียอีก
 
-**Connection pooling** แก้ปัญหานี้ด้วยการวางคนกลางตัวเล็ก ๆ ไว้ระหว่างแอปพลิเคชันของคุณกับฐานข้อมูล pooler รักษาเซิร์ฟเวอร์ connection จริงจำนวนพอประมาณให้เปิดอยู่และแจกจ่ายให้ client ตามที่ต้องการ ฐานข้อมูลจึงจัดการกับ connection เพียงไม่กี่ตัวเท่านั้น ไม่ว่าจะมี client อยู่กี่ตัวก็ตาม
+**Connection pooling** แก้ปัญหานี้ด้วยการวางคนกลางตัวเล็ก ๆ ไว้ระหว่างแอปพลิเคชันของคุณกับฐานข้อมูล pooler เปิด server connection จริงไว้จำนวนพอประมาณ แล้วแจกจ่ายให้ client ตามที่ต้องการ ฐานข้อมูลจึงจัดการกับ connection เพียงไม่กี่ตัวเท่านั้น ไม่ว่าจะมี client อยู่กี่ตัวก็ตาม
 
 ## ทำไม connection จึงหนัก
 
-เมื่อ client เชื่อมต่อ postmaster ของ PostgreSQL จะ fork backend process เฉพาะตัวขึ้นมาให้บริการมัน process นั้นถือหน่วยความจำสำหรับ cache, sort buffer, และการเก็บบันทึก และระบบปฏิบัติการต้อง schedule มันควบคู่ไปกับ backend อื่น ๆ ทุกตัว connection ที่ว่างก็ยังครอบครอง process อยู่ดี เว็บแอปที่เปิด connection ต่อหนึ่ง request แล้วปล่อยให้ว่างระหว่าง request ก็เสียต้นทุนนั้นซ้ำแล้วซ้ำเล่า
+เมื่อ client เชื่อมต่อ postmaster ของ PostgreSQL จะ fork backend process ขึ้นมาเฉพาะให้ client ตัวนั้น process นี้ถือหน่วยความจำสำหรับ cache, sort buffer และการเก็บบันทึก และระบบปฏิบัติการก็ต้อง schedule process เหล่านี้ควบคู่ไปกับ backend ตัวอื่นทุกตัว ต่อให้ connection ว่างอยู่ ก็ยังกิน process ไปเต็ม ๆ เว็บแอปที่เปิด connection ต่อหนึ่ง request แล้วปล่อยให้ว่างระหว่าง request ก็เสียต้นทุนนั้นซ้ำแล้วซ้ำเล่า
 
-นี่คือเหตุผลที่การติดตั้งเริ่มต้นจำกัด `max_connections` ไว้ที่ตัวเลขต่ำ ๆ เช่น 100 การเพิ่มมันขึ้นไม่ได้ทำให้ปัญหาหายไป — มันแค่ให้คุณสร้าง process ที่แพงได้มากขึ้นเท่านั้น
+นี่คือเหตุผลที่การติดตั้งเริ่มต้นจำกัด `max_connections` ไว้ที่ตัวเลขต่ำ ๆ เช่น 100 การเพิ่มค่านี้ไม่ได้ทำให้ปัญหาหายไป แค่เปิดให้คุณสร้าง process ราคาแพงได้มากขึ้นเท่านั้น
 
 export const heavyDiagram = `flowchart LR
   Cli[Many app clients] -->|hundreds of connections| PG[(PostgreSQL)]
@@ -29,37 +29,37 @@ export const heavyDiagram = `flowchart LR
   PG --> B4[Backend process]
   PG --> B5[Backend process]`;
 
-<Mermaid code={heavyDiagram} title="หากไม่มี pooling client แต่ละตัวจะได้ process ของเซิร์ฟเวอร์เป็นของตัวเอง" />
+<Mermaid code={heavyDiagram} title="หากไม่มี pooling client แต่ละตัวจะได้ process ฝั่ง server เป็นของตัวเอง" />
 
 ## pooler อยู่ตรงกลาง
 
-Pooler อย่าง **PgBouncer** ตั้งอยู่ระหว่าง client กับเซิร์ฟเวอร์ client เชื่อมต่อกับ pooler ซึ่งคุยด้วยได้ในราคาถูก และ pooler รักษาชุดของ connection จริงไปยัง PostgreSQL จำนวนน้อยไว้ เมื่อ client ต้องการฐานข้อมูล pooler จะให้ยืมเซิร์ฟเวอร์ connection แล้วเอากลับมาเพื่อให้ client อีกตัวนำกลับมาใช้ซ้ำได้
+Pooler อย่าง **PgBouncer** ตั้งอยู่ระหว่าง client กับ server ตัว client จะเชื่อมต่อเข้า pooler ซึ่งคุยด้วยได้ในราคาถูก ส่วน pooler ก็เปิด connection จริงไปยัง PostgreSQL ไว้จำนวนน้อย ๆ พอ client ต้องใช้ฐานข้อมูล pooler จะให้ยืม server connection แล้วดึงกลับคืนมาให้ client ตัวอื่นใช้ต่อ
 
 export const poolDiagram = `flowchart LR
   Cli[Thousands of clients] -->|cheap client connections| Pool[PgBouncer pooler]
   Pool -->|few reused server connections| PG[(PostgreSQL)]`;
 
-<Mermaid code={poolDiagram} title="client จำนวนมากใช้เซิร์ฟเวอร์ connection ไม่กี่ตัวร่วมกันผ่าน pooler" />
+<Mermaid code={poolDiagram} title="client จำนวนมากใช้ server connection ไม่กี่ตัวร่วมกันผ่าน pooler" />
 
-ผลลัพธ์น่าทึ่ง: client ของแอปพลิเคชันหนึ่งหมื่นตัวอาจได้รับบริการด้วย PostgreSQL connection จริงเพียงยี่สิบตัว เพราะไม่มี client ตัวใดถือเซิร์ฟเวอร์ connection ไว้ขณะที่มันว่างอยู่
+ผลลัพธ์น่าทึ่ง: client ของแอปพลิเคชันหนึ่งหมื่นตัวอาจได้รับบริการด้วย PostgreSQL connection จริงเพียงยี่สิบตัว เพราะไม่มี client ตัวไหนถือ server connection ค้างไว้ตอนที่ตัวเองว่าง
 
 ## โหมด pooling
 
-PgBouncer มีสามโหมดที่แตกต่างกันตรงที่ *นานแค่ไหน* ที่ client ถือเซิร์ฟเวอร์ connection ที่ยืมมา
+PgBouncer มีสามโหมดที่แตกต่างกันตรงที่ *นานแค่ไหน* ที่ client ถือ server connection ที่ยืมมา
 
-| โหมด        | เซิร์ฟเวอร์ connection ถูกคืนหลังจาก...   | หมายเหตุ                                            |
+| โหมด        | server connection ถูกคืนหลังจาก...   | หมายเหตุ                                            |
 |-------------|-----------------------------------------|----------------------------------------------------|
 | Session     | client ตัดการเชื่อมต่อ                    | ปลอดภัยที่สุด แต่ connection ถูกถือไว้ตลอดทั้ง session |
 | Transaction | แต่ละ transaction commit หรือ roll back  | ตัวเลือกที่ใช้กันทั่วไป; นำกลับมาใช้ซ้ำได้ดีโดยมีข้อแม้หนึ่งข้อ |
 | Statement   | แต่ละ statement เดี่ยว                    | รุนแรงที่สุด; ห้าม transaction ที่มีหลาย statement  |
 
-**Transaction mode** เป็นค่าเริ่มต้นยอดนิยม เซิร์ฟเวอร์ connection ถูกยืมไปเฉพาะช่วงเวลาของ transaction หนึ่งเท่านั้น ระหว่าง transaction มันจึงว่างให้คนอื่นใช้ได้ สิ่งนี้ให้การนำกลับมาใช้ซ้ำที่ยอดเยี่ยมสำหรับ traffic เว็บทั่วไป ที่แต่ละ request เป็น transaction สั้น ๆ
+**Transaction mode** เป็นค่าเริ่มต้นยอดนิยม server connection ถูกยืมไปเฉพาะช่วงของ transaction เดียวเท่านั้น พอจบ transaction ก็ว่างให้คนอื่นใช้ต่อทันที สิ่งนี้ให้การนำกลับมาใช้ซ้ำที่ยอดเยี่ยมสำหรับ traffic เว็บทั่วไป ที่แต่ละ request เป็น transaction สั้น ๆ
 
-ข้อจับใจคือสิ่งใดก็ตามที่ผูกอยู่กับ *session* แทนที่จะเป็น transaction อาจพังได้ เพราะ transaction ถัดไปอาจไปตกบนเซิร์ฟเวอร์ connection คนละตัว Prepared statement, คำสั่ง `SET` ระดับ session, advisory lock, และ `LISTEN`/`NOTIFY` ล้วนสันนิษฐานว่า connection มีความต่อเนื่อง ซึ่ง transaction mode ไม่ได้ให้
+ข้อจับใจคือสิ่งใดก็ตามที่ผูกอยู่กับ *session* แทนที่จะเป็น transaction อาจพังได้ เพราะ transaction ถัดไปอาจไปตกบน server connection คนละตัว ทั้ง prepared statement, คำสั่ง `SET` ระดับ session, advisory lock, และ `LISTEN`/`NOTIFY` ล้วนสันนิษฐานว่า connection มีความต่อเนื่อง ซึ่ง transaction mode ไม่ได้ให้
 
 ## pgbouncer.ini ขั้นต่ำ
 
-PgBouncer ถูกตั้งค่าด้วยไฟล์ INI เล็ก ๆ สิ่งจำเป็นคือฐานข้อมูลใดที่มันอยู่หน้า มันฟังอยู่ที่ไหน และโหมด pooling
+PgBouncer ถูกตั้งค่าด้วยไฟล์ INI เล็ก ๆ สิ่งที่ต้องระบุคือ อยู่หน้าฐานข้อมูลไหน ฟังที่ port ใด และใช้โหมด pooling แบบไหน
 
 ```ini
 [databases]
@@ -75,7 +75,7 @@ max_client_conn = 10000
 default_pool_size = 20
 ```
 
-ในที่นี้ `max_client_conn` คือจำนวน client ที่อาจเชื่อมต่อกับ PgBouncer ได้ ส่วน `default_pool_size` คือจำนวน PostgreSQL connection จริงที่มันรักษาไว้ต่อหนึ่งฐานข้อมูล — เซิร์ฟเวอร์ connection ยี่สิบตัวอยู่หน้า client ได้ถึงหนึ่งหมื่นตัว
+ในที่นี้ `max_client_conn` คือจำนวน client ที่อาจเชื่อมต่อกับ PgBouncer ได้ ส่วน `default_pool_size` คือจำนวน PostgreSQL connection จริงที่ PgBouncer เปิดค้างไว้ต่อหนึ่งฐานข้อมูล — server connection ยี่สิบตัวรองรับ client ได้ถึงหนึ่งหมื่นตัว
 
 ## การเชื่อมต่อผ่าน pooler
 
@@ -128,33 +128,33 @@ default_pool_size = 20
   </TabItem>
 </Tabs>
 
-**ใน pgAdmin:** ลงทะเบียนเซิร์ฟเวอร์ connection ใหม่ที่ host และ port ชี้ไปที่ PgBouncer (port `6432`) pgAdmin จะปฏิบัติต่อมันเหมือนเซิร์ฟเวอร์ PostgreSQL ตัวใดก็ได้ ซึ่งเป็นวิธีที่สะดวกในการยืนยันว่า pooler เข้าถึงได้
+**ใน pgAdmin:** ลงทะเบียน server connection ใหม่โดยตั้ง host และ port ชี้ไปที่ PgBouncer (port `6432`) pgAdmin จะมองว่าเป็น PostgreSQL server ตัวหนึ่งตามปกติ เป็นวิธีสะดวก ๆ ในการยืนยันว่า pooler เข้าถึงได้
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
-- Transaction mode เป็นคำแนะนำตามปกติ เพราะมันให้การนำ connection กลับมาใช้ซ้ำได้ดีที่สุดสำหรับ request เว็บสั้น ๆ คว้า session mode มาใช้ก็ต่อเมื่อคุณต้องการความต่อเนื่องของ session จริง ๆ เท่านั้น
+- Transaction mode เป็นคำแนะนำตามปกติ เพราะให้การนำ connection กลับมาใช้ซ้ำได้ดีที่สุดสำหรับ request เว็บสั้น ๆ คว้า session mode มาใช้ก็ต่อเมื่อคุณต้องการความต่อเนื่องของ session จริง ๆ เท่านั้น
 - ใน transaction mode ให้หลีกเลี่ยงฟีเจอร์ที่กินข้าม transaction บน connection เดียว — server-side prepared statement, `SET` ระดับ session, advisory lock, และ `LISTEN`/`NOTIFY` อาจทำงานผิดปกติได้ driver จำนวนมากมีการตั้งค่าให้ปิด server-side prepared statement ด้วยเหตุผลนี้
-- Pooler ไม่ได้มาแทน connection pool ของ driver เอง คุณรันทั้งสองได้ แต่ให้กำหนดขนาดมันเพื่อให้ driver ไม่เคยขอมากกว่าที่ pooler จะจ่ายได้
-- ตั้ง `default_pool_size` ตามความจุของเซิร์ฟเวอร์คุณ ไม่ใช่ตามจำนวน client pool เล็กที่ยุ่งอยู่ตลอดดีกว่า pool ใหญ่ที่ท่วมฐานข้อมูล
+- Pooler ไม่ได้มาแทน connection pool ของ driver เอง คุณรันทั้งสองได้ แต่ต้องตั้งขนาดให้ driver ไม่ขอเกินกว่าที่ pooler จ่ายได้
+- ตั้ง `default_pool_size` ตามความจุของ server คุณ ไม่ใช่ตามจำนวน client pool เล็กที่ยุ่งอยู่ตลอดดีกว่า pool ใหญ่ที่ท่วมฐานข้อมูล
 
 <Callout title="ความว่างคือศัตรู">
-แก่นของ pooling คือ connection ของแอปพลิเคชันส่วนใหญ่นั่งว่างอยู่เป็นส่วนใหญ่ของเวลา แต่ PostgreSQL connection ที่ว่างแต่ละตัวก็ยังเสียต้นทุนเป็น process pooler ให้ช่วงเวลาที่ว่างเหล่านั้นถูกแชร์ร่วมกัน คุณไม่ได้เพิ่มความจุให้ฐานข้อมูล — คุณกำลังหยุด client ไม่ให้กักตุนมันไว้ในขณะที่ไม่มีอะไรทำ
+แก่นของ pooling คือ connection ของแอปพลิเคชันส่วนใหญ่นั่งว่างอยู่เป็นส่วนใหญ่ของเวลา แต่ PostgreSQL connection ที่ว่างแต่ละตัวก็ยังเสียต้นทุนเป็น process pooler ทำให้ช่วงว่างเหล่านั้นถูกแชร์กัน คุณไม่ได้เพิ่มความจุให้ฐานข้อมูล แต่กำลังกัน client ไม่ให้กักตุน connection ไว้ตอนที่ไม่มีอะไรทำ
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | Transaction-mode pooling (PgBouncer) | รองรับ client จำนวนมากต่อ PostgreSQL connection จริงหนึ่งตัว ราคาถูกและ scale ได้ | ฟีเจอร์ระดับ session เช่น prepared statement, `SET`, advisory lock ใช้งานไม่ได้อย่างปลอดภัย |
 | Session-mode pooling / ไม่มี pooler เลย | รองรับฟีเจอร์ระดับ session ได้เต็มรูปแบบ เชื่อมต่อตรงไปตรงมา | PostgreSQL connection แพงและมีจำกัด, scale จำนวน client ได้น้อยกว่ามาก |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **มองข้าม connection pooling จนกว่าจะเจอ error `too many connections` ในโปรดักชัน** — ตั้ง pooler ไว้ตั้งแต่ต้น อย่ารอให้ปัญหาเกิดก่อนแล้วค่อยแก้
-- **ใช้ transaction-mode pooling ทั้งที่โค้ดพึ่งพาฟีเจอร์ระดับ session อย่าง `SET` หรือ advisory lock** — ฟีเจอร์เหล่านี้จะพังแบบเงียบ ๆ เพราะ transaction ถัดไปอาจไปตกบนเซิร์ฟเวอร์ connection คนละตัว ตรวจสอบโค้ดก่อนเปลี่ยนโหมด
-- **กำหนดขนาด pool ให้ใหญ่กว่า `max_connections` ที่ฐานข้อมูลรองรับได้จริงมาก** — pool ที่ใหญ่เกินไปแค่ย้ายปัญหาไปกองไว้ที่ฐานข้อมูล ให้กำหนดขนาดตามความจุจริงของเซิร์ฟเวอร์
+- **ใช้ transaction-mode pooling ทั้งที่โค้ดพึ่งพาฟีเจอร์ระดับ session อย่าง `SET` หรือ advisory lock** — ฟีเจอร์เหล่านี้จะพังแบบเงียบ ๆ เพราะ transaction ถัดไปอาจไปตกบน server connection คนละตัว ตรวจสอบโค้ดก่อนเปลี่ยนโหมด
+- **กำหนดขนาด pool ให้ใหญ่กว่า `max_connections` ที่ฐานข้อมูลรองรับได้จริงมาก** — pool ที่ใหญ่เกินไปแค่ย้ายปัญหาไปกองไว้ที่ฐานข้อมูล ให้กำหนดขนาดตามความจุจริงของ server
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Supabase** — ให้ pooler (PgBouncer แบบ managed) เป็นค่าเริ่มต้นหน้า PostgreSQL instance ของทุกโปรเจกต์ เพราะแอปพลิเคชัน serverless เปิด connection พร้อมกันได้มากกว่าที่ฐานข้อมูลรองรับโดยตรง
 >
@@ -165,19 +165,19 @@ export const quizPooling = [
     q: 'ทำไม PostgreSQL connection จึงถือว่าหนัก?',
     options: [
       'แต่ละตัวดาวน์โหลดทั้งฐานข้อมูล',
-      'แต่ละตัวได้รับการรองรับโดย process ของระบบปฏิบัติการเฉพาะตัวบนเซิร์ฟเวอร์',
+      'แต่ละตัวมี process ของระบบปฏิบัติการเป็นของตัวเองอยู่ฝั่ง server',
       'แต่ละตัวต้องการดิสก์แยกต่างหาก',
       'แต่ละตัวเปิด TCP port ใหม่บน client',
     ],
     answer: 1,
   },
   {
-    q: 'ในโหมด transaction ของ PgBouncer เซิร์ฟเวอร์ connection ถูกคืนกลับสู่ pool เมื่อใด?',
+    q: 'ในโหมด transaction ของ PgBouncer server connection จะถูกคืนกลับสู่ pool เมื่อไหร่?',
     options: [
       'เมื่อ client ตัดการเชื่อมต่อ',
       'หลังจากแต่ละ statement เดี่ยว',
       'เมื่อ transaction ปัจจุบัน commit หรือ roll back',
-      'ไม่เคย; มันถูกถือไว้ตลอด session',
+      'ไม่เคยคืน เพราะถือไว้ตลอด session',
     ],
     answer: 2,
   },

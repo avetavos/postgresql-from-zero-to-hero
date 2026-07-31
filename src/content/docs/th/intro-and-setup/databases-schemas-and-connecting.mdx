@@ -11,11 +11,11 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-PostgreSQL server เดียวเก็บ table ได้มากกว่าหนึ่งชุด และมันจัดระเบียบพวกมันเป็นชั้น ๆ การเข้าใจการซ้อนกันนี้ — cluster, database, schema, table — ช่วยให้กระจ่างว่าข้อมูลของคุณอยู่ที่ไหนและจะตั้งชื่อมันอย่างไร บทเรียนนี้จะเดินไล่ลงไปทีละชั้นและแสดงวิธีสร้างมัน
+PostgreSQL server เดียวเก็บ table ได้มากกว่าหนึ่งชุด และจัดระเบียบไว้เป็นชั้น ๆ การเข้าใจการซ้อนกันนี้ — cluster, database, schema, table — ช่วยให้กระจ่างว่าข้อมูลของคุณอยู่ที่ไหนและต้องอ้างชื่ออย่างไร บทเรียนนี้จะไล่ลงไปทีละชั้นพร้อมแสดงวิธีสร้างแต่ละชั้น
 
 ## ชั้นต่าง ๆ
 
-server หนึ่งที่รันอยู่เรียกว่า **cluster** cluster หนึ่งบรรจุ **database** หนึ่งหรือมากกว่า ซึ่งแยกออกจากกันอย่างสมบูรณ์: การเชื่อมต่อหนึ่งสื่อสารกับฐานข้อมูลเพียงหนึ่งเดียวในแต่ละครั้ง ภายในแต่ละ database มี **schema** ซึ่งเป็นการจัดกลุ่ม table (และ object อื่น ๆ) ที่มีชื่อ ภายในแต่ละ schema มี **table** เอง แผนภาพแสดงการซ้อนกัน
+server หนึ่งที่รันอยู่เรียกว่า **cluster** cluster หนึ่งบรรจุ **database** หนึ่งหรือมากกว่า ซึ่งแยกออกจากกันอย่างสมบูรณ์: การเชื่อมต่อหนึ่งสื่อสารกับฐานข้อมูลเพียงหนึ่งเดียวในแต่ละครั้ง ภายในแต่ละ database มี **schema** ที่เป็นการจัดกลุ่ม table (และ object อื่น ๆ) ที่มีชื่อ ภายในแต่ละ schema มี **table** เอง แผนภาพแสดงการซ้อนกัน
 
 export const layersDiagram = `flowchart TD
   CL[Cluster: one server] --> DB1[Database: appdb]
@@ -30,7 +30,7 @@ export const layersDiagram = `flowchart TD
 
 ## การสร้าง database
 
-database คือหน่วยของการแยกตัว คุณให้แต่ละแอปพลิเคชันมี database ของตัวเองเพื่อให้ table ของพวกมันไม่ชนกัน การสร้างหนึ่งอันเป็น statement เดียว
+database คือหน่วยของการแยกตัว คุณให้แต่ละแอปพลิเคชันมี database ของตัวเองเพื่อให้ table ของแต่ละแอปไม่ชนกัน การสร้างใช้ statement เดียวจบ
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -63,7 +63,7 @@ database คือหน่วยของการแยกตัว คุณ�
   </TabItem>
 </Tabs>
 
-หากต้องการเริ่มใช้ database ใหม่ คุณเชื่อมต่อใหม่ไปยังมัน ใน `psql` นั่นคือ `\c shop` ส่วนใน driver คุณเปิดการเชื่อมต่อใหม่โดยใช้ `shop` เป็น database ใน connection string คุณไม่สามารถรัน `CREATE DATABASE` ภายใน transaction ได้ ซึ่งเป็นเหตุผลว่าทำไมตัวอย่าง Python จึงเปิด autocommit
+หากต้องการเริ่มใช้ database ใหม่ ให้เชื่อมต่อใหม่เข้าไปที่ database นั้น ใน `psql` คือ `\c shop` ส่วนใน driver คุณเปิดการเชื่อมต่อใหม่โดยใช้ `shop` เป็น database ใน connection string คุณไม่สามารถรัน `CREATE DATABASE` ภายใน transaction ได้ จึงเป็นเหตุผลที่ตัวอย่าง Python เปิด autocommit
 
 ## การสร้าง schema และ schema public
 
@@ -103,7 +103,9 @@ database คือหน่วยของการแยกตัว คุณ�
 
 ## ชื่อแบบ qualified และ search_path
 
-table มีชื่อเต็มแบบ **qualified name** ในรูปแบบ `schema.table` เช่น `billing.invoices` คุณเขียนชื่อแบบ qualified ได้เสมอและ PostgreSQL จะรู้แน่ชัดว่าคุณหมายถึง table ใด เมื่อคุณเขียนชื่อแบบ unqualified อย่าง `invoices` PostgreSQL จะมองผ่าน **search_path** — รายการ schema ที่เรียงลำดับ — และใช้ตัวที่ตรงกันตัวแรก โดย default แล้ว search path จัด `public` ไว้ก่อน ซึ่งเป็นเหตุผลว่าทำไม table ที่คุณสร้างโดยไม่ระบุ schema จึงไปลงที่นั่นและอ่านกลับมาได้ด้วยชื่อเปล่า ๆ ของมัน
+table มีชื่อเต็มแบบ **qualified name** ในรูปแบบ `schema.table` เช่น `billing.invoices` คุณเขียนชื่อแบบ qualified ได้เสมอและ PostgreSQL จะรู้แน่ชัดว่าคุณหมายถึง table ใด
+
+เมื่อคุณเขียนชื่อแบบ unqualified อย่าง `invoices` ตัว PostgreSQL จะไล่ดู **search_path** — รายการ schema ที่เรียงลำดับไว้ — แล้วใช้ตัวที่ตรงกันตัวแรก โดย default แล้ว search path จัด `public` ไว้ก่อน จึงเป็นเหตุผลที่ table ที่คุณสร้างโดยไม่ระบุ schema จะไปลงที่ `public` และเรียกกลับมาได้ด้วยชื่อเปล่า ๆ
 
 คุณตรวจสอบและเปลี่ยน search path สำหรับ session ของคุณได้
 
@@ -149,25 +151,25 @@ table มีชื่อเต็มแบบ **qualified name** ในรูป
 
 ## Role เทียบกับ database
 
-มันง่ายที่จะสับสนระหว่างแนวคิดบัญชีหลักสองอย่าง **database** คือภาชนะสำหรับข้อมูลของคุณ ส่วน **role** คือบัญชีที่เชื่อมต่อและได้รับสิทธิ์ในการกระทำต่อข้อมูลนั้น role เป็นทั้ง user และ group ใน PostgreSQL
+สองแนวคิดนี้สับสนกันได้ง่าย **database** คือภาชนะสำหรับข้อมูลของคุณ ส่วน **role** คือบัญชีที่เชื่อมต่อและได้รับสิทธิ์ในการกระทำต่อข้อมูลนั้น role เป็นทั้ง user และ group ใน PostgreSQL
 
 ทั้งสองแนวคิดเป็นอิสระต่อกัน: role เดียวสามารถเป็นเจ้าของและเชื่อมต่อกับ database หลายอันได้ และ database หนึ่งก็สามารถถูกใช้โดยหลาย role ได้เช่นกัน
 
-ตลอดโมดูลนี้คุณล็อกอินเป็น role `postgres` ซึ่งเป็น superuser ระบบจริงจะสร้าง role ที่จำกัดสิทธิ์ต่อแอปพลิเคชันแทน ซึ่งโมดูล operations จะครอบคลุมเรื่องนั้น
+ตลอดโมดูลนี้คุณล็อกอินเป็น role `postgres` ที่เป็น superuser ระบบจริงจะสร้าง role ที่จำกัดสิทธิ์ต่อแอปพลิเคชันแทน ซึ่งโมดูล operations จะครอบคลุมเรื่องนั้น
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - การเชื่อมต่อมุ่งเป้าไปที่ database เพียงหนึ่งเดียวเสมอ หากต้องการสลับ คุณเชื่อมต่อใหม่
 - database ใหม่มาพร้อม schema `public` ดังนั้น table ที่คุณสร้างโดยไม่ตั้งชื่อ schema จะไปลงที่ `public`
 - ชื่อแบบ unqualified ถูก resolve ผ่าน `search_path` ส่วนรูปแบบ `schema.table` แบบ qualified ไม่กำกวมและปลอดภัยที่สุดในฐานข้อมูลที่ใช้ร่วมกัน
-- `CREATE DATABASE` รันภายใน transaction block ไม่ได้ ดังนั้นเครื่องมือต่าง ๆ จึงต้อง commit มันเดี่ยว ๆ
+- `CREATE DATABASE` รันภายใน transaction block ไม่ได้ ดังนั้นเครื่องมือต่าง ๆ จึงต้อง commit คำสั่งนี้เดี่ยว ๆ
 - role (บัญชี) และ database (ภาชนะข้อมูล) เป็นแนวคิดที่แยกจากกัน อย่าปฏิบัติต่ออันหนึ่งเสมือนเป็นอีกอัน
 
 <Callout title="cluster, database, schema, table">
 ลองนึกภาพสี่ชั้นเป็นกล่องที่ซ้อนกัน: server บรรจุ database, database บรรจุ schema, schema บรรจุ table การรู้ว่าคุณอยู่ในกล่องใดตอบคำถาม "table ของฉันอยู่ที่ไหน?" ได้เกือบทั้งหมด และการเขียนชื่อแบบ qualified `schema.table` ช่วยให้คุณรอดพ้นจากเซอร์ไพรส์ของ search_path
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
@@ -176,13 +178,13 @@ table มีชื่อเต็มแบบ **qualified name** ในรูป
 | ชื่อแบบ qualified (`schema.table`) | ไม่กำกวม อ่านแล้วรู้ทันทีว่า table อยู่ที่ไหน | เขียนยาวกว่า |
 | พึ่ง `search_path` | เขียนสั้น กระชับ | เปราะบาง เพราะผลลัพธ์เปลี่ยนตาม session |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **พึ่ง `search_path` default ใน database ที่ใช้ร่วมกัน** — ถ้ามีหลาย schema ชื่อ table ซ้ำกัน การเขียนชื่อ unqualified อาจ resolve ไปผิด schema โดยไม่มี error แจ้งเตือน
 - **เชื่อมต่อด้วย role `postgres` (superuser) ในสภาพแวดล้อมจริง** — ควรสร้าง role ที่จำกัดสิทธิ์เฉพาะแอปพลิเคชัน เพื่อลดความเสียหายถ้า credential รั่วไหล
 - **ลืมว่า `CREATE DATABASE` รันใน transaction block ไม่ได้** — ถ้ารันผ่าน migration tool หรือ script ที่ wrap ทุกอย่างด้วย transaction จะเจอ error ทันที ต้องแยก statement นี้ออกมา commit เดี่ยว ๆ
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **แพลตฟอร์ม SaaS แบบ multi-tenant** — หลายระบบ (เช่นหลาย setup ของ Rails บน Postgres) เลือกใช้ schema-per-tenant ภายใน database เดียว เพื่อให้ได้ความเป็นส่วนตัวของข้อมูลระดับหนึ่งโดยไม่ต้องดูแล database แยกเป็นร้อยเป็นพันตัว
 >
@@ -208,7 +210,7 @@ export const quizDatabasesSchemas = [
     q: 'role และ database สัมพันธ์กันอย่างไร?',
     options: [
       'role เป็นเพียงอีกชื่อหนึ่งของ database',
-      'พวกมันเป็นอิสระต่อกัน: role คือบัญชี ส่วน database คือภาชนะข้อมูล',
+      'เป็นอิสระต่อกัน role คือบัญชี ส่วน database คือภาชนะข้อมูล',
       'แต่ละ database มีได้เพียงหนึ่ง role',
       'role เก็บข้อมูลและ database เก็บบัญชี',
     ],

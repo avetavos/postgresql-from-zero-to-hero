@@ -1,6 +1,6 @@
 ---
 title: Upsert ด้วย ON CONFLICT
-description: เพิ่ม row หรือ update มันถ้ามีอยู่แล้ว ในคำสั่งเดียว — upsert ของ PostgreSQL ด้วย ON CONFLICT, pseudo-table EXCLUDED และ DO NOTHING
+description: เพิ่ม row ใหม่ หรือ update row เดิมถ้ามีอยู่แล้ว ในคำสั่งเดียว — upsert ของ PostgreSQL ด้วย ON CONFLICT, pseudo-table EXCLUDED และ DO NOTHING
 sidebar:
   order: 5
 ---
@@ -11,7 +11,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-บางครั้งคุณอยากจะ insert row หนึ่ง แต่ถ้ามีตัวที่ตรงกันอยู่แล้ว คุณอยากจะ update มันมากกว่าที่จะล้มเหลว การทำสิ่งนี้ด้วยมือ — ตรวจสอบก่อน แล้วค่อย insert หรือ update — มี race condition: คำขอสองอันสามารถเห็น "ไม่มี row" ทั้งคู่ และพยายาม insert ทั้งคู่ได้ PostgreSQL แก้ปัญหานี้แบบ atomic ด้วย `INSERT ... ON CONFLICT` ซึ่งมักเรียกว่า **upsert** (update บวก insert)
+บางครั้งคุณอยากจะ insert row หนึ่ง แต่ถ้ามีตัวที่ตรงกันอยู่แล้ว คุณอยาก update row เดิมมากกว่าปล่อยให้ล้มเหลว การทำสิ่งนี้ด้วยมือ — ตรวจสอบก่อน แล้วค่อย insert หรือ update — มี race condition: คำขอสองอันสามารถเห็น "ไม่มี row" ทั้งคู่ และพยายาม insert ทั้งคู่ได้ PostgreSQL แก้ปัญหานี้แบบ atomic ด้วย `INSERT ... ON CONFLICT` ซึ่งมักเรียกว่า **upsert** (update บวก insert)
 
 สำหรับตัวอย่างเหล่านี้ ลองจินตนาการว่า table `books` มี unique constraint บน `title` ดังนั้นจึงไม่มีหนังสือสองเล่มที่มี title เหมือนกันเป๊ะ ๆ ได้
 
@@ -34,7 +34,7 @@ export const upsertDiagram = `flowchart TD
 
 ## DO UPDATE ด้วย EXCLUDED
 
-คุณระบุชื่อ column (หรือ constraint) ที่นิยาม conflict แล้วอธิบายว่าจะ update อย่างไร ภายในการ update นั้น table พิเศษ `EXCLUDED` เก็บค่าที่คุณ *พยายาม* จะ insert ไว้ คุณจึงสามารถคัดลอกมันลงใน row ที่มีอยู่ได้
+คุณระบุชื่อ column (หรือ constraint) ที่นิยาม conflict แล้วอธิบายว่าจะ update อย่างไร ภายในการ update นั้น table พิเศษ `EXCLUDED` เก็บค่าที่คุณ *พยายาม* จะ insert ไว้ คุณจึงคัดลอกค่าเหล่านั้นลงใน row เดิมได้
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -117,7 +117,7 @@ export const upsertDiagram = `flowchart TD
 (1 row)
 ```
 
-รันคำสั่งเดียวกันด้วย title ใหม่เอี่ยม แล้วจะไม่มี conflict ดังนั้นมันจึง insert ตามปกติและคืน id ที่ถูกสร้างขึ้นใหม่สด ๆ
+รันคำสั่งเดียวกันด้วย title ใหม่เอี่ยม แล้วจะไม่มี conflict จึง insert ตามปกติและคืน id ที่ถูกสร้างขึ้นใหม่สด ๆ
 
 **ใน pgAdmin:** รันคำสั่งสองครั้งใน Query Tool — การรันครั้งแรก insert ครั้งที่สองชน conflict และ update table Data Output แสดง row ที่ถูกคืนกลับมาในแต่ละครั้ง
 
@@ -174,12 +174,12 @@ export const upsertDiagram = `flowchart TD
   </TabItem>
 </Tabs>
 
-เมื่อ row มีอยู่แล้ว จะไม่มี row ใดได้รับผลกระทบ เมื่อมันเป็นของใหม่ จะมีหนึ่ง row ถูก insert
+เมื่อ row มีอยู่แล้ว จะไม่มี row ใดได้รับผลกระทบ แต่ถ้าเป็น row ใหม่ ก็จะ insert เพิ่มหนึ่ง row
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - upsert ต้องการ unique constraint หรือ unique index เพื่อตรวจจับ conflict `ON CONFLICT (title)` ทำงานได้เพราะ `title` เป็น unique เท่านั้น หากไม่มีสิ่งนั้น PostgreSQL ก็ไม่มีแนวคิดเรื่องข้อมูลซ้ำ
-- table `EXCLUDED` อ้างถึง row ที่คุณพยายาม insert ใช้มันใน `DO UPDATE` เพื่อดึงค่าใหม่เข้าไปใน row ที่มีอยู่
+- table `EXCLUDED` อ้างถึง row ที่คุณพยายาม insert ใช้ใน `DO UPDATE` เพื่อดึงค่าใหม่เข้าไปใน row ที่มีอยู่
 - คุณสามารถเพิ่ม `WHERE` ให้กับ `DO UPDATE` เพื่อ update เฉพาะภายใต้เงื่อนไขบางอย่าง เช่น `DO UPDATE SET copies_sold = EXCLUDED.copies_sold WHERE EXCLUDED.copies_sold > books.copies_sold`
 - `DO NOTHING` คืนค่า row ที่ได้รับผลกระทบเป็นศูนย์เมื่อเกิด conflict ดังนั้นจงตรวจสอบจำนวน row หากคุณจำเป็นต้องรู้ว่า insert เกิดขึ้นจริงหรือไม่
 - จงส่งค่าผ่าน placeholder ตรงนี้ด้วยเช่นกัน upsert ยังคงเป็น `INSERT` และกฎ SQL injection เดียวกันก็ยังใช้ได้
@@ -188,22 +188,22 @@ export const upsertDiagram = `flowchart TD
 ชัยชนะที่แท้จริงของ `ON CONFLICT` คือความเป็น atomic การตรวจสอบแล้วค่อย insert ในโค้ดแอปพลิเคชันอาจแพ้ race ระหว่างคำขอสองอันได้ แต่คำสั่ง upsert เดียวจะ insert หรือ update เพียงครั้งเดียวพอดี โดยมี unique constraint บังคับความถูกต้องให้คุณ
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `INSERT ... ON CONFLICT` | atomic, การเดินทางไป-กลับครั้งเดียว, ไม่มี race condition | ต้องมี unique constraint หรือ unique index ให้ conflict อ้างอิงได้ |
+| `INSERT ... ON CONFLICT` | atomic, round trip เดียว, ไม่มี race condition | ต้องมี unique constraint หรือ unique index ให้ conflict อ้างอิงได้ |
 | ตรวจสอบก่อนแล้วค่อย insert ในโค้ดแอป (check-then-insert) | อ่านง่าย เข้าใจ logic ได้ตรงไปตรงมา | เป็น race condition แบบคลาสสิกเมื่อมีหลาย request พร้อมกัน |
 | `DO UPDATE` เมื่อชน conflict | ข้อมูลถูก sync ให้เป็นค่าล่าสุดเสมอ | overwrite ค่าที่มีอยู่แล้วโดยไม่ตั้งใจได้ถ้าไม่ระวัง |
 | `DO NOTHING` เมื่อชน conflict | ปลอดภัย ไม่เผลอเขียนทับข้อมูลเดิม | ข้อมูลซ้ำจะถูกละเว้นอย่างเงียบ ๆ แม้บางครั้งควรจะ update จริง |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **ใช้ `SELECT` ตรวจสอบว่า row มีอยู่ก่อน แล้วค่อย `INSERT` ในโค้ดแอปพลิเคชัน** — race กันได้เมื่อมีหลาย request พร้อมกันเห็น "ไม่มี row" ทั้งคู่ ให้ใช้ `ON CONFLICT` แทนเพื่อความ atomic
 - **ลืมว่า `ON CONFLICT` ต้องมี unique/exclusion constraint ให้เล็ง** — ถ้า column ที่ระบุใน `ON CONFLICT (...)` ไม่ใช่ unique PostgreSQL จะขึ้น error ทันที
 - **ใช้ `DO NOTHING` ทั้งที่ต้องการให้ row ถูก update** — ทำให้ข้อมูลเก่าค้างอยู่โดยไม่รู้ตัว ต้องเลือกระหว่าง `DO UPDATE` กับ `DO NOTHING` ให้ตรงกับ intent จริง
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **ระบบ checkout ของ e-commerce** — ใช้ `ON CONFLICT` เพื่อสร้าง order แบบ idempotent เมื่อ client retry request ที่ล้มเหลว (เช่น network timeout) โดยไม่สร้าง order ซ้ำซ้อน
 >

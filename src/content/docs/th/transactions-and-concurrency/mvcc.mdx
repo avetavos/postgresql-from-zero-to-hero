@@ -11,18 +11,18 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-isolation level ในบทเรียนก่อนหน้าทั้งหมดตั้งอยู่บนเครื่องยนต์ตัวเดียว คือ **Multi-Version Concurrency Control** หรือ MVCC คำมั่นสัญญาของมันพูดได้ง่ายและทรงพลังในทางปฏิบัติ คือ writer ไม่ block reader และ reader ไม่ block writer รายงานยาว ๆ สามารถอ่านต่อไปได้ในขณะที่การ update หลั่งไหลเข้ามา และไม่มีฝ่ายใดต้องรออีกฝ่าย
+isolation level ในบทเรียนก่อนหน้าทั้งหมดตั้งอยู่บนเครื่องยนต์ตัวเดียว คือ **Multi-Version Concurrency Control** หรือ MVCC คำมั่นของ MVCC พูดง่ายแต่ทรงพลังในทางปฏิบัติ คือ writer ไม่ block reader และ reader ไม่ block writer รายงานยาว ๆ สามารถอ่านต่อไปได้ในขณะที่การ update หลั่งไหลเข้ามา และไม่มีฝ่ายใดต้องรออีกฝ่าย
 
 ## แนวคิดหลัก: ไม่เคยเขียนทับที่เดิม
 
-เมื่อคุณ `UPDATE` row หนึ่ง PostgreSQL ไม่ได้เปลี่ยน byte เดิม มันเขียน **เวอร์ชันใหม่** ของ row และทำเครื่องหมายเวอร์ชันเก่าว่าถูกแทนที่แล้ว ชั่วขณะหนึ่งทั้งสองเวอร์ชันมีอยู่บนดิสก์ transaction หนึ่ง ๆ จะเห็นเวอร์ชันใดขึ้นอยู่กับว่า transaction นั้นเริ่มเมื่อใด
+เมื่อคุณ `UPDATE` row หนึ่ง PostgreSQL ไม่ได้แก้ byte เดิม แต่เขียน **เวอร์ชันใหม่** ของ row และทำเครื่องหมายเวอร์ชันเก่าว่าถูกแทนที่แล้ว ชั่วขณะหนึ่งทั้งสองเวอร์ชันมีอยู่บนดิสก์ transaction หนึ่ง ๆ จะเห็นเวอร์ชันใดขึ้นอยู่กับว่า transaction นั้นเริ่มเมื่อใด
 
-แต่ละเวอร์ชันของ row พก system column ที่ซ่อนอยู่สอง column ซึ่งบันทึกช่วงชีวิตของมัน
+แต่ละเวอร์ชันของ row พก system column ที่ซ่อนอยู่สอง column คอยบันทึกช่วงชีวิตของเวอร์ชันนั้น
 
 - `xmin` — id ของ transaction ที่สร้างเวอร์ชันนี้
-- `xmax` — id ของ transaction ที่ลบหรือแทนที่มัน (เป็นศูนย์ในขณะที่เวอร์ชันยังมีชีวิตอยู่)
+- `xmax` — id ของ transaction ที่ลบหรือแทนที่เวอร์ชันนี้ (เป็นศูนย์ตราบใดที่เวอร์ชันยังมีชีวิตอยู่)
 
-transaction จะเห็นเวอร์ชันหนึ่งก็ต่อเมื่อมันถูกสร้างโดย transaction ที่ committed ไปก่อน snapshot ของ transaction ที่กำลังอ่าน และยังไม่ถูกแทนที่ในมุมมองของ snapshot นั้น
+transaction จะเห็นเวอร์ชันหนึ่งก็ต่อเมื่อเวอร์ชันนั้นถูกสร้างโดย transaction ที่ committed ไปก่อน snapshot ของ transaction ที่กำลังอ่าน และยังไม่ถูกแทนที่ในมุมมองของ snapshot นั้น
 
 ## แต่ละ transaction อ่านจาก snapshot
 
@@ -94,7 +94,7 @@ export const mvccDiagram = `flowchart TD
 
 ## dead tuple และ VACUUM
 
-เวอร์ชันเก่าที่ถูกทิ้งไว้จากการ update และ delete เรียกว่า **dead tuple** เมื่อไม่มี snapshot ของ transaction ที่กำลังทำงานตัวใดต้องการเวอร์ชันนั้นอีกต่อไป มันก็เป็นเพียงพื้นที่ที่เสียเปล่า PostgreSQL ทวงคืนพื้นที่นั้นด้วย **VACUUM** ซึ่งรันอัตโนมัติในเบื้องหลัง (autovacuum) และยังรันด้วยมือได้ด้วย
+เวอร์ชันเก่าที่ถูกทิ้งไว้จากการ update และ delete เรียกว่า **dead tuple** เมื่อไม่มี snapshot ของ transaction ที่กำลังทำงานตัวใดต้องการเวอร์ชันนั้นอีกต่อไป เวอร์ชันนั้นก็เหลือเป็นแค่พื้นที่เสียเปล่า PostgreSQL ทวงคืนพื้นที่นั้นด้วย **VACUUM** ซึ่งรันอัตโนมัติในเบื้องหลัง (autovacuum) และยังรันด้วยมือได้ด้วย
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -136,31 +136,31 @@ export const mvccDiagram = `flowchart TD
 
 **ใน pgAdmin:** คลิกขวาที่ table ในแผนผัง browser แล้วเลือก Maintenance เพื่อรัน `VACUUM` (หรือ `VACUUM ANALYZE`) ผ่านกล่องโต้ตอบแทนการพิมพ์เอง
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - การอ่านธรรมดาไม่จับ row lock ภายใต้ MVCC ถ้าคุณต้องการให้การอ่านจอง row ไว้สำหรับการเขียนที่กำลังจะมา นั่นคือหน้าที่ของ `SELECT ... FOR UPDATE` ในบทเรียน locking
-- transaction ที่รันนานคือศัตรูของการ vacuuming ในขณะที่ transaction ยังเปิดค้าง snapshot ของมันอาจยังต้องการเวอร์ชันเก่า dead tuple จึงถูกลบไม่ได้และ table จะบวม
-- `VACUUM` ทวงคืนพื้นที่เพื่อใช้ซ้ำภายใน table ปกติแล้วมันไม่ลดขนาดไฟล์บนดิสก์ ส่วน `VACUUM FULL` ที่หนักกว่านั้นทำได้ แต่มัน lock table ในขณะที่ทำงาน
-- การ update row เดิมซ้ำ ๆ บ่อย ๆ สร้างหลายเวอร์ชัน จับตา `n_dead_tup` ใน `pg_stat_user_tables` แล้วปล่อยให้ autovacuum ตามทัน หรือปรับจูนมันสำหรับ table ที่ร้อน
+- transaction ที่รันนานคือศัตรูของการ vacuuming ตราบใดที่ transaction ยังเปิดค้าง snapshot ของ transaction นั้นอาจยังต้องการเวอร์ชันเก่า dead tuple จึงถูกลบไม่ได้และ table จะบวม
+- `VACUUM` ทวงคืนพื้นที่เพื่อใช้ซ้ำภายใน table ปกติแล้วไม่ได้ลดขนาดไฟล์บนดิสก์ ส่วน `VACUUM FULL` ที่หนักกว่าทำได้ แต่ต้อง lock table ตลอดเวลาที่ทำงาน
+- การ update row เดิมซ้ำ ๆ บ่อย ๆ สร้างหลายเวอร์ชัน จับตา `n_dead_tup` ใน `pg_stat_user_tables` แล้วปล่อยให้ autovacuum ตามทัน หรือปรับจูน autovacuum เพิ่มสำหรับ table ที่ร้อน
 
 <Callout title="ทำไม SELECT ของคุณจึงไม่เคยรอ">
-เหตุที่ analytics query ที่ช้าและการ update ที่หลั่งไหลสามารถรันด้วยกันได้อย่างมีความสุขก็คือ MVCC reader เห็น snapshot ที่ถูกตรึงไว้ ส่วน writer ต่อท้ายเวอร์ชันใหม่ไว้ข้างเวอร์ชันเก่า ไม่มีใคร block ใคร ราคาที่ต้องจ่ายคือ dead tuple ที่ถูกทิ้งไว้ ซึ่งเป็นเหตุผลที่ VACUUM มีอยู่นั่นเอง
+เหตุที่ analytics query ที่ช้าและการ update ที่หลั่งไหลสามารถรันด้วยกันได้อย่างมีความสุขก็คือ MVCC reader เห็น snapshot ที่ถูกตรึงไว้ ส่วน writer ต่อท้ายเวอร์ชันใหม่ไว้ข้างเวอร์ชันเก่า ไม่มีใคร block ใคร ราคาที่ต้องจ่ายคือ dead tuple ที่ทิ้งไว้ข้างหลัง และนั่นคือเหตุผลที่ VACUUM มีอยู่
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | MVCC (reader ไม่บล็อก writer, writer ไม่บล็อก reader) | concurrency สูงมาก analytics query ยาว ๆ รันพร้อมกับ write load ได้โดยไม่ต้องรอกัน | ต้องเก็บ row เวอร์ชันเก่าไว้เป็น dead tuple ใช้พื้นที่เพิ่มและต้องมี VACUUM คอยเก็บกวาด |
 | lock-based concurrency control (ฐานข้อมูลอื่นบางตัว) | ไม่มี dead tuple สะสม ไม่ต้อง vacuum | reader กับ writer บล็อกกันเอง throughput ต่ำกว่าภายใต้ workload อ่าน-เขียนผสมกัน |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **คิดว่า `UPDATE` เขียนทับ row เดิมแบบไม่มีผลข้างเคียง** — ภายใต้ MVCC `UPDATE` สร้างเวอร์ชันใหม่เสมอและทิ้งเวอร์ชันเก่าไว้เป็น dead tuple ไม่ใช่การเขียนทับ byte เดิม
 - **ไม่รู้ว่า transaction ที่รันนานหน่วง VACUUM ทั้งฐานข้อมูล** — snapshot ของ transaction ที่ยังเปิดอยู่อาจยังต้องการเวอร์ชันเก่า ทำให้ VACUUM ลบ dead tuple ไม่ได้ ไม่ใช่แค่ table ของ transaction นั้นเอง แต่กระทบทั้งระบบ
 - **ลืมว่า `SELECT` อาจกำลังอ่านจาก snapshot เก่า** — ขณะที่ transaction อื่น commit การเปลี่ยนแปลงไปแล้ว transaction ของคุณอาจยังเห็นค่าก่อนหน้า ถ้าตรรกะแอปพลิเคชันคาดหวังค่าล่าสุดเสมอ ต้องออกแบบ isolation level ให้เหมาะสม
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Dashboard และ analytics แบบ real-time** — สามารถรัน query ที่ใช้เวลาหลายวินาทีบน table เดียวกับที่แอปพลิเคชันกำลังเขียนอยู่ตลอดเวลา ได้โดยไม่บล็อกการเขียน เพราะ MVCC ให้แต่ละฝ่ายทำงานจาก snapshot ของตัวเอง นี่เป็นเหตุผลหลักที่หลายทีมเลือก PostgreSQL สำหรับ workload อ่าน-เขียนผสมกัน
 >
@@ -168,9 +168,9 @@ export const mvccDiagram = `flowchart TD
 
 export const quizMvcc = [
   {
-    q: 'ภายใต้ MVCC เกิดอะไรขึ้นกับ row เมื่อเรา UPDATE มัน?',
+    q: 'ภายใต้ MVCC เกิดอะไรขึ้นกับ row เมื่อเราสั่ง UPDATE?',
     options: [
-      'byte ของมันถูกเขียนทับที่เดิม',
+      'byte เดิมถูกเขียนทับที่ตำแหน่งเดิม',
       'เวอร์ชันใหม่ถูกเขียนและเวอร์ชันเก่าถูกทำเครื่องหมายว่าถูกแทนที่',
       'row ถูก lock จนกว่าจะ VACUUM ครั้งถัดไป',
       'table ถูกเขียนใหม่ทั้งหมด',
@@ -190,10 +190,10 @@ export const quizMvcc = [
   {
     q: 'transaction ที่รันนาน ๆ สร้างปัญหาอะไรให้กับ MVCC?',
     options: [
-      'พวกมันทำให้ snapshot เสียหาย',
-      'พวกมันกัน VACUUM ไม่ให้ลบเวอร์ชันเก่าของ row ทำให้เกิดการบวม',
-      'พวกมันปิด autovacuum อย่างถาวร',
-      'พวกมันลด isolation level ลง',
+      'ทำให้ snapshot เสียหาย',
+      'กัน VACUUM ไม่ให้ลบเวอร์ชันเก่าของ row จน table บวม',
+      'ปิด autovacuum อย่างถาวร',
+      'ลด isolation level ลง',
     ],
     answer: 1,
   },

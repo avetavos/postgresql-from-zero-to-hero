@@ -10,13 +10,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-query แบบ `LIKE '%search%'` หา substring ที่ตรงเป๊ะได้ แต่มันไม่เข้าใจภาษา มันบอกไม่ได้ว่า "running" กับ "ran" มีรากศัพท์ร่วมกัน มันไม่ละคำที่ไม่มีความหมายอย่าง "the" และมันจัดอันดับว่า match อันหนึ่งดีกว่าอีกอันไม่ได้ full-text search ของ PostgreSQL แก้ทั้งสามข้อ คือมันย่อข้อความให้เป็นคำค้นที่ถูกทำให้เป็นมาตรฐาน (normalized) จับคู่ query กับคำเหล่านั้น และให้คะแนนว่าแต่ละ row เข้ากันได้ดีแค่ไหน
+query แบบ `LIKE '%search%'` หา substring ที่ตรงเป๊ะได้ แต่ไม่เข้าใจภาษา บอกไม่ได้ว่า "running" กับ "ran" มีรากศัพท์ร่วมกัน ไม่ตัดคำที่ไม่มีความหมายอย่าง "the" ทิ้ง และจัดอันดับไม่ได้ว่า match ไหนดีกว่ากัน full-text search ของ PostgreSQL แก้ครบทั้งสามข้อ โดยย่อข้อความให้เป็นคำค้นที่ทำให้เป็นมาตรฐาน (normalized) แล้วจับคู่ query กับคำเหล่านั้น พร้อมให้คะแนนว่าแต่ละ row เข้ากันได้ดีแค่ไหน
 
-ในบทนี้เราค้นหา table ของ articles ตามเนื้อความ (body text) ของมัน
+ในบทนี้เราค้นหา table ของ articles ตามเนื้อความ (body text)
 
 ## สองชนิดข้อมูลใหม่
 
-full-text search แนะนำสองชนิดข้อมูล `tsvector` คือเอกสารที่ถูกแตกออกเป็น **lexeme** (คำรากศัพท์) ที่ถูกทำให้เป็นมาตรฐานพร้อมตำแหน่งของมัน ส่วน `tsquery` คือนิพจน์การค้นหาของ lexeme ที่รวมกันด้วย operator `&` (and), `|` (or) และ `!` (not)
+full-text search แนะนำสองชนิดข้อมูล `tsvector` คือเอกสารที่ถูกแตกออกเป็น **lexeme** (คำรากศัพท์) ที่ทำให้เป็นมาตรฐานแล้ว พร้อมตำแหน่งของแต่ละคำ ส่วน `tsquery` คือนิพจน์การค้นหาของ lexeme ที่รวมกันด้วย operator `&` (and), `|` (or) และ `!` (not)
 
 ```sql
 CREATE TABLE articles (
@@ -190,9 +190,9 @@ match operator `@@` คืนค่า true เมื่อ `tsvector` ตอบ
 
 ## การทำ index ให้การค้นหา
 
-query ข้างต้นคำนวณ `to_tsvector(body)` ใหม่สำหรับทุก row ในทุกการค้นหา ซึ่งจะช้าลงเมื่อ table โตขึ้น มีสองแพตเทิร์นที่แก้ปัญหานี้ และมันทำงานร่วมกันได้ดี
+query ข้างต้นคำนวณ `to_tsvector(body)` ใหม่สำหรับทุก row ในทุกการค้นหา ซึ่งจะช้าลงเมื่อ table โตขึ้น มีสองแพตเทิร์นที่แก้ปัญหานี้ และใช้ร่วมกันได้ดีด้วย
 
-ข้อแรก เก็บ `tsvector` ไว้ครั้งเดียวใน **generated column** เพื่อให้มันถูกคำนวณตอนเขียน ไม่ใช่ตอนอ่าน:
+ข้อแรก เก็บ `tsvector` ไว้ครั้งเดียวใน **generated column** เพื่อให้คำนวณตอนเขียน ไม่ใช่ตอนอ่าน:
 
 ```sql
 ALTER TABLE articles
@@ -219,33 +219,33 @@ WHERE search @@ plainto_tsquery('english', 'running shoes')
 ORDER BY rank DESC;
 ```
 
-**ใน pgAdmin:** column `search` แบบ generated จะปรากฏใน table เหมือน column อื่น ๆ แต่มันเป็นแบบอ่านอย่างเดียว — คุณแก้ไขค่าของมันโดยตรงไม่ได้เพราะ Postgres ดึงค่ามาจาก `title` และ `body`
+**ใน pgAdmin:** column `search` แบบ generated จะปรากฏใน table เหมือน column อื่น ๆ แต่เป็นแบบอ่านอย่างเดียว คุณแก้ค่าตรง ๆ ไม่ได้เพราะ Postgres ดึงค่ามาจาก `title` และ `body`
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - ส่ง language configuration อย่าง `'english'` เสมอ configuration นี้ควบคุม stemming และ stop word การใช้ผิด (หรือใช้ค่า default `simple` ซึ่งไม่ทำทั้งสองอย่าง) จะเปลี่ยนว่า row ใดจะ match
 - ใช้ configuration เดียวกันทั้งสำหรับ `tsvector` ที่เก็บไว้และสำหรับ query เอกสารที่สร้างด้วย `english` จะไม่ match กับ query ที่ parse ด้วย configuration อื่น
-- คำนวณ `tsvector` ล่วงหน้าใน generated column สำหรับ table ใด ๆ ที่คุณค้นหาซ้ำ ๆ มันย้ายต้นทุนไปอยู่ตอนเขียนและปล่อยให้ GIN index ทำงานของมันได้
-- เลือกฟังก์ชัน query ให้ถูก: `plainto_tsquery` สำหรับ input ดิบจากผู้ใช้ (มัน and คำเข้าด้วยกัน), `to_tsquery` เมื่อคุณต้องการ operator `&`, `|` และ `!` ที่ระบุชัดเจน และ `websearch_to_tsquery` สำหรับวลีในเครื่องหมายคำพูดแบบ Google
+- คำนวณ `tsvector` ล่วงหน้าใน generated column สำหรับ table ใด ๆ ที่คุณค้นหาซ้ำ ๆ วิธีนี้ย้ายต้นทุนไปอยู่ตอนเขียน และปล่อยให้ GIN index ทำงานได้เต็มที่
+- เลือกฟังก์ชัน query ให้ถูก: `plainto_tsquery` สำหรับ input ดิบจากผู้ใช้ (จะ and คำทั้งหมดเข้าด้วยกัน), `to_tsquery` เมื่อคุณต้องการ operator `&`, `|` และ `!` ที่ระบุชัดเจน และ `websearch_to_tsquery` สำหรับวลีในเครื่องหมายคำพูดแบบ Google
 
 <Callout title="Search engine ในกล่อง">
-สำหรับหลายแอปพลิเคชัน full-text search ของ PostgreSQL ตัดความจำเป็นในการมี search service แยกต่างหากออกไป คุณได้ stemming, stop word, boolean query และการจัดอันดับใน SQL ธรรมดา โดยทำ index ด้วย GIN จงหยิบ engine เฉพาะทางมาใช้ก็ต่อเมื่อคุณโตเกินมัน — ไม่ใช่ใช้เป็นค่าตั้งต้น
+สำหรับหลายแอปพลิเคชัน full-text search ของ PostgreSQL ตัดความจำเป็นในการมี search service แยกต่างหากออกไป คุณได้ stemming, stop word, boolean query และการจัดอันดับใน SQL ธรรมดา โดยทำ index ด้วย GIN หยิบ search engine เฉพาะทางมาใช้ก็ต่อเมื่อคุณโตจนเกินขีดของ PostgreSQL แล้ว ไม่ใช่ใช้เป็นค่าตั้งต้น
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | PostgreSQL full-text search | ไม่ต้องดูแล service เพิ่ม ข้อมูลกับ index อยู่ที่เดียวกัน การจัดอันดับ "ดีพอ" สำหรับหลายกรณี | tuning เรื่อง relevance และ faceted search ทำได้จำกัดกว่า engine เฉพาะทาง |
 | Elasticsearch (หรือ search engine แยก) | relevance tuning ละเอียด รองรับ facet และ scale การค้นหาได้ดีกว่ามาก | ต้องรัน service เพิ่ม ต้องดูแลการ sync ข้อมูลระหว่างสอง system |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **หยิบ Elasticsearch มาใช้เป็นค่าเริ่มต้นโดยไม่เช็คก่อน** — หลายระบบมี traffic และความต้องการด้าน relevance ที่ full-text search ของ PostgreSQL รองรับได้สบาย ๆ อยู่แล้ว ลองของที่มีอยู่แล้วก่อนเพิ่ม infrastructure ใหม่
 - **ลืมทำ GIN index บน column `tsvector`** — ไม่มี index แปลว่าทุกการค้นหาต้อง scan ทุก row และคำนวณ `to_tsvector` ใหม่ทุกครั้ง ซึ่งช้าลงเรื่อย ๆ เมื่อ table โต
 - **ไม่อัปเดต search vector เมื่อข้อความต้นทางเปลี่ยน** — ถ้าไม่ใช้ generated column หรือ trigger ที่คอยอัปเดต `tsvector` ให้ตรงกับ `title`/`body` ล่าสุด การค้นหาจะอ้างอิงข้อความเก่าที่ไม่ตรงกับสิ่งที่ผู้ใช้เห็นจริง
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Hasura และ API ที่สร้างบน PostgREST** — มักเปิดใช้ full-text search ของ PostgreSQL ตรง ๆ ผ่าน `tsvector`/`tsquery` แทนที่จะต่อ search service แยก เพราะ query layer เชื่อมกับฐานข้อมูลอยู่แล้ว
 >
@@ -255,10 +255,10 @@ export const quizFts = [
   {
     q: 'to_tsvector ทำอะไรกับวลีอย่าง "The cats were running"?',
     options: [
-      'เก็บมันไว้ตามตัวอักษรเพื่อจับคู่ substring แบบเป๊ะ ๆ',
+      'เก็บข้อความไว้ตามตัวอักษรเพื่อจับคู่ substring แบบเป๊ะ ๆ',
       'ทำให้เป็นมาตรฐานเป็น lexeme ตัด stop word ทิ้งและทำ stemming คำ',
-      'แปลมันเป็นอีกภาษาหนึ่ง',
-      'เข้ารหัสมันเพื่อเก็บอย่างปลอดภัย',
+      'แปลข้อความเป็นอีกภาษาหนึ่ง',
+      'เข้ารหัสข้อความเพื่อเก็บอย่างปลอดภัย',
     ],
     answer: 1,
   },
@@ -271,7 +271,7 @@ export const quizFts = [
     q: 'วิธีที่แนะนำในการทำให้การค้นหา full-text ซ้ำ ๆ เร็วขึ้นคืออะไร?',
     options: [
       'รัน VACUUM ก่อนการค้นหาแต่ละครั้ง',
-      'เก็บ tsvector ใน generated column และเพิ่ม GIN index บนมัน',
+      'เก็บ tsvector ใน generated column แล้วเพิ่ม GIN index ทับ column นั้น',
       'ใช้ LIKE แทน',
       'เพิ่ม B-tree index บน column body',
     ],

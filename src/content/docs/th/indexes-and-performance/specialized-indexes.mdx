@@ -14,7 +14,7 @@ B-tree จัดการ equality, range, การ sort และ prefix match
 
 ## GIN — สำหรับค่าที่บรรจุหลายรายการ
 
-**Generalized Inverted Index** (GIN) สร้างขึ้นสำหรับ column ที่แต่ละ row บรรจุรายการที่ค้นหาได้ *หลายรายการ*: สมาชิกของอาร์เรย์, คีย์และค่าของเอกสาร `jsonb` หรือคำ ("lexemes") ของเอกสาร full-text GIN จับคู่แต่ละรายการเข้ากับ row ที่บรรจุมันอยู่ ดังนั้น "หาทุก row ที่บรรจุรายการนี้" จึงรวดเร็ว
+**Generalized Inverted Index** (GIN) สร้างขึ้นสำหรับ column ที่แต่ละ row บรรจุรายการที่ค้นหาได้ *หลายรายการ*: สมาชิกของอาร์เรย์, คีย์และค่าของเอกสาร `jsonb` หรือคำ ("lexemes") ของเอกสาร full-text GIN จับคู่แต่ละรายการเข้ากับ row ที่บรรจุรายการนั้น ดังนั้น "หาทุก row ที่บรรจุรายการนี้" จึงรวดเร็ว
 
 ```sql
 -- speed up containment queries on a jsonb column
@@ -28,7 +28,7 @@ SELECT * FROM books WHERE metadata @> '{"genre": "fiction"}';
 
 ## GiST — สำหรับข้อมูลเชิงเรขาคณิต ช่วง และเพื่อนบ้านที่ใกล้ที่สุด
 
-**Generalized Search Tree** (GiST) รองรับ query ที่ B-tree แสดงออกไม่ได้: รูปทรงสองรูปซ้อนทับกันไหม, จุดหนึ่งตกอยู่ในกล่องหรือไม่, row ใดอยู่ใกล้ตำแหน่งนี้ที่สุด, ช่วงสองช่วงตัดกันไหม มันเป็นกระดูกสันหลังของชนิดข้อมูลเชิงเรขาคณิต, ชนิดข้อมูลแบบช่วง (range) และส่วนขยาย PostGIS
+**Generalized Search Tree** (GiST) รองรับ query ที่ B-tree แสดงออกไม่ได้: รูปทรงสองรูปซ้อนทับกันไหม, จุดหนึ่งตกอยู่ในกล่องหรือไม่, row ใดอยู่ใกล้ตำแหน่งนี้ที่สุด, ช่วงสองช่วงตัดกันไหม GiST คือกระดูกสันหลังของชนิดข้อมูลเชิงเรขาคณิต, ชนิดข้อมูลแบบช่วง (range) และส่วนขยาย PostGIS
 
 ```sql
 -- index a range column for overlap queries
@@ -42,7 +42,7 @@ SELECT * FROM rooms WHERE booked_during && '[2026-06-01,2026-06-08)'::tsrange;
 
 ## BRIN — สำหรับ table ขนาดมหึมาที่เรียงลำดับโดยธรรมชาติ
 
-**Block Range Index** (BRIN) มีขนาดเล็กจิ๋ว แทนที่จะทำ index ให้ทุก row มันเก็บค่าต่ำสุดและสูงสุดของแต่ละช่วงบล็อก (block range) ของ table มันทำงานได้สวยงามเมื่อค่าของ column เรียงตัวสอดคล้องกับลำดับการจัดเก็บทางกายภาพ — โดยทั่วไปคือ column timestamp บน log แบบ append-only หรือ table events ที่ row ใหม่จะมี timestamp มากกว่าเสมอ
+**Block Range Index** (BRIN) มีขนาดเล็กจิ๋ว แทนที่จะทำ index ให้ทุก row BRIN เก็บแค่ค่าต่ำสุดและสูงสุดของแต่ละช่วงบล็อก (block range) ของ table วิธีนี้ทำงานได้สวยงามเมื่อค่าของ column เรียงตัวสอดคล้องกับลำดับการจัดเก็บทางกายภาพ — โดยทั่วไปคือ column timestamp บน log แบบ append-only หรือ table events ที่ row ใหม่จะมี timestamp มากกว่าเสมอ
 
 ```sql
 -- a tiny index for a massive, time-ordered table
@@ -51,11 +51,11 @@ CREATE INDEX events_created_brin ON events USING brin (created_at);
 SELECT * FROM events WHERE created_at >= '2026-06-01';
 ```
 
-BRIN ใช้พื้นที่เพียงเศษเสี้ยวของ B-tree การแลกเปลี่ยนคือ: มันช่วยได้ก็ต่อเมื่อข้อมูลถูกเรียงลำดับทางกายภาพตาม column ที่ทำ index บนค่าที่กระจายแบบสุ่ม มันแทบจะไร้ประโยชน์
+BRIN ใช้พื้นที่เพียงเศษเสี้ยวของ B-tree ข้อแลกเปลี่ยนคือ BRIN ช่วยได้ก็ต่อเมื่อข้อมูลเรียงทางกายภาพตาม column ที่ทำ index ถ้าค่ากระจายแบบสุ่ม ก็แทบไร้ประโยชน์
 
 ## Hash — สำหรับ equality เท่านั้น
 
-index แบบ **Hash** รองรับ operation เพียงอย่างเดียวเท่านั้น: equality (`=`) มันทำ range หรือการ sort ไม่ได้ การค้นหาแบบ equality ของ B-tree สมัยใหม่นั้นดีมากจน Hash แทบจะไม่ใช่ผู้ชนะที่ชัดเจน แต่มันสามารถใช้พื้นที่น้อยกว่าได้เล็กน้อยสำหรับ column ขนาดใหญ่ที่ใช้ equality อย่างเดียว
+index แบบ **Hash** รองรับ operation เพียงอย่างเดียวเท่านั้น: equality (`=`) ทำ range หรือ sort ไม่ได้ การค้นหาแบบ equality ของ B-tree สมัยใหม่นั้นดีมากจน Hash แทบจะไม่ใช่ผู้ชนะที่ชัดเจน แต่กินพื้นที่น้อยกว่าเล็กน้อยสำหรับ column ขนาดใหญ่ที่ใช้ equality อย่างเดียว
 
 ```sql
 CREATE INDEX books_isbn_hash ON books USING hash (isbn);
@@ -63,7 +63,7 @@ CREATE INDEX books_isbn_hash ON books USING hash (isbn);
 SELECT * FROM books WHERE isbn = '978-0-00-000000-0';
 ```
 
-จงหยิบ Hash มาใช้ก็ต่อเมื่อคุณได้วัดผลแล้วว่ามันชนะ B-tree สำหรับงานที่ใช้ equality ล้วน ๆ มิเช่นนั้นให้ใช้ B-tree เป็นค่าเริ่มต้น
+จงหยิบ Hash มาใช้ก็ต่อเมื่อคุณวัดผลแล้วว่าชนะ B-tree จริง สำหรับงานที่ใช้ equality ล้วน ๆ มิเช่นนั้นให้ใช้ B-tree เป็นค่าเริ่มต้น
 
 ## partial index — ทำ index เฉพาะ row ที่คุณ query
 
@@ -74,7 +74,7 @@ SELECT * FROM books WHERE isbn = '978-0-00-000000-0';
 CREATE INDEX books_active_idx ON books (title) WHERE in_print = true;
 ```
 
-index นี้เหมาะที่สุดเมื่อ query ส่วนใหญ่มี `WHERE in_print = true`; planner สามารถใช้มันได้ และ row ที่ `in_print` เป็น false จะไม่เข้าไปอยู่ใน index เลย
+index นี้เหมาะที่สุดเมื่อ query ส่วนใหญ่มี `WHERE in_print = true`; planner หยิบไปใช้ได้ และ row ที่ `in_print` เป็น false จะไม่เข้าไปอยู่ใน index เลย
 
 ## expression index — ทำ index ให้ค่าที่คำนวณได้
 
@@ -87,7 +87,7 @@ CREATE INDEX authors_lower_name_idx ON authors (lower(name));
 SELECT * FROM authors WHERE lower(name) = 'ada lovelace';
 ```
 
-expression ใน query ต้องตรงกับ expression ที่ทำ index ไว้ทุกประการ planner จึงจะใช้มันได้
+expression ใน query ต้องตรงกับ expression ที่ทำ index ไว้ทุกประการ planner ถึงจะหยิบ index นั้นมาใช้
 
 ## covering index — ตอบ query จาก index เพียงอย่างเดียว
 
@@ -102,11 +102,11 @@ CREATE INDEX books_author_cover_idx
 SELECT title, published FROM books WHERE author_id = 4;
 ```
 
-column ใน `INCLUDE` ถูกเก็บไว้เฉพาะที่ใบ (leaves) ของ index เท่านั้น ไม่ได้ถูกใช้ในการเรียงลำดับ ดังนั้นมันจึงเพิ่มข้อมูลโดยไม่เปลี่ยนพฤติกรรมการค้นหา
+column ใน `INCLUDE` ถูกเก็บไว้เฉพาะที่ใบ (leaves) ของ index เท่านั้น ไม่ได้ใช้ในการเรียงลำดับ จึงเพิ่มข้อมูลได้โดยไม่เปลี่ยนพฤติกรรมการค้นหา
 
 ## การสร้าง index เหล่านี้จาก driver
 
-คำสั่ง `CREATE INDEX` ก็เป็นเพียง SQL ดังนั้น driver ใด ๆ ก็ส่งมันออกไปด้วยวิธีเดียวกัน นี่คือตัวอย่าง GIN ใน driver ต่าง ๆ
+คำสั่ง `CREATE INDEX` ก็เป็นเพียง SQL driver ตัวไหนก็ส่งคำสั่งนี้ออกไปด้วยวิธีเดียวกัน นี่คือตัวอย่าง GIN ใน driver ต่าง ๆ
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -140,33 +140,33 @@ column ใน `INCLUDE` ถูกเก็บไว้เฉพาะที่�
 
 **ใน pgAdmin:** กล่องโต้ตอบ Create Index มี dropdown ของ Access Method ที่แสดงรายการ btree, hash, gin, gist, brin และอื่น ๆ และมีตัวเลือกสำหรับ column `INCLUDE` ดังนั้นคุณจึงสร้าง index เหล่านี้ได้โดยไม่ต้องเขียน SQL ด้วยมือ
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - จงจับคู่ access method ให้เข้ากับรูปแบบของ query: GIN สำหรับ "บรรจุรายการ", GiST สำหรับ "ซ้อนทับหรืออยู่ใกล้", BRIN สำหรับ "ขนาดมหึมาและเรียงลำดับทางกายภาพ", Hash สำหรับ "equality เท่านั้น" และ B-tree สำหรับทุกอย่างที่เหลือ
-- BRIN มีประสิทธิภาพก็ต่อเมื่อลำดับ row ทางกายภาพเป็นไปตาม column ที่ทำ index บนข้อมูลที่ไม่เรียงลำดับ มันจะไม่ช่วยอะไร
-- partial และ expression index เป็น variant ที่คุณนำมาใช้ทับ access method ใด ๆ ได้ ไม่ใช่ชนิดที่แยกต่างหาก จงผสมพวกมัน: partial GIN index นั้นใช้ได้อย่างสมบูรณ์
-- สำหรับ covering index จงระบุ column ค้นหาตามปกติ และวาง column ที่เพียงแค่คืนค่ากลับไว้ใน `INCLUDE` เพื่อไม่ให้มันไปบวม (bloat) ในส่วนของ index ที่ใช้สำหรับการค้นหา
+- BRIN มีประสิทธิภาพก็ต่อเมื่อลำดับ row ทางกายภาพเป็นไปตาม column ที่ทำ index ถ้าข้อมูลไม่เรียงลำดับ BRIN ก็ไม่ช่วยอะไร
+- partial และ expression index เป็น variant ที่คุณนำมาใช้ทับ access method ใด ๆ ได้ ไม่ใช่ชนิดที่แยกต่างหาก ผสมกันได้เลย เช่น partial GIN index ก็ใช้ได้สมบูรณ์
+- สำหรับ covering index จงระบุ column ค้นหาตามปกติ และวาง column ที่เพียงแค่คืนค่ากลับไว้ใน `INCLUDE` เพื่อไม่ให้ไปทำให้ส่วนที่ใช้ค้นหาของ index บวม (bloat)
 
 <Callout title="เฉพาะทาง ไม่ใช่แปลกประหลาด">
-index ส่วนใหญ่ของคุณจะเป็น B-tree ธรรมดา แต่เมื่อคุณเก็บ `jsonb`, ค้นหาอาร์เรย์หรือ full text, ทำงานกับเรขาคณิตหรือช่วง หรือมี table time-series พันล้าน row access method เฉพาะทางจะเปลี่ยน query ที่เป็นไปไม่ได้ให้กลายเป็นเรื่องง่าย การรู้ว่าพวกมันมีอยู่คือคุณค่าครึ่งหนึ่ง จงหยิบมันมาใช้เมื่อ B-tree แสดงคำถามนั้นออกมาไม่ได้
+index ส่วนใหญ่ของคุณจะเป็น B-tree ธรรมดา แต่เมื่อคุณเก็บ `jsonb`, ค้นหาอาร์เรย์หรือ full text, ทำงานกับเรขาคณิตหรือช่วง หรือมี table time-series พันล้าน row access method เฉพาะทางจะเปลี่ยน query ที่เป็นไปไม่ได้ให้กลายเป็นเรื่องง่าย แค่รู้ว่ามีตัวเลือกพวกนี้อยู่ก็ได้ประโยชน์ไปครึ่งทางแล้ว หยิบมาใช้เมื่อ B-tree ตอบคำถามนั้นไม่ได้
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| index เฉพาะทาง (GIN, GiST, BRIN, Hash) | เล็กกว่าและเร็วกว่า B-tree มากสำหรับรูปแบบ query ที่มันถูกออกแบบมาให้รองรับ | ใช้ได้ดีเฉพาะรูปแบบ query ที่ตรงกับมันเท่านั้น เลือกผิดแล้วแทบไม่ช่วยอะไรเลย |
+| index เฉพาะทาง (GIN, GiST, BRIN, Hash) | เล็กกว่าและเร็วกว่า B-tree มากสำหรับรูปแบบ query ที่ออกแบบมารองรับโดยเฉพาะ | ใช้ได้ดีเฉพาะรูปแบบ query ที่ตรงกันเท่านั้น เลือกผิดแล้วแทบไม่ช่วยอะไรเลย |
 | B-tree ทั่วไป | รองรับ equality, range, sort และ prefix match ได้พร้อมกัน เป็นตัวเลือกปลอดภัยเมื่อไม่แน่ใจ | ใหญ่กว่าและช้ากว่า index เฉพาะทางสำหรับงานที่ index เฉพาะทางถนัด เช่น containment ของ `jsonb` |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **ใช้ B-tree กับ column `jsonb`** — B-tree ไม่ช่วย query แบบ containment (`@>`) ได้ดี จงใช้ GIN สำหรับ `jsonb`, อาร์เรย์ หรือ full-text search
 - **ใช้ BRIN บน table ที่ลำดับ row ทางกายภาพไม่สอดคล้องกับ column ที่ทำ index** — BRIN พึ่งพาว่าค่าของ column เรียงตัวตามลำดับการจัดเก็บจริง หากข้อมูลกระจายแบบสุ่ม BRIN แทบไร้ประโยชน์และควรใช้ B-tree แทน
 - **เลือก Hash index โดยไม่ตรวจสอบข้อจำกัด** — Hash รองรับแค่ equality (`=`) เท่านั้น ทำ range query หรือ `ORDER BY` ไม่ได้เลย จงมั่นใจว่า query ของคุณใช้ equality ล้วน ๆ ก่อนเลือก Hash
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
-> **บริษัทที่รัน event/log table ขนาดใหญ่** — table แบบ append-only ที่ row ใหม่มี timestamp มากกว่าเสมอ (เช่น log หรือ event stream) ใช้ BRIN index บน `created_at` เพราะขนาด index เล็กกว่า B-tree มาก ในขณะที่ยังช่วย range query ตามเวลาได้ดี เป็นรูปแบบที่พบทั่วไปในบริษัท analytics ที่รัน PostgreSQL ในสเกลใหญ่
+> **บริษัทที่รัน event/log table ขนาดใหญ่** — table แบบ append-only ที่ row ใหม่มี timestamp มากกว่าเสมอ (เช่น log หรือ event stream) ใช้ BRIN index บน `created_at` เพราะขนาด index เล็กกว่า B-tree มาก แต่ยังช่วย range query ตามเวลาได้ดี เป็นรูปแบบที่พบทั่วไปในบริษัท analytics ที่รัน PostgreSQL ในสเกลใหญ่
 >
 > **แพลตฟอร์มที่มี full-text search และ column `jsonb` เยอะ** — ระบบที่เก็บ metadata แบบยืดหยุ่นใน `jsonb` (เช่น product catalog หรือ document store) พึ่งพา GIN index เพื่อให้ query แบบ containment และ full-text search เร็วพอสำหรับ production
 

@@ -1,6 +1,6 @@
 ---
 title: Window function
-description: จัดอันดับ row และคำนวณยอดสะสมด้วย OVER, PARTITION BY, และ ORDER BY โดยใช้ ROW_NUMBER, RANK, DENSE_RANK, และ SUM() OVER — และดูว่าทำไม window ถึงเก็บ row ไว้ในขณะที่ GROUP BY ยุบมัน
+description: จัดอันดับ row และคำนวณยอดสะสมด้วย OVER, PARTITION BY, และ ORDER BY โดยใช้ ROW_NUMBER, RANK, DENSE_RANK, และ SUM() OVER — และดูว่าทำไม window ถึงเก็บ row ไว้ ส่วน GROUP BY ยุบทิ้ง
 sidebar:
   order: 5
 ---
@@ -11,13 +11,13 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-`GROUP BY` ยุบหลาย row ให้กลายเป็น row สรุป row เดียว และบางครั้งนั่นก็ผิดเป๊ะ ๆ: คุณต้องการทั้งบทสรุป *และ* รายละเอียดต้นฉบับวางเคียงข้างกัน window function ทำเช่นนั้น window function มองไปยังชุดของ row ที่เกี่ยวข้องกับ row ปัจจุบัน — *window* ของมัน — แล้วคำนวณค่าออกมา แต่มันคงทุก row ไว้ในผลลัพธ์ นั่นคือวิธีที่คุณเพิ่มอันดับ, ยอดสะสม, หรือค่าเฉลี่ยต่อกลุ่มเป็น column เพิ่มเติมโดยไม่สูญเสียรายละเอียดใด ๆ
+`GROUP BY` ยุบหลาย row ให้เหลือ row สรุปเพียง row เดียว และบางครั้งนั่นคือสิ่งที่ผิดเป๊ะ ๆ เพราะคุณอยากได้ทั้งบทสรุป *และ* รายละเอียดต้นฉบับวางเคียงกัน งานนี้เป็นของ window function ซึ่งจะมองชุดของ row ที่เกี่ยวข้องกับ row ปัจจุบัน — เรียกว่า *window* — แล้วคำนวณค่าออกมา โดยยังคงทุก row ไว้ในผลลัพธ์ นี่คือวิธีเพิ่มอันดับ, ยอดสะสม หรือค่าเฉลี่ยต่อกลุ่มเข้าไปเป็น column เสริมโดยไม่เสียรายละเอียดใด ๆ
 
 เรายังคงใช้ table `authors`, `books`, และ `sales` ต่อไป
 
 ## OVER clause
 
-คุณเปลี่ยนฟังก์ชันธรรมดาให้กลายเป็น window function โดยการเพิ่ม `OVER` clause ภายในนั้น `PARTITION BY` แบ่ง row ออกเป็นกลุ่ม (เหมือน `GROUP BY` แต่ไม่ยุบมัน) และ `ORDER BY` กำหนดลำดับภายในแต่ละ partition ที่นี่เราใส่หมายเลขให้ยอดขายภายในแต่ละภูมิภาค โดยเรียงจากมากสุดก่อน
+คุณเปลี่ยนฟังก์ชันธรรมดาให้กลายเป็น window function โดยการเพิ่ม `OVER` clause ภายในนั้น `PARTITION BY` แบ่ง row ออกเป็นกลุ่ม (เหมือน `GROUP BY` แต่ไม่ยุบ row ทิ้ง) และ `ORDER BY` กำหนดลำดับภายในแต่ละ partition ที่นี่เราใส่หมายเลขให้ยอดขายภายในแต่ละภูมิภาค โดยเรียงจากมากสุดก่อน
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -161,11 +161,11 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     50  |       6 |   6 |     5
 ```
 
-ดูสอง row ของ 400 สิ `ROW_NUMBER` เรียกมันว่า 2 และ 3, `RANK` เรียกทั้งคู่ว่า 2 แล้วกระโดดไป 4, ส่วน `DENSE_RANK` เรียกทั้งคู่ว่า 2 แล้วไปต่อที่ 3 เลือกตัวที่พฤติกรรมต่อค่าเสมอกันตรงกับที่คุณต้องการ
+ดูสอง row ของ 400 สิ `ROW_NUMBER` ให้เป็น 2 กับ 3, `RANK` เรียกทั้งคู่ว่า 2 แล้วกระโดดไป 4, ส่วน `DENSE_RANK` เรียกทั้งคู่ว่า 2 แล้วไปต่อที่ 3 เลือกตัวที่พฤติกรรมต่อค่าเสมอกันตรงกับที่คุณต้องการ
 
 ## ยอดสะสมด้วย SUM() OVER
 
-เพิ่ม `ORDER BY` ภายใน `OVER` ให้กับ aggregate แล้วมันจะกลายเป็นการคำนวณแบบสะสม: แต่ละ row จะเห็นทั้งตัวมันเองบวกกับทุกอย่างที่อยู่ก่อนหน้ามันตามลำดับ นี่คือวิธีมาตรฐานในการผลิตยอดสะสม
+เพิ่ม `ORDER BY` ภายใน `OVER` ให้กับ aggregate แล้วจะกลายเป็นการคำนวณแบบสะสม คือแต่ละ row จะเห็นทั้งตัวเองบวกกับทุก row ที่อยู่ก่อนหน้าตามลำดับ นี่คือวิธีมาตรฐานในการผลิตยอดสะสม
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -231,9 +231,9 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 column `running` สะสมลงไปในแต่ละภูมิภาคและรีเซ็ตที่ขอบเขตของ partition หากไม่มี `ORDER BY` ภายใน `OVER` คำสั่ง `SUM(copies) OVER (PARTITION BY region)` จะกลับไปแสดงยอดรวมทั้งหมดของภูมิภาคซ้ำในทุก row แทน — เทคนิคที่มีประโยชน์สำหรับการแสดงยอดขายแต่ละรายการเคียงข้างยอดรวมของภูมิภาค
 
-## window เก็บ row ส่วน GROUP BY ยุบมัน
+## window เก็บ row ไว้ ส่วน GROUP BY ยุบทิ้ง
 
-ภาพด้านล่างเปรียบเทียบทั้งสองอย่าง `GROUP BY region` จะคืนสอง row หนึ่ง row ต่อหนึ่งภูมิภาค ส่วน window function แบ่ง partition จาก row ชุดเดียวกันแต่คืนมันทั้งหมด แต่ละ row พกค่าต่อ partition ของมันมาด้วย
+ภาพด้านล่างเปรียบเทียบทั้งสองอย่าง `GROUP BY region` จะคืนสอง row หนึ่ง row ต่อหนึ่งภูมิภาค ส่วน window function แบ่ง partition จาก row ชุดเดียวกันแต่คืนกลับมาครบทุก row โดยแต่ละ row พกค่าประจำ partition ติดมาด้วย
 
 export const windowDiagram = `flowchart TD
   R[All sales rows] --> P1[Partition East]
@@ -245,19 +245,19 @@ export const windowDiagram = `flowchart TD
 
 <Mermaid code={windowDiagram} title="window แบ่ง partition row แต่เก็บไว้ทุก row" />
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - window function ไม่เคยลดจำนวน row ถ้าคุณต้องการหนึ่ง row ต่อหนึ่งกลุ่ม ให้ใช้ `GROUP BY` ถ้าคุณต้องการทุก row พร้อมตัวเลขต่อกลุ่ม ให้ใช้ window
-- `PARTITION BY` ใส่หรือไม่ก็ได้ ละมันไว้แล้วผลลัพธ์ทั้งหมดจะเป็น partition เดียว การจัดอันดับจึงรันข้ามทุก row
+- `PARTITION BY` ใส่หรือไม่ก็ได้ ถ้าไม่ใส่ ผลลัพธ์ทั้งหมดจะนับเป็น partition เดียว การจัดอันดับจึงรันข้ามทุก row
 - `ORDER BY` ภายใน `OVER` ควบคุม window frame และเป็นอิสระจาก `ORDER BY` สุดท้ายของ query เพิ่มตัวด้านนอกเข้าไปด้วยถ้าคุณสนใจลำดับที่ row ถูกคืนกลับมา
 - คุณใช้ window function ใน `WHERE` clause ไม่ได้ เพราะ window ถูกคำนวณหลัง `WHERE` ให้ห่อ query ไว้ใน CTE หรือ subquery แล้วกรองบน column ที่คำนวณแล้วจากข้างนอก
 - เลือก `ROW_NUMBER` สำหรับลำดับที่เข้มงวด, `RANK` เมื่อค่าเสมอกันควรใช้อันดับร่วมกันและทิ้งช่องว่างไว้, และ `DENSE_RANK` เมื่อค่าเสมอกันใช้อันดับร่วมกันโดยไม่มีช่องว่าง
 
 <Callout title="สวิตช์ทางความคิด">
-เมื่อคำขอบอกว่า "สำหรับแต่ละ row ให้แสดงอันดับ / ยอดสะสม / สัดส่วนของกลุ่มของมันด้วย" วลี "สำหรับแต่ละ row" นั้นคือสัญญาณของคุณ: คุณต้องใช้ window function ไม่ใช่ `GROUP BY` เก็บ row ไว้ เพิ่ม column เข้าไป
+เมื่อคำขอบอกว่า "สำหรับแต่ละ row ให้แสดงอันดับ / ยอดสะสม / สัดส่วนของกลุ่มตัวเองด้วย" วลี "สำหรับแต่ละ row" นั้นคือสัญญาณของคุณ: คุณต้องใช้ window function ไม่ใช่ `GROUP BY` เก็บ row ไว้ เพิ่ม column เข้าไป
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
@@ -265,13 +265,13 @@ export const windowDiagram = `flowchart TD
 | Self-join หรือ subquery แทน window function | ทำได้ในฐานข้อมูลที่ไม่รองรับ window function | เขียนยาวกว่า มักช้ากว่า และอ่านยากกว่า |
 | คำนวณอันดับ/ยอดสะสมในโค้ด application | ปรับ logic เองได้อิสระ | ต้องดึงทุก row มาที่ backend ก่อน ไม่ scale กับผลลัพธ์ก้อนใหญ่ |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **ลืมใส่ `PARTITION BY`** — ถ้าละไว้ ผลลัพธ์ทั้งหมดจะกลายเป็น partition เดียว อันดับหรือยอดสะสมจะรันข้ามทั้งผลลัพธ์แทนที่จะรันแยกต่อกลุ่มตามที่ตั้งใจ
 - **สับสนระหว่าง `RANK()` กับ `DENSE_RANK()` และ `ROW_NUMBER()`** — `RANK()` ทิ้งช่องว่างของอันดับไว้หลังค่าที่เสมอกัน `DENSE_RANK()` ไม่ทิ้งช่องว่าง ส่วน `ROW_NUMBER()` ให้เลขไม่ซ้ำกันเสมอแม้ค่าจะเท่ากัน เลือกให้ตรงกับพฤติกรรมที่ต้องการ
 - **ไม่เข้าใจลำดับการประมวลผลของ query** — window function ทำงาน *หลัง* `GROUP BY`/aggregate ในลำดับตรรกะของ query ดังนั้นจึงใช้ window function ใน `WHERE` โดยตรงไม่ได้ ต้องห่อด้วย subquery หรือ CTE ก่อนแล้วค่อยกรองชั้นนอก
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Discord** — activity feed และการจัดอันดับผู้ใช้ที่ active ที่สุดในแต่ละ channel ใช้ `ROW_NUMBER()`/`RANK()` แบบ `PARTITION BY` channel โดยตรงใน SQL แทนที่จะดึงทุกข้อความมาจัดอันดับในโค้ด
 >
@@ -281,10 +281,10 @@ export const quizWindows = [
   {
     q: 'window function ต่างจาก GROUP BY อย่างไร?',
     options: [
-      'มันยุบ row ให้กลายเป็น row สรุป row เดียว',
-      'มันคำนวณค่าต่อหนึ่ง row ในขณะที่เก็บทุก row ไว้ในผลลัพธ์',
-      'มันนับ row ได้เท่านั้น',
-      'มันต้องการ foreign key',
+      'ยุบ row ทั้งหมดให้เหลือ row สรุปเพียง row เดียว',
+      'คำนวณค่าให้ทีละ row โดยยังเก็บทุก row ไว้ในผลลัพธ์',
+      'นับ row ได้อย่างเดียว',
+      'ต้องมี foreign key ก่อน',
     ],
     answer: 1,
   },

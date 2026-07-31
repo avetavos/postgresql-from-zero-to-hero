@@ -11,11 +11,11 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-MVCC ขจัดความจำเป็นในการ lock เพื่ออ่าน แต่การเขียนยังต้องถูกประสานงานอยู่ดี เมื่อสอง transaction ต้องการเปลี่ยน row เดียวกัน ตัวหนึ่งต้องรอให้อีกตัวทำเสร็จ ส่วนใหญ่แล้ว PostgreSQL จับ **row lock** ที่จำเป็นให้คุณในระหว่าง `UPDATE` หรือ `DELETE` แต่บางครั้งคุณก็อยาก lock row ในขณะที่อ่านมัน เพื่อให้ไม่มีใครเปลี่ยนมันได้ก่อนที่คุณจะเปลี่ยน
+MVCC ขจัดความจำเป็นในการ lock เพื่ออ่าน แต่การเขียนยังต้องประสานกันอยู่ดี เมื่อสอง transaction ต้องการเปลี่ยน row เดียวกัน ตัวหนึ่งต้องรอให้อีกตัวทำเสร็จ ส่วนใหญ่แล้ว PostgreSQL จับ **row lock** ที่จำเป็นให้คุณในระหว่าง `UPDATE` หรือ `DELETE` แต่บางครั้งคุณก็อยาก lock row ตั้งแต่ตอนอ่าน เพื่อไม่ให้ใครแก้ row นั้นตัดหน้าคุณ
 
 ## จอง row ด้วย FOR UPDATE
 
-`SELECT ... FOR UPDATE` อ่าน row และ lock มันราวกับว่าคุณกำลังจะ update มัน transaction อื่นใดที่พยายาม update, delete หรือ lock row นั้นด้วยจะต้องรอจนกว่าคุณจะ commit หรือ roll back นี่คือรูปแบบมาตรฐานสำหรับ "อ่านยอดเงิน ตัดสินใจ แล้วเขียนกลับ" โดยไม่เกิด lost update
+`SELECT ... FOR UPDATE` อ่าน row แล้ว lock ไว้เหมือนคุณกำลังจะ update ทันที ทำให้ transaction อื่นที่พยายาม update, delete หรือ lock row เดียวกันต้องรอจนกว่าคุณจะ commit หรือ roll back นี่คือรูปแบบมาตรฐานสำหรับ "อ่านยอดเงิน ตัดสินใจ แล้วเขียนกลับ" โดยไม่เกิด lost update
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -71,11 +71,11 @@ MVCC ขจัดความจำเป็นในการ lock เพื่
   </TabItem>
 </Tabs>
 
-lock คู่หูคือ `FOR SHARE` มันยอมให้คนอื่นอ่านและจับ `FOR SHARE` ได้ด้วย แต่ block ใครก็ตามที่ต้องการ `FOR UPDATE` หรือการเขียน ใช้มันเมื่อคุณต้องรับประกันว่า row จะไม่เปลี่ยนใต้มือคุณ แต่คุณไม่ได้ตั้งใจจะเขียนมันเอง
+lock คู่หูคือ `FOR SHARE` ซึ่งยอมให้คนอื่นอ่านและจับ `FOR SHARE` ได้ด้วย แต่ block ทุกคนที่ต้องการ `FOR UPDATE` หรือจะเขียน ใช้ตอนที่คุณต้องรับประกันว่า row จะไม่เปลี่ยนใต้มือ ทั้งที่ตัวคุณเองไม่ได้ตั้งใจจะเขียน
 
 ## lock wait
 
-เมื่อ transaction ขอ lock ที่อีกตัวถืออยู่ มันก็แค่รอ query ที่กำลังรอจะดูเหมือนค้าง มันจะกลับมาทำงานทันทีที่ผู้ถือ commit หรือ roll back การถือสั้น ๆ มองไม่เห็นจากผู้ใช้ ส่วนการถือนาน ๆ กลายเป็นคิว
+เมื่อ transaction ขอ lock ที่อีกตัวถืออยู่ ก็แค่รอเฉย ๆ query ที่รออยู่จะดูเหมือนค้าง แล้วกลับมาทำงานต่อทันทีที่ผู้ถือ commit หรือ roll back การถือสั้น ๆ มองไม่เห็นจากผู้ใช้ ส่วนการถือนาน ๆ กลายเป็นคิว
 
 ```text
 -- session 2 issues SELECT ... FOR UPDATE on a row session 1 already locked
@@ -92,7 +92,7 @@ export const deadlockCycle = `flowchart LR
 
 <Mermaid code={deadlockCycle} title="วงจร deadlock: แต่ละ transaction รอ lock ที่อีกตัวถืออยู่" />
 
-PostgreSQL รัน deadlock detector อยู่ หลังจาก timeout สั้น ๆ มันจะสังเกตเห็นวงจร เลือก transaction หนึ่งเป็นเหยื่อ และ abort มันด้วย error เพื่อให้อีกตัวทำงานต่อได้ เหยื่อจะเห็น SQLSTATE `40P01` และควร retry ทั้ง transaction ของมัน
+PostgreSQL รัน deadlock detector อยู่ หลังจาก timeout สั้น ๆ ตัว detector จะเห็นวงจร เลือก transaction หนึ่งเป็นเหยื่อ แล้ว abort ทิ้งพร้อม error เพื่อให้อีกตัวทำงานต่อได้ เหยื่อจะเห็น SQLSTATE `40P01` และควร retry transaction นั้นใหม่ทั้งชุด
 
 ```text
 ERROR:  deadlock detected
@@ -102,7 +102,7 @@ HINT:  See server log for query details.
 
 ## เลือกที่จะไม่รอ: NOWAIT และ SKIP LOCKED
 
-บางครั้งการรอเป็นพฤติกรรมที่ผิด ตัวขยายสองตัวเปลี่ยนมันได้ `NOWAIT` ทำให้คำสั่ง fail ทันทีแทนที่จะเข้าคิวหาก row ถูก lock อยู่ ส่วน `SKIP LOCKED` ก้าวข้าม row ที่ถูก lock อย่างเงียบ ๆ และคืนเฉพาะ row ที่มันสามารถ lock ได้ ซึ่งเป็นแกนหลักของรูปแบบ work-queue ที่ worker หลายตัวต่างก็คว้างานว่างตัวถัดไป
+บางครั้งการรอเป็นพฤติกรรมที่ผิด มีตัวขยายสองตัวที่เปลี่ยนพฤติกรรมนี้ได้ `NOWAIT` ทำให้คำสั่ง fail ทันทีแทนที่จะเข้าคิวหาก row ถูก lock อยู่ ส่วน `SKIP LOCKED` ก้าวข้าม row ที่ถูก lock อย่างเงียบ ๆ และคืนเฉพาะ row ที่ lock ได้จริง นี่คือแกนหลักของรูปแบบ work-queue ที่ worker หลายตัวต่างก็คว้างานว่างตัวถัดไป
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -153,20 +153,20 @@ HINT:  See server log for query details.
   </TabItem>
 </Tabs>
 
-**ใน pgAdmin:** เพื่อสังเกต lock wait สด ๆ ให้รัน `BEGIN; SELECT ... FOR UPDATE` ในแท็บ Query Tool หนึ่งโดยไม่ commit แล้วรันอันเดียวกันในแท็บที่สองและดูมันค้าง view `pg_locks` แสดงว่าใครถืออะไรอยู่ในขณะที่คุณทดลอง
+**ใน pgAdmin:** เพื่อสังเกต lock wait สด ๆ ให้รัน `BEGIN; SELECT ... FOR UPDATE` ในแท็บ Query Tool หนึ่งโดยไม่ commit แล้วรันคำสั่งเดียวกันในแท็บที่สองแล้วดูว่าค้าง ส่วน view `pg_locks` จะบอกว่าใครถืออะไรอยู่ระหว่างที่คุณทดลอง
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - lock row ในลำดับที่สอดคล้องกันทุกที่ในโค้ดของคุณ ถ้าทุก transaction แตะ row 1 ก่อน row 2 วงจรที่ก่อให้เกิด deadlock ก็จะไม่มีวันก่อตัวขึ้นได้
 - ปฏิบัติต่อ deadlock error (`40P01`) และ serialization failure (`40001`) แบบเดียวกัน คือ roll back แล้ว retry ทั้ง transaction ทั้งสองเป็นเรื่องที่คาดหมายได้ภายใต้ concurrency
 - ทำให้งานระหว่างการจับ lock กับการ commit สั้นที่สุดเท่าที่จะทำได้ ยิ่งคุณถือ lock นานเท่าใด คนอื่นก็เข้าคิวต่อท้ายคุณนานขึ้นเท่านั้น
-- `SKIP LOCKED` เหมาะอย่างยิ่งสำหรับคิว แต่ผิดสำหรับงานบัญชี มันจงใจเพิกเฉยต่อ row ดังนั้นอย่าใช้มันในที่ที่คุณต้องเห็นทุก row ที่ตรงกัน
+- `SKIP LOCKED` เหมาะอย่างยิ่งสำหรับคิว แต่ผิดสำหรับงานบัญชี เพราะจงใจข้าม row ทิ้ง ดังนั้นอย่าใช้ในงานที่คุณต้องเห็นทุก row ที่ตรงเงื่อนไข
 
 <Callout title="ลำดับ lock ที่สอดคล้องกันป้องกัน deadlock ส่วนใหญ่ได้">
-deadlock ไม่ได้เกิดจากการ lock มากเกินไป แต่เกิดจากการ lock ในลำดับที่ขัดแย้งกัน จงตัดสินใจลำดับสากลหนึ่งลำดับสำหรับการจับ lock เช่นเรียงตาม primary key จากน้อยไปมากเสมอ และนำไปใช้ในทุก transaction PostgreSQL จะยังตรวจจับ deadlock ใด ๆ ที่หลุดรอดมาได้ แต่คุณจะแทบไม่ส่งมันให้ไปค้นเจอเลย
+deadlock ไม่ได้เกิดจากการ lock มากเกินไป แต่เกิดจากการ lock ในลำดับที่ขัดแย้งกัน จงตัดสินใจลำดับสากลหนึ่งลำดับสำหรับการจับ lock เช่นเรียงตาม primary key จากน้อยไปมากเสมอ และนำไปใช้ในทุก transaction PostgreSQL จะยังตรวจจับ deadlock ใด ๆ ที่หลุดรอดมาได้ แต่คุณแทบจะไม่เปิดโอกาสให้เกิดขึ้นเลย
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
@@ -175,13 +175,13 @@ deadlock ไม่ได้เกิดจากการ lock มากเก�
 | `SELECT ... FOR UPDATE` แบบชัดเจน | ควบคุมจังหวะการ lock ได้แน่นอน ป้องกัน lost update | ต้องเขียนโค้ดเพิ่มและคิดเรื่องลำดับ lock เอง |
 | พึ่ง lock โดยนัยจาก `UPDATE` เฉย ๆ | โค้ดสั้นกว่า ไม่ต้องคิดเรื่อง lock ล่วงหน้า | ควบคุมจังหวะ lock ไม่ได้ เสี่ยง race condition ระหว่างอ่านกับเขียน |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **lock row ในลำดับที่ต่างกันในแต่ละ code path** — นี่คือสูตรคลาสสิกของ deadlock ให้กำหนดลำดับ lock สากลหนึ่งเดียว เช่นเรียงตาม primary key แล้วใช้ทุกที่
-- **ถือ transaction (และ lock ของมัน) ค้างไว้ระหว่างทำงานแอปพลิเคชันที่ช้า** — ยิ่งถือ lock นาน คิวที่รอก็ยิ่งยาว ให้ทำงานที่ช้านอก transaction แล้วค่อยเปิด transaction สั้น ๆ ตอนเขียนจริง
+- **ถือ transaction พร้อม lock ค้างไว้ระหว่างทำงานแอปพลิเคชันที่ช้า** — ยิ่งถือ lock นาน คิวที่รอก็ยิ่งยาว ให้ทำงานที่ช้านอก transaction แล้วค่อยเปิด transaction สั้น ๆ ตอนเขียนจริง
 - **ไม่จัดการ deadlock error** — PostgreSQL จะ abort transaction หนึ่งเป็นเหยื่อด้วย SQLSTATE `40P01` เสมอ ถ้าไม่มีการ retry งานของเหยื่อจะหายไปเฉย ๆ
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **ระบบ job queue บน PostgreSQL (Sidekiq-style)** — ใช้ `SELECT ... FOR UPDATE SKIP LOCKED` ให้ worker หลายตัวคว้างานคนละ row พร้อมกันโดยไม่ต้องรอ lock ของกันและกัน เป็น pattern ที่ใช้กันแพร่หลายสำหรับสร้างคิวงานตรงบนฐานข้อมูลโดยไม่ต้องพึ่ง message broker แยกต่างหาก
 >
@@ -192,7 +192,7 @@ export const quizLocks = [
     q: 'SELECT ... FOR UPDATE ทำอะไร?',
     options: [
       'คืน row เร็วขึ้นด้วยการข้าม snapshot',
-      'อ่านและ lock row เพื่อให้คนอื่นต้องรอที่จะเปลี่ยนพวกมัน',
+      'อ่านและ lock row ไว้ เพื่อให้คนอื่นต้องรอก่อนจะแก้ row นั้น',
       'กัน row ไม่ให้ถูกลบอย่างถาวร',
       'commit transaction ปัจจุบัน',
     ],
@@ -201,10 +201,10 @@ export const quizLocks = [
   {
     q: 'PostgreSQL แก้ deadlock ระหว่างสอง transaction อย่างไร?',
     options: [
-      'มันรอตลอดไปจนกว่าไคลเอนต์ตัวหนึ่งจะตัดการเชื่อมต่อ',
-      'มันตรวจจับวงจรและ abort transaction หนึ่งเป็นเหยื่อ',
-      'มันรวมสอง transaction เข้าด้วยกัน',
-      'มันลด isolation level ลงโดยอัตโนมัติ',
+      'รอตลอดไปจนกว่า client ตัวหนึ่งจะตัดการเชื่อมต่อ',
+      'ตรวจจับวงจรแล้ว abort transaction หนึ่งเป็นเหยื่อ',
+      'รวมสอง transaction เข้าด้วยกัน',
+      'ลด isolation level ลงโดยอัตโนมัติ',
     ],
     answer: 1,
   },

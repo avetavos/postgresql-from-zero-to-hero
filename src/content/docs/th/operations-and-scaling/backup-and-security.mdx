@@ -1,6 +1,6 @@
 ---
 title: Backup และ security
-description: ปกป้องข้อมูลของคุณด้วย backup แบบ logical และ physical และ point-in-time recovery และ lock มันด้วย role, GRANT และ REVOKE, row-level security, TLS, และ pg_hba.conf
+description: ปกป้องข้อมูลของคุณด้วย backup แบบ logical และ physical และ point-in-time recovery แล้วล็อกการเข้าถึงด้วย role, GRANT และ REVOKE, row-level security, TLS, และ pg_hba.conf
 sidebar:
   order: 5
 ---
@@ -11,7 +11,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-หน้าที่ด้าน operations สองอย่างสุดท้ายคือสิ่งที่คุณหวังว่าจะไม่ต้องใช้และไม่อาจมองข้ามได้ **Backup** ให้คุณสร้างใหม่ได้หลังจากดิสก์ล้มเหลว การ deploy ที่ผิดพลาด หรือ `DELETE` ที่พลาดไป **Security** ควบคุมว่าใครอาจเชื่อมต่อได้ ใครอาจเห็นอะไร และข้อมูลเดินทางผ่านเครือข่ายอย่างไร ฐานข้อมูลที่เร็วและพร้อมใช้งานสูงก็ยังเป็นภาระอยู่ดีถ้ามัน restore ไม่ได้ หรือถ้าใครก็ได้บนอินเทอร์เน็ตอ่านมันได้
+หน้าที่ด้าน operations สองอย่างสุดท้ายคือสิ่งที่คุณหวังว่าจะไม่ต้องใช้และไม่อาจมองข้ามได้ **Backup** ให้คุณสร้างใหม่ได้หลังจากดิสก์ล้มเหลว การ deploy ที่ผิดพลาด หรือ `DELETE` ที่พลาดไป **Security** ควบคุมว่าใครอาจเชื่อมต่อได้ ใครอาจเห็นอะไร และข้อมูลเดินทางผ่านเครือข่ายอย่างไร ฐานข้อมูลที่เร็วและพร้อมใช้งานสูงก็ยังเป็นภาระอยู่ดี ถ้า restore กลับมาไม่ได้ หรือใครบนอินเทอร์เน็ตก็อ่านได้
 
 บทเรียนนี้ครอบคลุม backup ทั้งสองตระกูลที่ PostgreSQL มีให้ จากนั้นเดินลงไปทีละชั้นของการควบคุมการเข้าถึงจากขอบเครือข่ายไปจนถึง row แต่ละ row
 
@@ -19,14 +19,14 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 Backup ของ PostgreSQL มีสองสไตล์ที่เหมาะกับความต้องการที่ต่างกัน
 
-| ชนิด     | เครื่องมือ                     | สิ่งที่มันจับเก็บ                        | เหมาะที่สุดสำหรับ                  |
+| ชนิด     | เครื่องมือ                     | เก็บอะไรไว้บ้าง                        | เหมาะที่สุดสำหรับ                  |
 |----------|-------------------------------|-----------------------------------------|-----------------------------------|
 | Logical  | `pg_dump` / `pg_restore`      | SQL หรือ archive ของฐานข้อมูลหนึ่ง       | ฐานข้อมูลเดี่ยว, การย้ายเวอร์ชัน    |
 | Physical | base backup + WAL archiving   | ไฟล์ทั้ง cluster แบบ byte-for-byte       | cluster ขนาดใหญ่, point-in-time recovery |
 
 ### logical backup
 
-Logical backup รัน `pg_dump` ซึ่งอ่านฐานข้อมูลและเขียน statement ที่จำเป็นในการสร้างมันขึ้นมาใหม่ มันพกพาข้ามเครื่องได้และแม้กระทั่งข้าม major version ซึ่งทำให้มันเหมาะอย่างยิ่งสำหรับการย้ายหรือ clone ฐานข้อมูลเดี่ยว
+Logical backup รัน `pg_dump` ซึ่งอ่านฐานข้อมูลและเขียน statement ที่จำเป็นสำหรับสร้างฐานข้อมูลนั้นขึ้นมาใหม่ ไฟล์ที่ได้พกพาข้ามเครื่องและข้าม major version ได้ จึงเหมาะอย่างยิ่งกับการย้ายหรือ clone ฐานข้อมูลเดี่ยว
 
 ```bash
 # Dump one database to a compressed custom-format archive
@@ -98,7 +98,7 @@ ssl_key_file  = '/etc/postgresql/server.key'
 
 ### role และ privilege: GRANT และ REVOKE
 
-เมื่อเชื่อมต่อแล้ว สิ่งที่ role อาจทำได้ถูกกำกับด้วย privilege คุณสร้าง role แล้ว `GRANT` สิทธิ์เฉพาะและ `REVOKE` มัน หลักการชี้นำคือ **least privilege**: ให้แต่ละ role เฉพาะสิ่งที่มันต้องการเท่านั้น
+เมื่อเชื่อมต่อแล้ว สิ่งที่ role ทำได้จะกำกับด้วย privilege คุณสร้าง role แล้ว `GRANT` สิทธิ์ที่ต้องการ หรือ `REVOKE` คืนก็ได้ หลักการชี้นำคือ **least privilege** คือให้แต่ละ role เท่าที่จำเป็นต้องใช้จริงเท่านั้น
 
 ```sql
 -- A read-only reporting role
@@ -127,32 +127,32 @@ CREATE POLICY tenant_isolation ON orders
 
 ด้วย policy นี้ query บน `orders` จะคืนค่าเฉพาะ row ที่ `tenant_id` ตรงกับค่าที่แอปพลิเคชันตั้งไว้สำหรับ session ปัจจุบันอย่างเงียบ ๆ `WHERE` ที่ลืมไปหนึ่งครั้งจะไม่ทำให้ข้อมูลของ tenant อื่นรั่วไหลอีกต่อไป
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
-- Backup จะเป็นของจริงก็ต่อเมื่อคุณ restore มันสำเร็จแล้วเท่านั้น จัด table ทดสอบ restore เป็นประจำลงในฐานข้อมูลแบบใช้แล้วทิ้ง และยืนยันว่าข้อมูลยังครบถ้วน
+- Backup จะเป็นของจริงก็ต่อเมื่อคุณ restore กลับมาได้สำเร็จแล้วเท่านั้น จัด table ทดสอบ restore เป็นประจำลงในฐานข้อมูลแบบใช้แล้วทิ้ง และยืนยันว่าข้อมูลยังครบถ้วน
 - Logical dump พกพาได้และเยี่ยมสำหรับฐานข้อมูลเดี่ยว; physical base backup บวกกับ WAL archiving คือสิ่งที่คุณต้องการสำหรับ cluster ขนาดใหญ่และ point-in-time recovery
 - ใช้ least privilege ในทุกที่ application role ไม่ควรเป็นเจ้าของ schema หรือสามารถ drop table ได้ และ reporting ควรเป็นแบบอ่านอย่างเดียว
-- อย่าใช้ authentication แบบ `trust` บน address ใดก็ตามที่เข้าถึงได้จากภายนอกเครื่อง — มันให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password
+- อย่าใช้ authentication แบบ `trust` บน address ใดก็ตามที่เข้าถึงได้จากภายนอกเครื่อง — เพราะเปิดให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password
 - กำหนดให้ใช้ TLS สำหรับ connection ที่ข้ามเครือข่ายด้วย `hostssl` และจำไว้ว่ากฎ `pg_hba.conf` ถูก match จากบนลงล่าง การ match แรกชนะ
 
 <Callout title="Defence in depth">
 ไม่มีการควบคุมเดียวที่เพียงพอ ประตูเครือข่ายกันคนแปลกหน้าออกไป authentication พิสูจน์ตัวตน role privilege จำกัดการกระทำ และ row-level security จำกัดการมองเห็น Backup อยู่ใต้ทั้งหมดนั้นในฐานะตาข่ายความปลอดภัยสุดท้าย ออกแบบโดยคิดไว้ก่อนว่าแต่ละชั้นจะล้มเหลวได้ และทำให้แน่ใจว่าชั้นถัดไปยังคงปกป้องคุณอยู่
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | Automated backup ที่ทดสอบ restore เป็นประจำ | กู้คืนได้จริงเมื่อเกิดภัยพิบัติจริง | เสียพื้นที่ storage และต้องมีวินัยด้าน operations |
-| พึ่งพา replication อย่างเดียวเพื่อความทนทานของข้อมูล | failover เร็ว พร้อมใช้งานสูง | replica ไม่ใช่ backup มันคัดลอกทั้งความผิดพลาดและการลบข้อมูลตามไปด้วย |
+| พึ่งพา replication อย่างเดียวเพื่อความทนทานของข้อมูล | failover เร็ว พร้อมใช้งานสูง | replica ไม่ใช่ backup เพราะคัดลอกทั้งความผิดพลาดและการลบข้อมูลตามไปด้วย |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **ตั้งค่า backup ครั้งเดียวแล้วไม่เคยทดสอบ restore** — ไม่มีใครรู้ว่า backup พังจนกว่าจะต้องใช้จริง จัดตาราง restore drill เป็นประจำ
 - **ถือว่า replica เป็น backup** — replica เป็นสำเนาที่ตามทัน primary แบบเรียลไทม์ ไม่ใช่สำเนาที่ point-in-time recoverable แยกต่างหาก ต้องมี backup จริงควบคู่ไปด้วยเสมอ
 - **ให้ role ของแอปพลิเคชันมีสิทธิ์กว้างเกินจำเป็น (เช่นใช้ superuser role กับแอป)** — ยึดหลัก least privilege ให้แต่ละ role ได้เฉพาะสิทธิ์ที่ต้องใช้จริงเท่านั้น
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **Instagram** — ในช่วง scale ขึ้นไปรองรับผู้ใช้หลายร้อยล้านคน มีการซ้อม sharding และ backup อย่างสม่ำเสมอเป็นส่วนหนึ่งของ infrastructure practice
 >
@@ -164,7 +164,7 @@ export const quizBackupSecurity = [
     options: [
       'การรัน pg_dump ครั้งเดียวต่อสัปดาห์',
       'physical base backup ผสมกับ WAL ที่ archive อย่างต่อเนื่อง',
-      'การคัดลอกไฟล์ข้อมูลขณะที่เซิร์ฟเวอร์กำลังรันอยู่ โดยไม่มี WAL',
+      'การคัดลอกไฟล์ข้อมูลขณะที่ server ยังรันอยู่ โดยไม่มี WAL',
       'การ export แต่ละ table ไปยัง spreadsheet',
     ],
     answer: 1,
@@ -182,10 +182,10 @@ export const quizBackupSecurity = [
   {
     q: 'ทำไมคุณจึงควรหลีกเลี่ยง authentication แบบ trust บน address ที่เข้าถึงได้แบบสาธารณะ?',
     options: [
-      'มันเข้ารหัสข้อมูลช้าเกินไป',
-      'มันให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password',
-      'มันปิดใช้ backup',
-      'มันทำงานได้เฉพาะบน Windows เท่านั้น',
+      'เข้ารหัสข้อมูลช้าเกินไป',
+      'เปิดให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password',
+      'ปิดการทำ backup',
+      'ทำงานได้เฉพาะบน Windows เท่านั้น',
     ],
     answer: 1,
   },

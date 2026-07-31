@@ -10,7 +10,7 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การอ่านเป็นสิ่งที่คุณทำกับฐานข้อมูลบ่อยที่สุด และ `SELECT` คือวิธีที่คุณทำมัน `SELECT` หนึ่งคำสั่งอธิบายว่าคุณต้องการ column ไหน, row ไหนที่เข้าเกณฑ์, เรียงลำดับอย่างไร และเอาเท่าไหร่ เซิร์ฟเวอร์จะส่งคืนชุดผลลัพธ์ (result set) — ศูนย์หรือมากกว่าหนึ่ง row — โดยไม่เปลี่ยนแปลงอะไรบนดิสก์
+การอ่านเป็นสิ่งที่คุณทำกับฐานข้อมูลบ่อยที่สุด และ `SELECT` คือเครื่องมือสำหรับงานนั้น `SELECT` หนึ่งคำสั่งอธิบายว่าคุณต้องการ column ไหน, row ไหนที่เข้าเกณฑ์, เรียงลำดับอย่างไร และเอาเท่าไหร่ server จะส่งคืนชุดผลลัพธ์ (result set) — ศูนย์หรือมากกว่าหนึ่ง row — โดยไม่เปลี่ยนแปลงอะไรบนดิสก์
 
 ตัวอย่างเหล่านี้สมมติว่า table `authors` ถูกเติมด้วย row จำนวนหนึ่งจากบทเรียน insert
 
@@ -176,7 +176,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 ## การจัดการ NULL
 
-`NULL` หมายถึง "ไม่ทราบ" ดังนั้นมันจึงไม่ทำตัวเหมือนค่าธรรมดาทั่วไป คุณไม่สามารถทดสอบมันด้วย `=` ได้ ให้ใช้ `IS NULL` และ `IS NOT NULL` แทน สมมติว่า author คนหนึ่งไม่มีปีเกิดที่บันทึกไว้
+`NULL` หมายถึง "ไม่ทราบ" จึงไม่ทำตัวเหมือนค่าธรรมดาทั่วไป คุณทดสอบด้วย `=` ไม่ได้ ให้ใช้ `IS NULL` และ `IS NOT NULL` แทน สมมติว่า author คนหนึ่งไม่มีปีเกิดที่บันทึกไว้
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -263,12 +263,12 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 (2 rows)
 ```
 
-**ใน pgAdmin:** รันอันใดก็ได้เหล่านี้ใน Query Tool ผลลัพธ์จะปรากฏใน table Data Output ด้านล่าง ที่ซึ่งคุณยังสามารถเรียง column ได้ด้วยการคลิกที่หัว column
+**ใน pgAdmin:** รันอันใดก็ได้เหล่านี้ใน Query Tool ผลลัพธ์จะปรากฏใน table Data Output ด้านล่าง และคุณยังเรียง column ได้ด้วยการคลิกที่หัว column
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - `NULL` ใช้ตรรกะสามค่า (three-valued logic): การเปรียบเทียบกับ `NULL` ไม่ได้เป็นจริงหรือเท็จ แต่เป็นไม่ทราบ (unknown) ดังนั้น row เหล่านั้นจึงถูกตัดออกโดย `WHERE` จงใช้ `IS NULL` แทน `= NULL` เสมอ
-- `LIMIT` ที่ไม่มี `ORDER BY` จะคืนชุดย่อยแบบสุ่ม — เซิร์ฟเวอร์อาจคืน row ในลำดับใดก็ได้ และลำดับนั้นอาจเปลี่ยนไประหว่างการรันแต่ละครั้ง จงจับคู่ `LIMIT` กับ `ORDER BY` ที่มีผลแน่นอน (deterministic) เสมอ
+- `LIMIT` ที่ไม่มี `ORDER BY` จะคืนชุดย่อยแบบสุ่ม — server อาจคืน row ในลำดับใดก็ได้ และลำดับนั้นอาจเปลี่ยนไประหว่างการรันแต่ละครั้ง จงจับคู่ `LIMIT` กับ `ORDER BY` ที่มีผลแน่นอน (deterministic) เสมอ
 - `ILIKE` สะดวกแต่ไม่สามารถใช้ index ธรรมดาได้อย่างมีประสิทธิภาพ สำหรับการค้นหาข้อความหนัก ๆ ให้ศึกษา trigram index หรือ full-text search ในภายหลังของคอร์ส
 - การ select เฉพาะ column ที่คุณต้องการช่วยให้ result set เล็กและโค้ดของคุณทนทานต่อการเปลี่ยนแปลง schema
 
@@ -276,7 +276,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 การแบ่งหน้า (pagination) มีความหมายก็ต่อเมื่ออยู่บนการเรียงลำดับที่คงที่ ถ้าสอง row เสมอกันบน column ที่ใช้เรียง ให้เพิ่มตัวตัดสินเสมอ (tiebreaker) เช่น `ORDER BY born DESC, id` เพื่อให้ row เดิมไม่ปรากฏบนสองหน้า
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
@@ -285,13 +285,13 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 | กรองด้วย `WHERE` ใน SQL | ถูก push ไปให้ database ทำ ใช้ index ได้ ส่งเฉพาะ row ที่ต้องการผ่าน wire | ต้องเข้าใจ SQL และวางแผน index ให้ตรงกับ pattern การกรอง |
 | ดึงข้อมูลทั้งหมดมากรองใน application code | เขียน logic ฝั่งแอปได้ง่าย ไม่ต้องคิด SQL ซับซ้อน | เปลือง bandwidth, พลาดโอกาสใช้ index, ช้าลงเมื่อ table โต |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **ใช้ `SELECT *` ใน production code** — เมื่อมีคนเพิ่ม column ใหม่ทีหลัง ผลลัพธ์ที่ได้เปลี่ยนไปแบบไม่ตั้งใจ และอาจ leak column ที่อ่อนไหวออกไปด้วย ให้ระบุ column ที่ต้องการเสมอ
 - **ห่อ column ที่มี index ด้วย function ใน `WHERE`** เช่น `WHERE lower(email) = ...` — ทำให้ index ธรรมดาใช้งานไม่ได้ ต้องใช้ expression index หรือปรับ query
 - **คิดว่า `NULL` จับคู่กับ `=` ได้** — `WHERE born = NULL` ไม่คืน row ใด ๆ เลยเพราะ `NULL` เทียบด้วยตรรกะสามค่า ต้องใช้ `IS NULL` แทน
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **GitHub API / GitLab API** — บังคับให้ client ระบุ field ที่ต้องการอย่างชัดเจนและมี pagination เสมอ เพื่อป้องกัน `SELECT *` ที่แอบเปลี่ยน contract ของ response และรักษา query plan ให้คาดเดาได้
 >

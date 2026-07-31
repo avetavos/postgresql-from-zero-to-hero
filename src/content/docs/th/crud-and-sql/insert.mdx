@@ -59,7 +59,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-สังเกตว่าแท็บ `psql` ใช้ค่าตรง ๆ (literal value) ในขณะที่ทุก driver ใช้ **placeholder** — `$1`, `$2` ในสไตล์ native ของ PostgreSQL หรือ `%s` สำหรับ psycopg — แล้วส่งค่าจริงแยกต่างหาก จงให้ข้อมูลของผู้ใช้แบบนี้เสมอ อย่าเอาค่ามาต่อเข้ากับ SQL string ด้วยตัวเองเด็ดขาด การปล่อยให้ driver bind ค่าให้ จะรักษา type ให้ถูกต้องและปิดประตูไม่ให้เกิด SQL injection ซึ่งเป็นกรณีที่ input ที่ถูกประดิษฐ์ขึ้นมาจะเปลี่ยนสิ่งที่คำสั่งของคุณทำ
+สังเกตว่าแท็บ `psql` ใช้ค่าตรง ๆ (literal value) ส่วนทุก driver ใช้ **placeholder** — `$1`, `$2` ในสไตล์ native ของ PostgreSQL หรือ `%s` สำหรับ psycopg — แล้วส่งค่าจริงแยกต่างหาก จงให้ข้อมูลของผู้ใช้แบบนี้เสมอ อย่าเอาค่ามาต่อเข้ากับ SQL string ด้วยตัวเองเด็ดขาด การปล่อยให้ driver bind ค่าให้ จะรักษา type ให้ถูกต้องและปิดประตูไม่ให้เกิด SQL injection คือกรณีที่ input ซึ่งจงใจประดิษฐ์ขึ้นมาเปลี่ยนสิ่งที่คำสั่งของคุณทำ
 
 **ใน pgAdmin:** วางเวอร์ชัน `psql` ลงใน Query Tool แล้วรัน แผงข้อความจะรายงานว่า `INSERT 0 1` ซึ่งหมายความว่ามี row หนึ่งถูกเพิ่มเข้าไป
 
@@ -113,7 +113,7 @@ table `books` มี `copies_sold int NOT NULL DEFAULT 0` ถ้าคุณเ�
 
 ## หลาย row พร้อมกัน
 
-คุณสามารถแสดงรายการ value tuple หลายอันในคำสั่งเดียวได้ ซึ่งเร็วกว่าการรัน `INSERT` หนึ่งครั้งต่อหนึ่ง row อย่างมาก เพราะมันเป็นการเดินทางไป-กลับครั้งเดียวไปยังเซิร์ฟเวอร์
+คุณสามารถแสดงรายการ value tuple หลายอันในคำสั่งเดียวได้ ซึ่งเร็วกว่าการรัน `INSERT` หนึ่งครั้งต่อหนึ่ง row อย่างมาก เพราะเป็น round trip เดียวไปที่ server
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -228,35 +228,35 @@ column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น Po
 (1 row)
 ```
 
-คุณสามารถ return column ใดก็ได้ที่คุณต้องการ — `RETURNING id, name` หรือแม้แต่ `RETURNING *` เพื่อรับ row ใหม่ทั้ง row รวมถึง default ที่เซิร์ฟเวอร์เติมให้ด้วย
+คุณสามารถ return column ใดก็ได้ที่คุณต้องการ — `RETURNING id, name` หรือแม้แต่ `RETURNING *` เพื่อรับ row ใหม่ทั้ง row รวมถึง default ที่ server เติมให้ด้วย
 
-## Tips / gotchas
+## เคล็ดลับและข้อควรระวัง
 
 - ส่งค่าผ่าน placeholder ของ driver (`$1`, `%s`) เสมอ การสร้าง SQL ด้วยการต่อ string เปิดทางให้ SQL injection และพังเมื่อเจออัญประกาศหรืออักขระพิเศษ
-- เมื่อใช้ primary key แบบ `IDENTITY` (หรือ `serial`) อย่าให้ค่า id เอง — ปล่อยให้ PostgreSQL สร้างมันแล้วอ่านกลับมาด้วย `RETURNING`
-- การ insert หลาย row เป็นคำสั่งเดียวและการเดินทางไป-กลับครั้งเดียว ดังนั้นจึงเร็วกว่าการวน loop insert ทีละ row อย่างมาก
+- เมื่อใช้ primary key แบบ `IDENTITY` (หรือ `serial`) อย่าให้ค่า id เอง — ปล่อยให้ PostgreSQL สร้างให้ แล้วอ่านกลับมาด้วย `RETURNING`
+- การ insert หลาย row เป็นคำสั่งเดียวและ round trip เดียว ดังนั้นจึงเร็วกว่าการวน loop insert ทีละ row อย่างมาก
 - column ที่ไม่มีค่าและไม่มี default ต้องอนุญาตให้เป็น `NULL` ได้ มิฉะนั้น insert จะล้มเหลวด้วย not-null violation
 
 <Callout title="RETURNING คือเพื่อนของคุณ">
-`RETURNING` เปลี่ยนการเขียน (write) ให้กลายเป็น write บวก read ในคำสั่งเดียว มันหลีกเลี่ยงการตามด้วย `SELECT` และหลีกเลี่ยง race condition เพราะค่าที่คุณได้กลับมาคือค่าที่ insert นี้สร้างขึ้นเป๊ะ ๆ
+`RETURNING` เปลี่ยนการเขียน (write) ให้กลายเป็น write บวก read ในคำสั่งเดียว ช่วยตัด `SELECT` ที่ต้องตามมาทิ้ง และเลี่ยง race condition เพราะค่าที่คุณได้กลับมาคือค่าที่ insert นี้สร้างขึ้นเป๊ะ ๆ
 </Callout>
 
-## Trade-offs
+## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `RETURNING` หลัง `INSERT` | ได้ค่าที่ถูกสร้างขึ้น (เช่น `id`) กลับมาในการเดินทางไป-กลับเดียว ไม่มี race condition | ต้องจำ syntax เพิ่มเติม และบาง driver ต้องอ่านผลลัพธ์แบบ query แทน exec ธรรมดา |
+| `RETURNING` หลัง `INSERT` | ได้ค่าที่ถูกสร้างขึ้น (เช่น `id`) กลับมาใน round trip เดียว ไม่มี race condition | ต้องจำ syntax เพิ่มเติม และบาง driver ต้องอ่านผลลัพธ์แบบ query แทน exec ธรรมดา |
 | แยก `SELECT` มาทีหลัง | เขียนง่าย เข้าใจง่ายสำหรับมือใหม่ | เดินทางไป-กลับเพิ่มอีกครั้ง และมี race condition ถ้ามี insert อื่นแทรกระหว่างนั้น |
-| `INSERT` หลาย row ในคำสั่งเดียว | เร็ว เพราะเป็นการเดินทางไป-กลับครั้งเดียว | คำสั่งยาวขึ้น และ error ของ row เดียวอาจทำให้ทั้งคำสั่งล้มเหลว |
+| `INSERT` หลาย row ในคำสั่งเดียว | เร็ว เพราะเป็น round trip เดียว | คำสั่งยาวขึ้น และ error ของ row เดียวอาจทำให้ทั้งคำสั่งล้มเหลว |
 | วน loop insert ทีละ row | โค้ดอ่านง่าย ทีละขั้นตอน | ช้ามาก เพราะเดินทางไป-กลับ N ครั้งสำหรับ N row |
 
-## Common Mistakes
+## ข้อผิดพลาดที่พบบ่อย
 
 - **วน loop รัน `INSERT` ทีละ row แทนที่จะรวมเป็นคำสั่งเดียว** — ทำให้เสีย network round-trip ต่อ row ควรใช้ multi-row `INSERT`, `executemany`, หรือ bulk copy (`COPY`/`CopyFrom`) แทน
 - **เอา input ของผู้ใช้มาต่อ (concatenate) เข้ากับ SQL string ตรง ๆ** — เปิดช่องให้เกิด SQL injection ให้ส่งค่าผ่าน placeholder (`$1`, `%s`) เสมอ
 - **ลืมว่า column เป็น `NOT NULL` และไม่มี `DEFAULT`** — insert จะล้มเหลวด้วย not-null violation ตรวจ schema ก่อนเขียน insert หรือใส่ค่าให้ครบทุก column ที่จำเป็น
 
-> 💡 Real World Example
+> 💡 ตัวอย่างจากของจริง
 >
 > **GitHub / GitLab** — งาน insert ทั่วไปในแอปส่วนใหญ่ผ่าน ORM (เช่น ActiveRecord) เพื่อความสะดวกและ maintainability แต่ในจุดที่ throughput สูง เช่น event ingestion หรือ audit log พวกเขาจะลง SQL มือพร้อม `RETURNING` และ multi-row insert เพื่อลด round-trip
 >
@@ -286,7 +286,7 @@ export const quizInsert = [
   {
     q: 'ทำไมถึงควรส่งค่าผ่าน placeholder ($1, %s) แทนการ concatenate เข้าไปใน SQL string ตรง ๆ?',
     options: [
-      'มันรันเร็วกว่าในทุกกรณี',
+      'รันเร็วกว่าในทุกกรณี',
       'ช่วยเลี่ยง SQL injection และคง type ให้ถูกต้อง',
       'เป็นข้อบังคับของ SQL standard',
       'ทำให้ข้าม column list ได้',
