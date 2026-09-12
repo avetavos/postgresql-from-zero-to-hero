@@ -104,6 +104,19 @@ SELECT gen_random_uuid() AS id;
 (1 row)
 ```
 
+PostgreSQL 18 adds `uuidv7()`, which puts a timestamp in the high bits so the values it generates sort roughly in creation order. That ordering matters for a primary key: random v4 ids scatter inserts across the whole B-tree, while v7 ids land near the right edge, so the index stays compact and cache-friendly. Reach for `uuidv7()` on new tables, and keep `gen_random_uuid()` — now also spelled `uuidv4()` — when an id must not leak when the row was created.
+
+```sql
+SELECT uuidv7() AS id;
+```
+
+```text
+                  id
+--------------------------------------
+ 0199c4f2-8d3a-7b21-9e4c-5f6a7b8c9d0e
+(1 row)
+```
+
 ## JSON with jsonb
 
 The `jsonb` type stores JSON in a decomposed binary form that is fast to query and index. Prefer it over the plain `json` type, which keeps the raw text and re-parses on every access. You can pull values out with the arrow operators.

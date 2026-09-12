@@ -23,7 +23,7 @@ docker run --name pg \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
   -v pgdata:/var/lib/postgresql/data \
-  -d postgres:17
+  -d postgres:18
 ```
 
 A quick tour of the flags:
@@ -32,7 +32,7 @@ A quick tour of the flags:
 - `-e POSTGRES_PASSWORD=secret` sets the password for the default `postgres` user. This variable is required; the image refuses to start without it.
 - `-p 5432:5432` maps the container's PostgreSQL port to the same port on your machine, so tools on the host can connect to `localhost:5432`.
 - `-v pgdata:/var/lib/postgresql/data` mounts a named volume at the directory where Postgres stores its files, so your data is not lost when the container is removed.
-- `-d postgres:17` runs the official image, tag `17`, in the background.
+- `-d postgres:18` runs the official image, tag `18`, in the background.
 
 ## A docker-compose.yml for repeatable setups
 
@@ -41,7 +41,7 @@ Typing that command every time gets old, and you often want a GUI alongside the 
 ```yaml
 services:
   postgres:
-    image: postgres:17
+    image: postgres:18
     environment:
       POSTGRES_PASSWORD: secret
       POSTGRES_DB: appdb
@@ -112,7 +112,7 @@ Either way you land at the `postgres=#` prompt, ready to run SQL. When you are f
 - `5432` is PostgreSQL's default port and `postgres` is the default superuser. Tools assume these unless told otherwise.
 - `POSTGRES_DB` creates an extra database on first startup. Without it, you still get the built-in `postgres` database to work in.
 - `POSTGRES_PASSWORD` is mandatory for the official image. Use a real secret outside of local experiments, not `secret`.
-- Pin a major version like `postgres:17` rather than `postgres:latest` so an image update never surprises you with a different version.
+- Pin a major version like `postgres:18` rather than `postgres:latest` so an image update never surprises you with a different version.
 
 <Callout title="Disposable database, durable data">
 Containers are meant to be thrown away and recreated freely, but your data should not be. Keeping the data in a named volume gives you the best of both: you can destroy and rebuild the container as often as you like while the rows stay safely on disk.

@@ -23,7 +23,7 @@ docker run --name pg \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
   -v pgdata:/var/lib/postgresql/data \
-  -d postgres:17
+  -d postgres:18
 ```
 
 ทัวร์สั้น ๆ เกี่ยวกับ flag ต่าง ๆ:
@@ -32,7 +32,7 @@ docker run --name pg \
 - `-e POSTGRES_PASSWORD=secret` ตั้งรหัสผ่านสำหรับ user `postgres` เริ่มต้น ตัวแปรนี้บังคับ ถ้าไม่ใส่ image จะไม่ยอมเริ่มทำงาน
 - `-p 5432:5432` แมป PostgreSQL port ของ container ไปยัง port เดียวกันบนเครื่องของคุณ เพื่อให้เครื่องมือบน host เชื่อมต่อกับ `localhost:5432` ได้
 - `-v pgdata:/var/lib/postgresql/data` mount named volume ที่ directory ซึ่ง Postgres ใช้เก็บไฟล์ข้อมูล เพื่อให้ข้อมูลของคุณไม่สูญหายเมื่อ container ถูกลบ
-- `-d postgres:17` รัน image อย่างเป็นทางการ tag `17` ในเบื้องหลัง
+- `-d postgres:18` รัน image อย่างเป็นทางการ tag `18` ในเบื้องหลัง
 
 ## docker-compose.yml สำหรับการตั้งค่าที่ทำซ้ำได้
 
@@ -41,7 +41,7 @@ docker run --name pg \
 ```yaml
 services:
   postgres:
-    image: postgres:17
+    image: postgres:18
     environment:
       POSTGRES_PASSWORD: secret
       POSTGRES_DB: appdb
@@ -112,7 +112,7 @@ docker exec -it pg psql -U postgres
 - `5432` คือ port เริ่มต้นของ PostgreSQL และ `postgres` คือ superuser เริ่มต้น เครื่องมือต่าง ๆ จะถือค่านี้เป็นค่าตั้งต้น เว้นแต่คุณจะระบุเป็นอย่างอื่น
 - `POSTGRES_DB` สร้างฐานข้อมูลเพิ่มเติมในการเริ่มต้นครั้งแรก ถ้าไม่ใส่ คุณก็ยังได้ฐานข้อมูล `postgres` ที่มีอยู่ในตัวให้ทำงานด้วย
 - `POSTGRES_PASSWORD` จำเป็นต้องมีสำหรับ image อย่างเป็นทางการ ใช้ secret จริงนอกการทดลองในเครื่อง ไม่ใช่ `secret`
-- ปักหมุดเวอร์ชันหลักอย่าง `postgres:17` แทน `postgres:latest` เพื่อให้การอัปเดต image ไม่ทำให้คุณประหลาดใจด้วยเวอร์ชันที่ต่างออกไป
+- ปักหมุดเวอร์ชันหลักอย่าง `postgres:18` แทน `postgres:latest` เพื่อให้การอัปเดต image ไม่ทำให้คุณประหลาดใจด้วยเวอร์ชันที่ต่างออกไป
 
 <Callout title="ฐานข้อมูลที่ทิ้งได้ ข้อมูลที่คงทน">
 container ถูกออกแบบมาให้โยนทิ้งและสร้างใหม่ได้อย่างอิสระ แต่ข้อมูลของคุณไม่ควรเป็นเช่นนั้น การเก็บข้อมูลไว้ใน named volume มอบสิ่งที่ดีที่สุดของทั้งสองอย่างให้คุณ: คุณทำลายและสร้าง container ใหม่ได้บ่อยเท่าที่คุณต้องการโดยที่ row ต่าง ๆ ยังอยู่บน disk อย่างปลอดภัย
