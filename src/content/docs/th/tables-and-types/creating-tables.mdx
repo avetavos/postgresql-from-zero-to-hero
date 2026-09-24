@@ -175,9 +175,9 @@ DROP TABLE IF EXISTS products;
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Stripe** — ใช้ id แบบ string ที่มี prefix บอกประเภท object เช่น `cus_...` สำหรับ customer หรือ `ch_...` สำหรับ charge แทนที่จะใช้ UUID ดิบ ๆ ทำให้ id ทั้ง unique และอ่านแล้วรู้ทันทีว่าเป็น object ประเภทไหน ช่วยเวลา debug log
+> **[Stripe](https://docs.stripe.com/api/expanding_objects)** — ใช้ id แบบ string ที่มี prefix บอกประเภท object เช่น `cus_...` สำหรับ customer หรือ `ch_...` สำหรับ charge แทนที่จะใช้ UUID ดิบ ๆ ทำให้ id ทั้ง unique และอ่านแล้วรู้ทันทีว่าเป็น object ประเภทไหน ช่วยเวลา debug log
 >
-> **Notion** — เก็บเนื้อหา block ที่มีโครงสร้างยืดหยุ่นสูงไว้ใน column แบบ JSONB ควบคู่กับ metadata อย่าง ownership และ permission ที่ยังคงเก็บแบบ relational ปกติเพื่อให้ query และบังคับ constraint ได้ตรงไปตรงมา
+> **แพลตฟอร์มที่มีเนื้อหายืดหยุ่นสูง** — มักเก็บเนื้อหาที่มีโครงสร้างยืดหยุ่นสูง (เช่นโมเดลเอกสารแบบ block) ไว้ใน column แบบ JSONB ควบคู่กับ metadata อย่าง ownership และ permission ที่ยังคงเก็บแบบ relational ปกติเพื่อให้ query และบังคับ constraint ได้ตรงไปตรงมา
 
 export const quizCreating = [
   {

@@ -303,6 +303,25 @@ Sela Vance shows `row_count` of one because the `LEFT JOIN` still produces a row
 After a `GROUP BY` you no longer have the original rows — you have one row per group. If you find yourself wanting both the group total and the individual rows in the same result, that is the signal to reach for a window function, covered in the last lesson of this module.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Aggregate with `GROUP BY` in PostgreSQL | Runs close to the data, can use indexes/parallel workers, sends little data over the network | You must write correct SQL, including the rules for `GROUP BY`/`HAVING` |
+| Fetch every row and summarize in application code | Easy to write, free to change the logic | Wastes bandwidth transferring data and does not scale as the table grows |
+
+## Common mistakes
+
+- **Selecting a non-aggregate column that is not in `GROUP BY`** — PostgreSQL is stricter than some databases; it rejects this with an error immediately instead of guessing a value like some systems do.
+- **`GROUP BY` on an unindexed expression over a large table** — this forces PostgreSQL to scan the whole table every time. If this query runs often, consider an expression index.
+- **Confusing `WHERE` with `HAVING`** — `WHERE` filters rows before grouping; `HAVING` filters groups after aggregation. You can never put an aggregate function in `WHERE`.
+
+> 💡 Real-world example
+>
+> **E-commerce dashboards** — a report of sales per day or per product uses `GROUP BY` to summarize directly in PostgreSQL, instead of pulling every transaction-level row and summing it in the backend.
+>
+> **SaaS usage reporting** — per-tenant usage (such as API calls per month) is computed with `GROUP BY tenant_id` directly in the database, so it keeps scaling as tenants and rows grow.
+
 export const quizAggregates = [
   {
     q: 'What is the difference between count(*) and count(some_column)?',

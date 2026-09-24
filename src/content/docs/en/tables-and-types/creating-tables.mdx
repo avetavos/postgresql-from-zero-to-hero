@@ -158,6 +158,27 @@ DROP TABLE IF EXISTS products;
 When you reach for an auto-incrementing key, write `bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY`. It expresses intent clearly, follows the SQL standard, and sidesteps the legacy behavior of `SERIAL`. Reserve `SERIAL` for reading older code, not writing new tables.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Design the full schema up front | Clear structure, migration discipline from day one | Takes longer to gather requirements before writing any code |
+| Add columns later as real requirements appear | Flexible, adapts quickly to the business | Schema drift — you must retrofit constraints and migrations later |
+| `bigint GENERATED ALWAYS AS IDENTITY` primary key | Sortable by insert time, small, fast to index | Next id is guessable, and it reveals the row count |
+| `uuid` primary key | Globally unique, can be generated on the client with no round trip to the server | Larger, not naturally time-sortable, which scatters the index |
+
+## Common mistakes
+
+- **Creating a table with no primary key** — every table should have one. Without it, updating or deleting a specific row is hard, and some forms of replication require a primary key.
+- **Using `varchar(255)` for every column without thinking** — pick a length that reflects a real business rule, or use `text` outright when there is no real limit. A copy-pasted `varchar(255)` protects nothing and is not faster than `text`.
+- **Forgetting `NOT NULL` on a column that must always have a value** — if a column like `name` or `price` should never be empty, declare `NOT NULL` when creating the table, instead of leaving the check to application code.
+
+> 💡 Real-world example
+>
+> **[Stripe](https://docs.stripe.com/api/expanding_objects)** — uses string ids with a type prefix, such as `cus_...` for a customer or `ch_...` for a charge, instead of a raw UUID. The id is both unique and instantly recognizable as a particular object type, which helps when reading logs.
+>
+> **Flexible content platforms** — often store highly variable content (like a block-based document model) in a `jsonb` column, while keeping metadata such as ownership and permissions in ordinary relational columns so it can still be queried and constrained directly.
+
 export const quizCreating = [
   {
     q: 'Which clause makes PostgreSQL supply primary-key values automatically using the SQL-standard syntax?',

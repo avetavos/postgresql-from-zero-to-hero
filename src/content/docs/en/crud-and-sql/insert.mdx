@@ -241,6 +241,27 @@ You can return any columns you like — `RETURNING id, name` or even `RETURNING 
 `RETURNING` turns a write into a write-plus-read in a single statement. It avoids a follow-up `SELECT` and avoids race conditions, since the values you get back are exactly the ones this insert produced.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| `RETURNING` after `INSERT` | Get generated values (like `id`) back in one round trip, no race condition | One more syntax to remember, and some drivers must read the result as a query instead of a plain exec |
+| A separate `SELECT` afterwards | Simple and easy for beginners to follow | An extra round trip, and a race condition if another insert lands in between |
+| Multi-row `INSERT` in one statement | Fast — a single round trip | Longer statement, and one bad row can fail the whole statement |
+| Looping single-row inserts | Easy to read, one step at a time | Very slow — N round trips for N rows |
+
+## Common mistakes
+
+- **Looping single-row `INSERT` statements instead of batching them** — this pays a network round trip per row. Use a multi-row `INSERT`, `executemany`, or bulk copy (`COPY`/`CopyFrom`) instead.
+- **Concatenating user input directly into the SQL string** — this opens the door to SQL injection. Always pass values through placeholders (`$1`, `%s`).
+- **Forgetting a column is `NOT NULL` with no `DEFAULT`** — the insert fails with a not-null violation. Check the schema before writing the insert, or supply every required column.
+
+> 💡 Real-world example
+>
+> **High-throughput paths** — most application code inserts through an ORM (like ActiveRecord) for convenience and maintainability, but on high-throughput paths such as event ingestion or audit logging, teams often drop to hand-written SQL with `RETURNING` and multi-row inserts to cut round trips.
+>
+> **Bulk CSV import** — use `COPY` or multi-row `INSERT` instead of looping row by row, so importing hundreds of thousands of rows finishes in seconds instead of minutes.
+
 export const quizInsert = [
   {
     q: 'How do you read a server-generated id immediately after inserting?',

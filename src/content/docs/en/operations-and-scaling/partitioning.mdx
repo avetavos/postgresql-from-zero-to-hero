@@ -134,6 +134,25 @@ A few million rows with good indexes do not need partitioning. Adding it early j
 Partitioning does not make a table smaller — your data is just as big. It makes each *operation* smaller by ensuring queries, indexes, and bulk deletes touch only the slice they need. The skill is picking a partition key that matches how you actually query, so the planner can prune everything else away.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Partitioning a large table | Faster maintenance (vacuum/index rebuild per partition), old data can be dropped as a group almost instantly | Queries must be designed around the partition key; more tables to manage |
+| No partitioning (single table) | Simple query and schema, no partition key to think about | Maintenance keeps getting slower as the table grows; deleting old data means row-by-row `DELETE` |
+
+## Common mistakes
+
+- **Partitioning a table while it is still small, before it needs it** — this buys complexity with no benefit yet. Wait until the table is genuinely large (hundreds of millions of rows) before partitioning.
+- **Choosing a partition key that most queries do not filter on** — the planner cannot prune and ends up scanning every partition anyway. Pick a key that matches the real query pattern.
+- **Forgetting to create a default partition** — inserting a row that matches no partition fails immediately unless a default partition exists to catch it.
+
+> 💡 Real-world example
+>
+> **Large social platforms** — partition or shard enormous tables like posts or events by time or by user ID, so dropping or archiving an old partition is a near-instant metadata-level operation instead of a row-by-row `DELETE`.
+>
+> **Time-series/event logging platforms** — systems storing large volumes of logs or metrics commonly use range partitioning by day or month, so a retention policy can just drop a partition instead of a full-table scanning delete.
+
 export const quizPartitioning = [
   {
     q: 'What decides which partition a row is stored in?',

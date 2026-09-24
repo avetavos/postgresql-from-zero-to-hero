@@ -197,9 +197,9 @@ ALTER TABLE products ALTER COLUMN region SET NOT NULL;
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **GitLab** — ใช้แนวทาง migration หลายขั้นตอนอย่างระมัดระวังบนฐานข้อมูล PostgreSQL ขนาดใหญ่ เพื่อเลี่ยงการถือ lock นาน ๆ ระหว่าง deploy เช่น เพิ่ม column แบบ nullable ก่อนแล้วค่อย backfill แยกจากการตั้ง `NOT NULL`
+> **[แนวทาง migration ของ GitLab](https://docs.gitlab.com/development/database/avoiding_downtime_in_migrations/)** — กำหนดให้ deploy โค้ดฝั่งแอปก่อนค่อยเพิ่ม `NOT NULL` constraint และแนะนำให้เพิ่ม column แบบ nullable ก่อนแล้วค่อย backfill แยกต่างหาก เพื่อเลี่ยงการถือ lock นาน ๆ บนฐานข้อมูล production ขนาดใหญ่ระหว่าง deploy
 >
-> **ทีมที่ดูแลระบบระดับ Figma-scale** — เลือกใช้ pattern แบบ `pg_online_schema_change`-style หรือแบ่ง migration เป็นหลายขั้นตอนเล็ก ๆ โดยเฉพาะกับ table ขนาดใหญ่ เพื่อไม่ให้การเปลี่ยน schema กระทบ traffic การใช้งานจริงระหว่าง deploy
+> **ทีมที่ดูแลระบบ schema ขนาดใหญ่มาก** — เลือกใช้ pattern แบบ `pg_online_schema_change`-style หรือแบ่ง migration เป็นหลายขั้นตอนเล็ก ๆ โดยเฉพาะกับ table ขนาดใหญ่ เพื่อไม่ให้การเปลี่ยน schema กระทบ traffic การใช้งานจริงระหว่าง deploy
 
 export const quizAltering = [
   {

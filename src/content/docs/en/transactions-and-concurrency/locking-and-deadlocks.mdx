@@ -166,6 +166,27 @@ Sometimes waiting is the wrong behaviour. Two modifiers change it. `NOWAIT` make
 Deadlocks are not caused by locking too much, but by locking in conflicting orders. Decide one global order for acquiring locks, for example always by ascending primary key, and apply it in every transaction. PostgreSQL will still detect any deadlock that slips through, but you will rarely hand it one to find.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Row-level lock | High concurrency, since other transactions can still edit other rows in the same table | Must design a consistent lock order yourself, or risk a deadlock |
+| Table-level lock | Easy to write, guarantees nobody else touches the whole table while you work | Blocks a lot of unrelated concurrent work unnecessarily, lowering system-wide throughput |
+| Explicit `SELECT ... FOR UPDATE` | Precise control over when the lock is taken, prevents lost updates | More code to write, and you must think through the lock order yourself |
+| Relying on the implicit lock from a plain `UPDATE` | Shorter code, no need to think about locking up front | No control over lock timing, risking a race between reading and writing |
+
+## Common mistakes
+
+- **Locking rows in a different order on different code paths** — this is the classic recipe for a deadlock. Pick one global lock order, such as ascending primary key, and use it everywhere.
+- **Holding a transaction and its locks open during a slow application-side task** — the longer a lock is held, the longer the queue behind it grows. Do the slow work outside the transaction, then open a short transaction just for the write.
+- **Not handling the deadlock error** — PostgreSQL always aborts one transaction as the victim with SQLSTATE `40P01`. Without a retry, the victim's work simply disappears.
+
+> 💡 Real-world example
+>
+> **Sidekiq-style job queues on PostgreSQL** — use `SELECT ... FOR UPDATE SKIP LOCKED` so multiple workers can each grab a different row concurrently without waiting on each other's locks — a widely used pattern for building a job queue directly on the database without a separate message broker.
+>
+> **Seat/ticket booking systems** — use `SELECT ... FOR UPDATE` to lock a seat before confirming a booking, so two people can never both successfully book the same seat at once.
+
 export const quizLocks = [
   {
     q: 'What does SELECT ... FOR UPDATE do?',

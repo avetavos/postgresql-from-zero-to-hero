@@ -261,9 +261,9 @@ export const joinDiagram = `flowchart TD
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Discord** — activity feed และหน้าประวัติข้อความอาศัย join ระหว่าง table ผู้ใช้, server และข้อความ แทนที่จะคัดลอกชื่อผู้ใช้ไปฝังไว้ในทุกข้อความ ทำให้เปลี่ยนชื่อครั้งเดียวก็อัปเดตทุกที่
+> **Activity feed และประวัติข้อความ** — แอปจำนวนมาก join table ผู้ใช้, workspace/server และข้อความตอน query แทนที่จะคัดลอกชื่อผู้ใช้ไปฝังไว้ในทุกข้อความ ทำให้เปลี่ยนชื่อครั้งเดียวก็อัปเดตทุกที่
 >
-> **GitLab** — หน้าประวัติ merge request และ pipeline รวมข้อมูลจากหลาย table (users, projects, commits) ด้วย join ตอน query เพื่อให้ single source of truth อยู่ที่เดียว ไม่ต้องกังวลเรื่องข้อมูลซ้ำที่หลุดซิงค์กัน
+> **ระบบติดตามโปรเจกต์แบบ open-source** — หน้าประวัติ merge request หรือ pipeline รวมข้อมูลจากหลาย table (users, projects, commits) ด้วย join ตอน query เพื่อให้ single source of truth อยู่ที่เดียว ไม่ต้องกังวลเรื่องข้อมูลซ้ำที่หลุดซิงค์กัน
 
 export const quizJoins = [
   {

@@ -151,6 +151,25 @@ The `CREATE INDEX` statement is just SQL, so any driver issues it the same way. 
 Most of your indexes will be plain B-trees. But when you store `jsonb`, search arrays or full text, work with geometry or ranges, or have a billion-row time-series table, the specialized access methods turn an impossible query into an easy one. Knowing they exist is half the value; reach for them when B-tree cannot express the question.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Specialized index (GIN, GiST, BRIN, Hash) | Much smaller and faster than a B-tree for the query pattern it is built for | Only helps that specific query pattern — the wrong choice barely helps at all |
+| Plain B-tree | Handles equality, range, sort, and prefix match all at once; a safe default when unsure | Bigger and slower than a specialized index for what that index is good at, such as `jsonb` containment |
+
+## Common mistakes
+
+- **Using a B-tree on a `jsonb` column** — a B-tree does not help containment queries (`@>`) well. Use GIN for `jsonb`, arrays, or full-text search.
+- **Using BRIN on a table whose physical row order does not track the indexed column** — BRIN depends on the column's values being roughly in storage order. On randomly scattered data, BRIN is nearly useless and a B-tree should be used instead.
+- **Choosing a Hash index without checking its limits** — Hash only supports equality (`=`); it cannot do range queries or `ORDER BY` at all. Make sure your query is pure equality before reaching for Hash.
+
+> 💡 Real-world example
+>
+> **Large event/log tables** — an append-only table where new rows always have a later timestamp (a log or event stream) commonly uses a BRIN index on `created_at`, because the index is far smaller than a B-tree while still serving time-range queries well. This is a common pattern at analytics companies running PostgreSQL at scale.
+>
+> **Platforms with heavy full-text search and `jsonb` columns** — systems that store flexible metadata in `jsonb` (a product catalog or document store) rely on GIN indexes to keep containment and full-text queries fast enough for production.
+
 export const quizSpecialized = [
   {
     q: 'Which index type is designed for jsonb containment, array membership, and full-text search?',

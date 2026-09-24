@@ -81,6 +81,27 @@ It is a less natural fit when you need a pure in-memory cache for ephemeral data
 The relational model gives you correctness and clear structure; ACID gives you trust; extensibility gives you room to grow. PostgreSQL is the rare tool that offers all three at once, which is why so much of this course is simply learning to use one database really well.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Self-hosted PostgreSQL | Full control over config, extensions, and version | You handle backups, patching, and tuning yourself |
+| A managed service like RDS or Supabase | Less operational burden, backups and failover included | Higher cost, and some extensions may be restricted |
+| Lean on PostgreSQL's extensibility (JSONB, extensions) | One engine covers several workloads | Schema and queries get more complex if overused |
+| A separate specialized database | Best possible performance for that one workload | One more system to run and keep in sync |
+
+## Common mistakes
+
+- **Assuming PostgreSQL is "just like MySQL"** — both are relational databases, but MVCC, the type system, and transaction behavior differ meaningfully. Do not carry over a mental model unchecked.
+- **Picking a managed provider without checking its version or supported extensions** — some providers lock in an older version or do not enable an extension you need, such as `postgis`. Check compatibility before committing to a provider.
+- **Underestimating the ongoing work of self-hosting** — backups, monitoring, patching, and scaling are continuous work, not a one-time setup.
+
+> 💡 Real-world example
+>
+> **[Instagram](https://instagram-engineering.com/sharding-ids-at-instagram-1cf5a71e5a5c)** — scaled largely vanilla PostgreSQL to serve hundreds of millions of users using application-level sharding, showing how far plain Postgres can go with a good schema and scaling strategy.
+>
+> **[Supabase](https://supabase.com/docs/guides/getting-started/architecture)** — built its entire developer platform on top of PostgreSQL, using Postgres's own extensibility (realtime, auth, storage) as the core, instead of building a new database from scratch.
+
 export const quizWhatIs = [
   {
     q: 'In the relational model, what holds the data?',

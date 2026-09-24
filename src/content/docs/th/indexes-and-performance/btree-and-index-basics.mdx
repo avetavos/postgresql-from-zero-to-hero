@@ -207,9 +207,9 @@ Indexes:
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **GitLab** — ทีม database ของ GitLab มีกระบวนการ review index อย่างเป็นทางการก่อน merge index ใหม่เข้า production เพราะ index ที่ไม่ถูกใช้งานสร้างต้นทุนต่อการเขียนและพื้นที่เก็บข้อมูลอย่างเงียบ ๆ โดยไม่มีใครสังเกต
+> **[กระบวนการ database review ของ GitLab](https://docs.gitlab.com/development/database_review/)** — บังคับให้ต้องมี database review อย่างเป็นทางการ พร้อมแนบ query plan ก่อน merge การเปลี่ยนแปลง schema หรือ index ใหม่เข้า production เพราะ index ที่ไม่ถูกใช้งานสร้างต้นทุนต่อการเขียนและพื้นที่เก็บข้อมูลอย่างเงียบ ๆ โดยไม่มีใครสังเกต
 >
-> **pganalyze** — เครื่องมือ monitoring อย่าง pganalyze ถูกสร้างขึ้นมาเพื่อช่วยหาปัญหา index bloat และ index ที่ไม่ถูกใช้งานโดยเฉพาะ ทำให้ทีมเห็นได้ชัดว่า index ตัวไหนควรเก็บไว้และตัวไหนควร drop
+> **[pganalyze](https://pganalyze.com/)** — เครื่องมือ monitoring ที่สร้างขึ้นมาเพื่อดู index usage และประสิทธิภาพ query ตามช่วงเวลาโดยเฉพาะ ทำให้ทีมเห็นได้ชัดว่า index ตัวไหนควรเก็บไว้และตัวไหนควร drop
 
 export const quizBtree = [
   {

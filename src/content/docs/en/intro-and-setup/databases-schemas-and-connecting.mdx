@@ -163,6 +163,27 @@ It is easy to confuse the two main account ideas. A **database** is a container 
 Picture the four layers as nested boxes: a server holds databases, a database holds schemas, a schema holds tables. Knowing which box you are in answers most "where is my table?" questions, and writing qualified `schema.table` names spares you from search_path surprises.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| One database per app | Clean separation, simple mental model | Separate connection pools, more resource use |
+| Several schemas in one database | Shares a connection pool, can join across schemas | Must manage naming and permissions so they do not collide |
+| Qualified names (`schema.table`) | Unambiguous — instantly clear where the table lives | More to type |
+| Relying on `search_path` | Short, terse to write | Fragile, since the result changes with the session |
+
+## Common mistakes
+
+- **Relying on the default `search_path` in a shared database** — with several schemas and a duplicate table name, an unqualified name can silently resolve to the wrong schema with no error.
+- **Connecting as the `postgres` superuser role in a real environment** — create a role scoped to just what the application needs, to limit the damage if a credential leaks.
+- **Forgetting `CREATE DATABASE` cannot run inside a transaction block** — running it through a migration tool or script that wraps everything in a transaction fails immediately. Run that statement on its own.
+
+> 💡 Real-world example
+>
+> **Multi-tenant SaaS platforms** — many systems (including common Rails-on-Postgres setups) use schema-per-tenant inside a single database, getting a degree of data isolation without operating hundreds or thousands of separate databases.
+>
+> **Teams that split one database per app** — many companies follow one database per service, so each team's scaling, backups, and access control stay fully independent of each other.
+
 export const quizDatabasesSchemas = [
   {
     q: 'Which schema exists in every new database by default?',

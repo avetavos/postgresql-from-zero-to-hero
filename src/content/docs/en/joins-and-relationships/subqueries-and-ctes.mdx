@@ -354,6 +354,26 @@ The first `SELECT` is the starting point, and the part after `UNION ALL` feeds o
 They often compute the same thing. Choose a subquery for a small, one-off expression like `(SELECT avg(...))`, and a CTE when a step is reused or when naming it makes the whole query easier to read. Readability is a real feature — your future self maintaining the query will thank you.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| CTE (`WITH ...`) | Names each step, easy to read and review | More lines of code, and older versions used to materialize it separately from the main query |
+| Inline subquery | Short to write, sometimes better handled by the planner | Hard to read once nested deeply, especially with several levels |
+| Correlated subquery | Flexible, expresses per-row logic directly | Runs once per outer row, slow on large tables compared to a join |
+
+## Common mistakes
+
+- **Assuming a CTE is always materialized as a "fence"** — this behavior has changed. Current PostgreSQL versions can inline a CTE into the main query just like a plain subquery. Do not rely on the old assumption.
+- **Writing a correlated subquery when a join does the same job faster** — a correlated subquery re-runs once per outer row. If the goal is simply to join data, use a join or a window function instead.
+- **Nesting subqueries so deeply the query becomes unreadable** — once a query has three or four levels of nested parentheses, break it into named CTEs. It is far easier to debug and review.
+
+> 💡 Real-world example
+>
+> **Internal reporting queries** — chaining several named CTEs together is a common way to break a complex report into readable steps, so reviewers can follow the SQL top to bottom instead of tracing nested parentheses.
+>
+> **Data/analytics teams** — when building a multi-layer summary report (compute an intermediate metric, then filter on it), data teams often choose a CTE over nested subqueries so the query explains itself.
+
 export const quizSubqueries = [
   {
     q: 'What must a scalar subquery used in a comparison return?',

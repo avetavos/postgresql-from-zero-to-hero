@@ -258,7 +258,7 @@ column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น Po
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **GitHub / GitLab** — งาน insert ทั่วไปในแอปส่วนใหญ่ผ่าน ORM (เช่น ActiveRecord) เพื่อความสะดวกและ maintainability แต่ในจุดที่ throughput สูง เช่น event ingestion หรือ audit log พวกเขาจะลง SQL มือพร้อม `RETURNING` และ multi-row insert เพื่อลด round-trip
+> **งาน throughput สูง** — งาน insert ทั่วไปในแอปส่วนใหญ่ผ่าน ORM (เช่น ActiveRecord) เพื่อความสะดวกและ maintainability แต่ในจุดที่ throughput สูง เช่น event ingestion หรือ audit log ทีมมักจะลง SQL มือพร้อม `RETURNING` และ multi-row insert เพื่อลด round-trip
 >
 > **ระบบ bulk import ไฟล์ CSV ของผู้ใช้** — ใช้ `COPY` หรือ multi-row `INSERT` แทนการวน insert ทีละ row เพื่อให้ import ไฟล์หลักแสน row เสร็จในไม่กี่วินาทีแทนที่จะเป็นหลักนาที
 

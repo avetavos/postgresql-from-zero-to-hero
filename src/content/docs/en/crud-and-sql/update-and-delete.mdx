@@ -251,6 +251,27 @@ Inside a transaction, nothing is permanent until you `COMMIT`; a `ROLLBACK` thro
 The single most common production accident with SQL is an `UPDATE` or `DELETE` that ran without its `WHERE` clause. Build the muscle memory: type the `WHERE` first, the values second. When in doubt, do it inside a transaction you can roll back.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| `UPDATE`/`DELETE` with a specific `WHERE` | Safe, only touches the rows you intended | Requires getting the condition fully right before running it |
+| `UPDATE`/`DELETE` with no `WHERE` | Fast to write, no condition to think about | Hits every row immediately — a disaster if run against the wrong table or environment |
+| Wrapped in a transaction you can `ROLLBACK` | An emergency exit before the real `COMMIT` | Have to remember to open/close the transaction and check the result every time |
+| Run directly outside a transaction | Fast, no transaction to manage | No undo button if the result is wrong |
+
+## Common mistakes
+
+- **Running `UPDATE`/`DELETE` with no `WHERE` clause** — this hits every row in the table immediately. Build the habit of typing `WHERE` before filling in the condition.
+- **Not testing the condition with a `SELECT` first** — always run the matching `SELECT count(*) ... WHERE ...` to confirm how many rows will be affected before switching to `UPDATE`/`DELETE`.
+- **Assuming `DELETE` reclaims disk space immediately** — `DELETE` only marks rows as dead; reclaiming the space is `VACUUM`'s job.
+
+> 💡 Real-world example
+>
+> **Production data-change processes** — teams that treat data changes with care require a dry run of destructive SQL as a `SELECT` first, with the affected row count reviewed before anyone approves the real `UPDATE`/`DELETE`.
+>
+> **Manual data fixes** — a common SRE practice wraps every hand-run data change in a transaction that can `ROLLBACK`, with a second person reviewing the result before `COMMIT`.
+
 export const quizUpdateDelete = [
   {
     q: 'What happens if you run UPDATE books SET copies_sold = 0; with no WHERE clause?',

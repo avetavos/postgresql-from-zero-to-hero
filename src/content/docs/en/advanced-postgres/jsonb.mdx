@@ -267,6 +267,25 @@ After this, queries using `@>`, `?`, `?|`, and `?&` can use the index. If you on
 A `jsonb` column lets one table mix rigid, well-typed columns with a flexible document field. That hybrid is often all the schema flexibility an application needs — no separate document database required. Just keep the truly stable parts in real columns where Postgres can enforce them.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| `jsonb` column | Flexible schema — add or remove fields without a migration | Postgres cannot enforce types or foreign keys inside the document; correctness must come from the application |
+| Ordinary relational columns | Real type checking, constraints, and foreign keys enforced by Postgres | Every field must be known ahead of time, and every schema change needs a migration |
+
+## Common mistakes
+
+- **Dumping everything into one giant JSONB blob** — if the data is genuinely structured and needs to reference another table, use a relational column with a foreign key instead, since Postgres cannot validate a relationship hidden inside JSONB.
+- **Forgetting a GIN index on a column you query often** — with no index, every containment query scans the whole table. Add `USING gin (column)` as soon as you start regularly querying inside the document.
+- **Using JSONB just to avoid writing a migration** — if a field is always present and always the same type, a real column is safer and easier to read. Reserve JSONB for data that genuinely varies.
+
+> 💡 Real-world example
+>
+> **Flexible content platforms** — store highly variable content, such as page or block content that changes shape often, in `jsonb`, while keeping ownership, permissions, and workspace structure in strictly relational tables.
+>
+> **E-commerce and marketplace platforms** — store per-merchant custom fields on products and orders (often called metafields) in a flexible column so store-to-store variation does not require changing the platform's core schema.
+
 export const quizJsonb = [
   {
     q: 'What is the key practical advantage of jsonb over the plain json type?',

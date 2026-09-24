@@ -257,6 +257,26 @@ export const windowDiagram = `flowchart TD
 When a request says "for each row, also show its rank / running total / share of the group", that phrase "for each row" is your cue: you need a window function, not a `GROUP BY`. Keep the rows, add a column.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Window function (`ROW_NUMBER`, `RANK`, running total) | Computed in one query, no messy self-join needed | Must get `PARTITION BY`/`ORDER BY` right, or the result is silently wrong |
+| Self-join or subquery instead of a window function | Works on a database that lacks window functions | Longer to write, usually slower, and harder to read |
+| Compute rank/running totals in application code | Free to change the logic yourself | Requires pulling every row to the backend first; does not scale for large results |
+
+## Common mistakes
+
+- **Forgetting `PARTITION BY`** — if omitted, the entire result becomes one partition, so the rank or running total runs across everything instead of restarting per group as intended.
+- **Confusing `RANK()`, `DENSE_RANK()`, and `ROW_NUMBER()`** — `RANK()` leaves gaps after ties, `DENSE_RANK()` does not leave gaps, and `ROW_NUMBER()` always gives unique numbers even for tied values. Pick the one that matches the behavior you actually want.
+- **Not understanding query processing order** — window functions run *after* `GROUP BY`/aggregation in the logical query order, so you cannot use a window function directly in `WHERE`. Wrap it in a subquery or CTE and filter in the outer layer instead.
+
+> 💡 Real-world example
+>
+> **Activity feeds and per-channel leaderboards** — ranking the most active users within each group uses `ROW_NUMBER()`/`RANK()` with `PARTITION BY` directly in SQL, instead of pulling every row to rank it in code.
+>
+> **Contribution leaderboards** — a per-project leaderboard or summary report computes rank with a window function in the database, so one query returns both the detail rows and their rank without a self-join.
+
 export const quizWindows = [
   {
     q: 'How does a window function differ from GROUP BY?',

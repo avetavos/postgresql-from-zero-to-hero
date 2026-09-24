@@ -172,6 +172,25 @@ export const triggerDiagram = `flowchart TD
 The strength of a trigger is that it cannot be skipped — every insert or update goes through it, whatever client made the change. That same strength is its danger: behavior lives somewhere the application code never mentions. Use triggers for invariants you truly want enforced everywhere, and write them down.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Function/trigger in the database | Always enforced, no matter which client or script writes the table | Harder to read, test, and debug than application code; invisible from the app's codebase |
+| Logic in the application | Easy to read, straightforward to test, uses normal version control and tooling | Not enforced if another client or script writes data directly, bypassing that application |
+
+## Common mistakes
+
+- **Putting complex business logic in a trigger** — complex logic belongs in application code where anyone reading the codebase can see it, not hidden in a trigger nobody thinks to check.
+- **Forgetting a trigger exists** — and then being confused about why a row changed with no application code that ordered the change. Document every trigger clearly.
+- **Writing a slow trigger** — every insert/update on that table quietly gets slower, because the trigger runs inline on every write, not just on a query that calls it directly.
+
+> 💡 Real-world example
+>
+> **Audit logging** — the classic reason teams reach for a trigger, since every change must be recorded no matter which client or script writes the table. Leaving it to application code alone means writes that bypass the app go unrecorded.
+>
+> **Maintaining `updated_at`** — many teams use a `set_updated_at`-style trigger to guarantee the timestamp is always correct, while deliberately keeping the app's real business logic in application code instead, so it stays visible and testable.
+
 export const quizFunctions = [
   {
     q: 'What type must a function return so it can be used by a trigger?',

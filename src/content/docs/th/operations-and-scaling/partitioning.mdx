@@ -149,7 +149,7 @@ Partitioning ไม่ได้ทำให้ table เล็กลง — ข�
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Instagram** — partition/shard table ขนาดมหึมาอย่าง post หรือ event ตามเวลา หรือ user ID เพื่อให้ drop หรือ archive partition เก่าเป็น operation ระดับ metadata ที่เร็วมาก แทนที่จะต้อง `DELETE` ทีละ row
+> **แพลตฟอร์มโซเชียลขนาดใหญ่มาก** — partition/shard table ขนาดมหึมาอย่าง post หรือ event ตามเวลา หรือ user ID เพื่อให้ drop หรือ archive partition เก่าเป็น operation ระดับ metadata ที่เร็วมาก แทนที่จะต้อง `DELETE` ทีละ row
 >
 > **Time-series/event logging platform** — ระบบเก็บ log หรือ metric จำนวนมากมักใช้ range partitioning ตามวันหรือเดือน เพื่อให้ retention policy ทำได้ด้วยการ drop partition แทนการ delete แบบสแกนทั้ง table
 

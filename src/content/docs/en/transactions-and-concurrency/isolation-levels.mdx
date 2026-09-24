@@ -208,6 +208,25 @@ HINT:  The transaction might succeed if retried.
 Isolation is about ruling out specific anomalies, not about being maximally strict. Identify which anomaly would actually break your logic, choose the lowest level that forbids it, and add a retry loop if that level can abort. Correct and cheap beats strict and slow.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Serializable (strictest) | Prevents every anomaly, including write skew; the result behaves as if transactions ran one at a time | Lower throughput, because contention causes more frequent aborts and retries |
+| Read Committed (the default) | High throughput, almost no aborts from isolation conflicts | Allows non-repeatable reads, phantom reads, and write skew to happen |
+
+## Common mistakes
+
+- **Choosing Serializable everywhere "to be safe" without a retry loop** — Serializable routinely aborts a transaction with SQLSTATE `40001`. Without a retry loop, the application just breaks.
+- **Not wrapping a Serializable transaction in a retry loop** — the transaction fails on its very first conflict with no chance to succeed at all.
+- **Assuming a stricter level is always "more correct"** — each level only prevents specific anomalies. Understanding which anomaly a level prevents matters more than reflexively picking the strictest one.
+
+> 💡 Real-world example
+>
+> **Bank ledger systems** — a transfer transaction that affects account balances commonly runs at Serializable specifically to prevent write skew between two accounts read and written concurrently, accepting the retry overhead as the cost of correctness.
+>
+> **Sidekiq-style job queues** — use `SKIP LOCKED` together with a weaker isolation level like Read Committed, so multiple workers can grab jobs concurrently without blocking each other, trading away a correctness guarantee this kind of work does not need.
+
 export const quizIso = [
   {
     q: 'Which isolation level is the PostgreSQL default?',

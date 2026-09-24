@@ -118,6 +118,27 @@ Either way you land at the `postgres=#` prompt, ready to run SQL. When you are f
 Containers are meant to be thrown away and recreated freely, but your data should not be. Keeping the data in a named volume gives you the best of both: you can destroy and rebuild the container as often as you like while the rows stay safely on disk.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Run with Docker | Fast, disposable, identical setup on every machine | Container overhead, and slightly different from tuning a real production host |
+| Native PostgreSQL install | Closer to a real production environment, no extra layer | Trickier to install/remove, and differs across operating systems |
+| Use the default image as-is | Get working immediately, nothing extra to write | No tuning of memory or config for your specific workload |
+| Write a custom Dockerfile | Tune config and extensions exactly as needed | More image maintenance and updates to own |
+
+## Common mistakes
+
+- **Not mounting a named volume, then losing data on `docker compose down -v`** — without a volume bound to the data directory, all data disappears with the container. Always check that `volumes:` is bound correctly.
+- **Running as the default superuser even for local development** — always using the `postgres` user hides permission bugs you will hit for real in production. Create a scoped role to test with from local, too.
+- **Trusting `POSTGRES_HOST_AUTH_METHOD=trust` and forgetting it is unsafe** — this setting is convenient for local development, but must never be used outside a local machine, since it allows connecting with no password at all.
+
+> 💡 Real-world example
+>
+> **[docker-library/postgres](https://hub.docker.com/_/postgres)** — the official image is the standard starting point most courses and tutorials use, since it gives you a working database in seconds with nothing to install on the host.
+>
+> **Typical backend teams** — standardize on a `docker-compose.yml` as the entry point to a project, to cut down on "works on my machine" problems when onboarding someone new.
+
 export const quizDocker = [
   {
     q: 'Why mount a named volume at the Postgres data directory?',

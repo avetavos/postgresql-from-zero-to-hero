@@ -177,7 +177,7 @@ constraints อยู่ใน DDL แอปพลิเคชันจึงม
 >
 > **แพลตฟอร์ม e-commerce** — มักใช้ `CHECK (price >= 0)` และ foreign key ระหว่าง orders กับ customers ที่ระดับฐานข้อมูล เพื่อไม่ให้ web app, batch job หรือสคริปต์ของแอดมินตัวไหนเขียนข้อมูลที่ไม่สอดคล้องกันเข้าไปได้เลย
 >
-> **GitLab** — มีแนวทาง schema review ที่กำหนดให้ column แบบ relational แทบทุกตัวต้องมี foreign key constraint กำกับ เพื่อรักษา referential integrity ของฐานข้อมูลขนาดใหญ่ไว้ในระยะยาว
+> **[แนวทาง foreign key ของ GitLab](https://docs.gitlab.com/development/database/foreign_keys/)** — กำหนดให้ column แบบ relational แทบทุกตัวต้องมี foreign key constraint กำกับ (และมี automated test ตรวจใน schema ด้วย) เพื่อรักษา referential integrity ของฐานข้อมูลขนาดใหญ่ไว้ในระยะยาว
 
 export const quizConstraints = [
   {

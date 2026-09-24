@@ -140,6 +140,25 @@ wal_level = logical
 The write-ahead log was invented so PostgreSQL could recover after a crash by replaying recent changes. Replication reuses that same log: a replica is simply another server replaying the primary's WAL, forever and over the network. Understanding the WAL is understanding replication.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Synchronous replication | No data loss on failover, since the replica has the WAL before commit acknowledges | Every write waits on a network round trip to the replica, raising latency |
+| Asynchronous replication | Fast writes, since the primary never waits on the replica | The replica can lag behind, with a small chance of data loss on failover |
+
+## Common mistakes
+
+- **Assuming a replica is always caught up and reading a just-written row from it immediately** — this hits the classic "read-your-writes" problem, since asynchronous replication lags. Send reads that must be fresh to the primary.
+- **Never testing an actual failover** — nobody knows what really happens when the primary goes down until it has been drilled. Practice promoting a replica regularly.
+- **Treating a single replica as a complete disaster-recovery plan** — a replica is not a backup, because it copies mistakes and deletions too. A separate backup is still required.
+
+> 💡 Real-world example
+>
+> **[Patroni](https://github.com/zalando/patroni)** — an open-source tool, originally started at Zalando and now community-maintained, that is widely used to manage automated failover for PostgreSQL clusters in production.
+>
+> **[Neon](https://neon.com/docs/introduction/branching) and Supabase** — build features like database branching and read replicas on top of PostgreSQL's own replication primitives.
+
 export const quizReplication = [
   {
     q: 'What does a streaming replica do with the WAL it receives from the primary?',

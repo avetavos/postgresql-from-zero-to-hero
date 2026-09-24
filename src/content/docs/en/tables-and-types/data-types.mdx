@@ -198,6 +198,27 @@ SELECT id, status FROM orders;
 The right type does double duty: it stores your data efficiently and it rejects values that should never exist. A column typed `numeric` for money, `timestamptz` for time, and an `enum` for a status field turns three classes of bug into impossible states. Choosing well at creation time is cheaper than fixing data later.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Fixed column types (`integer`, `text`, `timestamptz`) | Enforces data correctness, smaller storage, fast comparisons and indexing | Requires knowing the data shape up front; changing type later has a cost |
+| `jsonb` for unpredictable shapes | Very flexible, no migration needed every time the shape changes | Harder to validate and index; deep lookups are slower than a plain column |
+| `numeric` for money | Exact precision, no accumulated rounding error | Slightly slower than floating point for heavy computation |
+| `float`/`double precision` | Fast to compute, well suited to scientific work | An approximation — unsuitable for money because rounding error accumulates |
+
+## Common mistakes
+
+- **Using the `money` type** — it has locale and precision pitfalls that are hard to control, so most teams avoid it in new schemas and use `numeric` instead.
+- **Storing time without a time zone (`timestamp` instead of `timestamptz`)** — the value loses the context of which time zone it belongs to, which becomes a bug that only shows up once users span multiple time zones.
+- **Using `float`/`double precision` for money** — binary floating point cannot represent a value like 0.10 exactly. Use `numeric`, or store an integer count of the smallest unit (cents) instead.
+
+> 💡 Real-world example
+>
+> **Banking and financial ledger systems** — use `numeric`, or store amounts as an integer in the smallest unit (like cents), almost everywhere. No team stores money as `float`, because the accumulated rounding error is unacceptable in accounting.
+>
+> **Flexible content platforms** — use `jsonb` for the part of the schema that is genuinely variable (like block content), while keeping typed columns for metadata that needs frequent querying and constraints — an example of mixing both approaches in one system.
+
 export const quizDataTypes = [
   {
     q: 'Which type should you use to store a monetary amount exactly?',

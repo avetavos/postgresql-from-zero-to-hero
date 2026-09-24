@@ -276,6 +276,27 @@ List the columns you want after `SELECT`. Use `*` only for quick exploration; in
 Pagination only makes sense on a stable sort. If two rows tie on your sort column, add a tiebreaker such as `ORDER BY born DESC, id` so the same row never appears on two pages.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Explicit column list | Stable API, less data over the wire, no leaking of sensitive columns | Query needs an edit when the needed columns change |
+| `SELECT *` | Fast to write, convenient for prototyping or exploring data | Breaks silently when someone adds/removes/renames a column later, and can leak columns that should not be exposed |
+| Filter with `WHERE` in SQL | Pushed down to the database, can use an index, only the needed rows cross the wire | Requires understanding SQL and planning indexes that match the filter pattern |
+| Fetch everything and filter in application code | Easy application-side logic, no complex SQL to write | Wastes bandwidth, misses the chance to use an index, and gets slower as the table grows |
+
+## Common mistakes
+
+- **Using `SELECT *` in production code** — when someone adds a column later, the result set changes unintentionally and may leak a sensitive column. Always name the columns you need.
+- **Wrapping an indexed column in a function inside `WHERE`**, such as `WHERE lower(email) = ...` — this stops a plain index from being used. Use an expression index or rewrite the query instead.
+- **Assuming `NULL` matches with `=`** — `WHERE born = NULL` returns no rows at all, because `NULL` compares under three-valued logic. Use `IS NULL` instead.
+
+> 💡 Real-world example
+>
+> **Well-designed public APIs** — force clients to name the fields they want and always paginate, to prevent a `SELECT *`-style response from silently changing its contract and to keep the query plan predictable.
+>
+> **Real-time dashboards** — filter with `WHERE` against a planned index instead of pulling the whole table and filtering in code, so the query stays fast even as the table grows to tens of millions of rows.
+
 export const quizSelect = [
   {
     q: 'How do you correctly find rows where the born column is unknown?',

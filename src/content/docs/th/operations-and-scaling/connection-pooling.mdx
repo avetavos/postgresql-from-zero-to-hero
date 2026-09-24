@@ -156,9 +156,9 @@ default_pool_size = 20
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Supabase** — ให้ pooler (PgBouncer แบบ managed) เป็นค่าเริ่มต้นหน้า PostgreSQL instance ของทุกโปรเจกต์ เพราะแอปพลิเคชัน serverless เปิด connection พร้อมกันได้มากกว่าที่ฐานข้อมูลรองรับโดยตรง
+> **[Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres)** — วาง shared pooler (Supavisor) ไว้หน้า PostgreSQL instance ของทุกโปรเจกต์เป็นค่าเริ่มต้น และมี dedicated pooler แบบ PgBouncer ให้ใช้ในแผนแบบเสียเงิน เพราะแอปพลิเคชัน serverless เปิด connection พร้อมกันได้มากกว่าที่ฐานข้อมูลรองรับโดยตรง
 >
-> **Amazon RDS Proxy** — วางตัวเป็น pooler ระดับ managed service สำหรับ RDS PostgreSQL เพื่อให้ Lambda function หรือแอปที่ scale เร็วไม่ทำให้ connection ของฐานข้อมูลพุ่งจนล้น
+> **[Amazon RDS Proxy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html)** — วางตัวเป็น pooler ระดับ managed service สำหรับ RDS PostgreSQL เพื่อให้ Lambda function หรือแอปที่ scale เร็วไม่ทำให้ connection ของฐานข้อมูลพุ่งจนล้น
 
 export const quizPooling = [
   {

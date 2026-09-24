@@ -190,6 +190,27 @@ Indexes:
 Do not index speculatively. Look at the `WHERE`, `JOIN`, and `ORDER BY` clauses your application really uses, then add the B-tree indexes that serve them. An unused index is pure overhead: it costs you on every write and gives you nothing on reads.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Add a new index | Much faster `SELECT`/`WHERE`/`JOIN` on that column | Every `INSERT`, `UPDATE`, `DELETE` must also update the index — slower writes and more disk space |
+| No index (rely on a seq scan) | Fast writes, nothing to maintain | Slower reads as the table grows, especially for selective queries |
+| Plain `CREATE INDEX` | Builds faster | Locks the table against writes while it builds |
+| `CREATE INDEX CONCURRENTLY` | Does not lock writes while building | Builds slower and uses more resources; can fail and leave an invalid index behind |
+
+## Common mistakes
+
+- **Indexing every column "just in case"** — every index that is never actually used still costs something on every write. Look at the `WHERE`, `JOIN`, and `ORDER BY` clauses your application really runs before adding one.
+- **Never dropping unused indexes** — an old index that no query relies on keeps consuming space and slowing writes indefinitely. Check `pg_stat_user_indexes` periodically and consider dropping the ones with no scans.
+- **Building an index on a large, live table without `CONCURRENTLY`** — a plain `CREATE INDEX` holds a lock that blocks writes for the whole build. On a large table that can mean a long outage; always use `CREATE INDEX CONCURRENTLY` in production.
+
+> 💡 Real-world example
+>
+> **[GitLab's database review process](https://docs.gitlab.com/development/database_review/)** — requires a formal database review, including query plans, before a change touching the schema or an index merges into production, because an unused index quietly costs write throughput and storage that nobody notices otherwise.
+>
+> **[pganalyze](https://pganalyze.com/)** — a PostgreSQL monitoring tool built specifically to surface index usage and query performance over time, making it obvious which indexes are pulling weight and which are candidates to drop.
+
 export const quizBtree = [
   {
     q: 'Which index type does CREATE INDEX build when you do not specify one?',

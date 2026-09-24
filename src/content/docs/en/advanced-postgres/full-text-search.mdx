@@ -232,6 +232,25 @@ ORDER BY rank DESC;
 For many applications, PostgreSQL full-text search removes the need for a separate search service. You get stemming, stop words, boolean queries, and ranking in plain SQL, indexed by GIN. Reach for a dedicated engine only when you outgrow it — not by default.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| PostgreSQL full-text search | No extra service to run; data and index live together; ranking is "good enough" for many cases | More limited relevance tuning and faceted search than a dedicated engine |
+| Elasticsearch (or a separate search engine) | Fine-grained relevance tuning, facets, and much better search scaling | An extra service to run, plus keeping two systems in sync |
+
+## Common mistakes
+
+- **Reaching for Elasticsearch by default without checking first** — many systems have traffic and relevance needs that PostgreSQL's full-text search already handles comfortably. Try what you already have before adding new infrastructure.
+- **Forgetting a GIN index on the `tsvector` column** — with no index, every search scans the whole table and recomputes `to_tsvector` each time, which gets slower as the table grows.
+- **Not updating the search vector when the source text changes** — without a generated column or a trigger keeping the `tsvector` in sync with the latest `title`/`body`, search results reference stale text that no longer matches what the user sees.
+
+> 💡 Real-world example
+>
+> **Hasura and PostgREST-based APIs** — commonly expose PostgreSQL's full-text search directly through `tsvector`/`tsquery` instead of bolting on a separate search service, since the query layer is already connected to the database.
+>
+> **Many small-to-mid-size SaaS products** — move off a separate Elasticsearch cluster onto PostgreSQL full-text search once they find their real search volume does not need infrastructure of that size, cutting both cost and operational complexity.
+
 export const quizFts = [
   {
     q: 'What does to_tsvector do to a phrase like "The cats were running"?',

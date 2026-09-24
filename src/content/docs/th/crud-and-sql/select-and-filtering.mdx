@@ -293,7 +293,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **GitHub API / GitLab API** — บังคับให้ client ระบุ field ที่ต้องการอย่างชัดเจนและมี pagination เสมอ เพื่อป้องกัน `SELECT *` ที่แอบเปลี่ยน contract ของ response และรักษา query plan ให้คาดเดาได้
+> **API สาธารณะที่ออกแบบมาดี** — บังคับให้ client ระบุ field ที่ต้องการอย่างชัดเจนและมี pagination เสมอ เพื่อป้องกัน `SELECT *` ที่แอบเปลี่ยน contract ของ response และรักษา query plan ให้คาดเดาได้
 >
 > **ระบบ dashboard แบบ real-time** — กรองข้อมูลด้วย `WHERE` และ index ที่วางแผนไว้ล่วงหน้าแทนการดึงทั้ง table มากรองในโค้ด เพื่อให้ query ตอบสนองไวแม้ table มีหลายสิบล้าน row
 

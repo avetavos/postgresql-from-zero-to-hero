@@ -180,6 +180,27 @@ Because the three steps run inside one transaction, the table is never seen by o
 Treat every schema change as a migration: a small, named, reversible step you can test before it touches production. Add columns with defaults or backfill them, tighten constraints only after the data is clean, and run multi-step changes in a transaction. A careful migration is invisible to users; a careless one is an outage.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Online/non-blocking migration | Safe even during normal business hours; does not affect traffic | Needs more steps and more planning to write |
+| Straightforward `ALTER TABLE` | Fast to write and run, short code | Can hold a strict lock that blocks production traffic on a large table |
+| Add a column with a constant `DEFAULT` (modern PostgreSQL) | Metadata-only — does not rewrite every row, so it is very fast | Only works for a constant default, not an expression computed per row |
+| Change a column's type with `ALTER COLUMN ... TYPE` | Direct, a single statement | Triggers a full table rewrite, scanning and rewriting every row |
+
+## Common mistakes
+
+- **Running `ALTER TABLE ... TYPE` on a large table during peak traffic** — this statement holds an exclusive lock for the whole table rewrite. Running it under load blocks both reads and writes for a long time.
+- **Changing a column's type without checking `USING` carefully** — if the conversion expression does not actually match the existing data, you can get corrupted values or a statement that fails partway through.
+- **Adding a `NOT NULL` column with no default and forgetting to backfill** — existing rows have no value for the new column, so the constraint is violated immediately and the statement fails. Backfill first, then add `NOT NULL`.
+
+> 💡 Real-world example
+>
+> **[GitLab's migration style guide](https://docs.gitlab.com/development/database/avoiding_downtime_in_migrations/)** — requires application changes to deploy before a `NOT NULL` constraint is added, and recommends a nullable column plus a separate backfill step, specifically to avoid holding long locks on a large production database during deploys.
+>
+> **Teams operating very large schemas** — favor `pg_online_schema_change`-style tooling or splitting a migration into several small steps, especially on large tables, so a schema change does not disrupt real traffic during deploy.
+
 export const quizAltering = [
   {
     q: 'Why does adding a NOT NULL column without a default fail on a table that already has rows?',

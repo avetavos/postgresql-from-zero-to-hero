@@ -141,6 +141,25 @@ From your application's point of view, the pooler looks just like PostgreSQL. Yo
 The core insight of pooling is that most application connections sit idle most of the time, yet each idle PostgreSQL connection still costs a process. A pooler lets those idle moments be shared. You are not adding capacity to the database — you are stopping clients from hoarding it while they have nothing to do.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Transaction-mode pooling (PgBouncer) | Supports far more clients per real PostgreSQL connection; cheap and scalable | Session-level features like prepared statements, `SET`, and advisory locks are not safe to use |
+| Session-mode pooling / no pooler at all | Full support for session-level features, a straightforward connection | PostgreSQL connections are expensive and limited, so far fewer clients can be served |
+
+## Common mistakes
+
+- **Ignoring connection pooling until a `too many connections` error hits production** — set up a pooler from the start, rather than waiting for the problem to happen first.
+- **Using transaction-mode pooling when the code depends on session-level features like `SET` or advisory locks** — these fail silently, because the next statement in the same logical session may land on a different server connection. Check the code before switching modes.
+- **Sizing the pool much larger than the database's real `max_connections` capacity** — an oversized pool just moves the problem onto the database. Size it to the server's real capacity instead.
+
+> 💡 Real-world example
+>
+> **[Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres)** — puts a shared pooler (Supavisor) in front of every project's PostgreSQL instance by default, with a dedicated PgBouncer-based pooler available on paid plans, because serverless applications open far more concurrent connections than the database can serve directly.
+>
+> **[Amazon RDS Proxy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html)** — acts as a managed pooler for RDS PostgreSQL, so Lambda functions or fast-scaling applications do not overwhelm the database's connection limit.
+
 export const quizPooling = [
   {
     q: 'Why are PostgreSQL connections considered heavy?',

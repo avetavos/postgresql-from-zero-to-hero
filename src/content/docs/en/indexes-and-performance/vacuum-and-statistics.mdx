@@ -139,6 +139,27 @@ The catch is severe: `VACUUM FULL` takes an **exclusive lock** on the table for 
 MVCC trades in-place updates for non-blocking reads, and the price is dead tuples that must be cleaned up. Autovacuum pays that price for you: it reclaims space and refreshes statistics in the background. Leave it on, `ANALYZE` after big loads, and save `VACUUM FULL` for emergencies — that is almost the entire maintenance story.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Plain `VACUUM` | Does not block reads or writes; safe to run anytime | Only makes space reusable inside the table; does not return disk to the OS |
+| `VACUUM FULL` | Rewrites the table compactly and actually returns disk to the OS | Takes an exclusive lock that blocks both reads and writes for the whole run |
+| Autovacuum (automatic) | Runs continuously in the background with almost no upkeep | Cannot be tuned as precisely as a manual run; may fall behind during very heavy bulk loads |
+| Manual vacuum | You control exactly when it runs — good right after a bulk load | More operational burden — someone has to watch for it and trigger it |
+
+## Common mistakes
+
+- **Treating `VACUUM FULL` as routine maintenance** — `VACUUM FULL` takes an exclusive lock that blocks every read and write. Reserve it for recovering from severe bloat during a maintenance window, not for daily use.
+- **Disabling or tuning autovacuum too conservatively** — thresholds that are too loose, or autovacuum turned off entirely, let dead tuples accumulate unnoticed until they become bloat that is hard to fix later.
+- **Skipping `ANALYZE` after a large bulk load** — after loading a lot of data, an import, or a migration, the old statistics go stale immediately. If autovacuum has not caught up yet, the planner gets bad estimates and picks a poor plan. Run `ANALYZE` by hand right after these operations.
+
+> 💡 Real-world example
+>
+> **High-write SaaS platforms** — teams running PostgreSQL under a heavy write load treat autovacuum lag and the dead-tuple ratio as a core operational metric, because uncontrolled table bloat is one of the top causes of PostgreSQL performance degrading in production.
+>
+> **DBA teams using `pg_stat_user_tables`** — many teams set automatic alerts on `n_dead_tup` and `last_autovacuum` so they know ahead of time, before queries actually slow down, instead of waiting for user complaints.
+
 export const quizVacuum = [
   {
     q: 'Why does an UPDATE leave a dead tuple behind in PostgreSQL?',

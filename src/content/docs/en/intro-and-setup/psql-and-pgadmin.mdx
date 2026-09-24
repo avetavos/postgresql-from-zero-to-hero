@@ -134,6 +134,26 @@ Notice that every driver accepts the same `postgresql://user:password@host:port/
 psql, pgAdmin, and your application driver all connect to the very same PostgreSQL server with the very same credentials. Choose the door that suits the task — the shell for speed, the GUI for exploring, the driver for your app — and know that the database underneath does not care which one you walked through.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| `psql` CLI | Fast, scriptable, low overhead | Must remember meta-commands and syntax |
+| pgAdmin GUI | Clear view of data structure, friendly for beginners | Heavier, and needs a desktop machine with a browser open |
+| A driver in application code | The real thing production runs every day | Writing extra code just to run one query is not worth it |
+
+## Common mistakes
+
+- **Relying on a GUI alone and never learning the meta-commands** — the moment you SSH into a production box with no GUI available, you are stuck without `\dt`, `\d`, and friends.
+- **Forgetting pgAdmin/DBeaver connect using the container network's hostname, not `localhost`** — from the host machine you can use `localhost`, but from another container you need the service name, such as `postgres`, as set in compose.
+- **Copy-pasting SQL between tools without checking transaction state** — psql and some GUIs handle autocommit differently. Copying a query containing `BEGIN`/`COMMIT` between tools can leave a transaction hanging without you noticing.
+
+> 💡 Real-world example
+>
+> **Most backend teams** — use `psql` for quick production debugging over SSH, since a real server usually has no GUI available.
+>
+> **Data analysts** — mainly use pgAdmin or DBeaver for exploratory data work, since they can see table structure and results as a grid instantly, without memorizing syntax.
+
 export const quizPsqlPgadmin = [
   {
     q: 'Which psql meta-command lists the tables in the current database?',

@@ -273,9 +273,9 @@ export const windowDiagram = `flowchart TD
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **Discord** — activity feed และการจัดอันดับผู้ใช้ที่ active ที่สุดในแต่ละ channel ใช้ `ROW_NUMBER()`/`RANK()` แบบ `PARTITION BY` channel โดยตรงใน SQL แทนที่จะดึงทุกข้อความมาจัดอันดับในโค้ด
+> **Activity feed และ leaderboard รายช่อง** — การจัดอันดับผู้ใช้ที่ active ที่สุดในแต่ละกลุ่มใช้ `ROW_NUMBER()`/`RANK()` แบบ `PARTITION BY` โดยตรงใน SQL แทนที่จะดึงทุกข้อความมาจัดอันดับในโค้ด
 >
-> **GitLab** — leaderboard และรายงานสรุป contribution ต่อผู้ใช้ในแต่ละ project คำนวณอันดับด้วย window function ในฐานข้อมูล ทำให้ query เดียวได้ทั้งรายละเอียดและอันดับโดยไม่ต้อง self-join
+> **Leaderboard สรุป contribution** — รายงานสรุป contribution ต่อผู้ใช้ในแต่ละ project คำนวณอันดับด้วย window function ในฐานข้อมูล ทำให้ query เดียวได้ทั้งรายละเอียดและอันดับโดยไม่ต้อง self-join
 
 export const quizWindows = [
   {

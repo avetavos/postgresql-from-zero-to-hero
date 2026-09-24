@@ -268,7 +268,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **กระบวนการเปลี่ยนแปลงข้อมูล production ของ GitLab** — กำหนดให้ dry-run คำสั่ง SQL ที่ทำลายข้อมูล (destructive) ด้วยเวอร์ชัน `SELECT` ก่อนเสมอ แล้วให้ทีมรีวิวจำนวน row ก่อนอนุมัติให้รัน `UPDATE`/`DELETE` จริง
+> **กระบวนการเปลี่ยนแปลงข้อมูล production ที่รัดกุม** — กำหนดให้ dry-run คำสั่ง SQL ที่ทำลายข้อมูล (destructive) ด้วยเวอร์ชัน `SELECT` ก่อนเสมอ แล้วให้ทีมรีวิวจำนวน row ก่อนอนุมัติให้รัน `UPDATE`/`DELETE` จริง
 >
 > **ทีม SRE ทั่วไปที่ทำ manual data fix** — บังคับให้ทุกการเปลี่ยนแปลงข้อมูลด้วยมือห่อด้วย transaction ที่ `ROLLBACK` ได้ พร้อมมีคนที่สองช่วยรีวิวผลก่อน `COMMIT`
 

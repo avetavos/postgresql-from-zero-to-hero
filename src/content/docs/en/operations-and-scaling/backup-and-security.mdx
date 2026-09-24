@@ -139,6 +139,25 @@ With this policy, a query against `orders` silently returns only rows whose `ten
 No single control is enough. The network gate keeps strangers out, authentication proves identity, role privileges limit actions, and row-level security limits visibility. Backups sit beneath all of it as the final safety net. Operate as though each layer will occasionally fail, and make sure the next one still protects you.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Automated backups with regular restore tests | Actually recoverable when a real disaster happens | Costs storage and requires operational discipline |
+| Relying on replication alone for durability | Fast failover, high availability | A replica is not a backup — it copies mistakes and deletions too |
+
+## Common mistakes
+
+- **Setting up backups once and never testing a restore** — nobody knows a backup is broken until they actually need it. Schedule regular restore drills.
+- **Treating a replica as a backup** — a replica tracks the primary in near real time; it is not a separate point-in-time-recoverable copy. Always keep real backups alongside it.
+- **Giving an application role broader privileges than it needs (such as using a superuser role for the app)** — follow least privilege, so each role only gets the access it actually needs.
+
+> 💡 Real-world example
+>
+> **Large-scale social platforms** — treat regular backup and recovery drills as part of standard infrastructure practice once they operate at a scale where an untested backup is not an acceptable risk.
+>
+> **Common practice on production PostgreSQL teams** — regular, automated restore testing is treated as a standard practice, not just taking the backup itself.
+
 export const quizBackupSecurity = [
   {
     q: 'Which backup approach is best suited to point-in-time recovery on a large cluster?',

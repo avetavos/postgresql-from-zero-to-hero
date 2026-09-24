@@ -160,6 +160,25 @@ Constraints live in DDL, so applications usually add them through a migration. T
 Every constraint you add is a rule the database enforces on your behalf, every time, for every writer. Push integrity rules down into the schema rather than scattering them across application code, and a whole class of bad data simply becomes impossible to store.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Enforce invariants with database constraints (`CHECK`, `UNIQUE`, `FOREIGN KEY`) | Always correct, no matter which client or service writes the data | Changing the rule later needs a migration and may affect existing rows |
+| Validate only in application code | Fast to change the rule, no schema to touch | Bad data can slip in easily through a raw script, another service, or a migration that forgot to check |
+
+## Common mistakes
+
+- **Relying only on application-level validation** — an ad-hoc script, batch job, or other service writing directly to the database can always bypass application validation. A database-level constraint is the last line of defense.
+- **Forgetting to decide a foreign key's `ON DELETE` behavior** — by default a foreign key is `ON DELETE NO ACTION` (equivalent to `RESTRICT`), which blocks deleting a parent row that is still referenced and raises a foreign-key violation instead of leaving an orphan. The real risk is the opposite: accidentally choosing `ON DELETE CASCADE` and deleting more child rows than intended.
+- **Adding a `UNIQUE` constraint on a heavily written table without thinking about the index** — `UNIQUE` automatically creates an index, which adds cost to every insert/update on a table with high write volume. Plan for it ahead of time.
+
+> 💡 Real-world example
+>
+> **E-commerce platforms** — commonly use `CHECK (price >= 0)` and a foreign key between orders and customers at the database level, so no web app, batch job, or admin script can ever write inconsistent data.
+>
+> **[GitLab's foreign key guidelines](https://docs.gitlab.com/development/database/foreign_keys/)** — require a foreign key on nearly every column that references another table, and even enforce it with an automated schema test, to preserve referential integrity across a very large database over the long term.
+
 export const quizConstraints = [
   {
     q: 'What does a FOREIGN KEY constraint guarantee?',

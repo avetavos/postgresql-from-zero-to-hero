@@ -188,6 +188,27 @@ When the row already exists, zero rows are affected; when it is new, one row is 
 The real win of `ON CONFLICT` is atomicity. A check-then-insert in application code can lose a race between two requests, but a single upsert statement either inserts or updates exactly once, with the unique constraint enforcing correctness for you.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| `INSERT ... ON CONFLICT` | Atomic, one round trip, no race condition | Needs a unique constraint or unique index for the conflict to target |
+| Check-then-insert in application code | Easy to read, logic is straightforward | A classic race condition when multiple requests run at once |
+| `DO UPDATE` on conflict | Data is always synced to the latest value | Can unintentionally overwrite existing values if you are not careful |
+| `DO NOTHING` on conflict | Safe, never overwrites existing data | Duplicate events are silently dropped even when an update was actually needed |
+
+## Common mistakes
+
+- **Using `SELECT` to check whether a row exists, then `INSERT` in application code** — this races when multiple requests see "no row" at the same time. Use `ON CONFLICT` instead for atomicity.
+- **Forgetting that `ON CONFLICT` needs a unique/exclusion constraint to target** — if the column named in `ON CONFLICT (...)` is not unique, PostgreSQL raises an error immediately.
+- **Using `DO NOTHING` when the row actually needed an update** — this leaves stale data in place silently. Choose between `DO UPDATE` and `DO NOTHING` based on the real intent.
+
+> 💡 Real-world example
+>
+> **E-commerce checkout** — uses `ON CONFLICT` to create an order idempotently when a client retries a failed request (such as a network timeout), without creating a duplicate order.
+>
+> **Inventory/stock management** — uses the same upsert primitive to apply stock-count update events that a message queue may redeliver, without corrupting the stock number through a race condition.
+
 export const quizUpsert = [
   {
     q: 'What must exist on a column before ON CONFLICT (col) can detect a duplicate?',

@@ -246,6 +246,25 @@ The debit and the final credit are kept; only the work between the savepoint and
 Before `COMMIT`, your changes live only in your transaction and can vanish with a single `ROLLBACK`. After `COMMIT`, durability takes over and the change is written to survive a crash. Treat the commit as the moment you are sure.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Wrap related statements in `BEGIN...COMMIT` | Atomicity — guarantees the whole thing succeeds or nothing happens | You must handle the error path (`ROLLBACK`) yourself, and an open transaction holds locks longer |
+| Let each statement auto-commit | Simpler code, no transaction to manage | If a crash or error happens partway through, data can end up inconsistent, since each statement commits separately |
+
+## Common mistakes
+
+- **Forgetting to `COMMIT` or `ROLLBACK`, leaving a transaction open** — an open transaction keeps holding locks and stalls vacuum cleanup. Always pair `BEGIN` with an ending on every path, success or error.
+- **Assuming several statements are automatically atomic** — without a `BEGIN`, each statement commits separately and immediately. A crash between statements leaves the data half-done.
+- **Not handling an error inside a transaction** — once one statement fails, the transaction becomes aborted immediately. Every subsequent statement is silently rejected until you `ROLLBACK`.
+
+> 💡 Real-world example
+>
+> **Banking and payment systems** — a transfer that debits one account and credits another must always be wrapped in a single transaction, so a crash between the two statements never makes money disappear or appear out of nowhere. This is the classic reason ACID transactions were designed.
+>
+> **Payment and e-commerce systems** — creating an order typically needs to deduct stock and record the order together in one transaction. If any step fails, both operations must roll back together, instead of leaving stock deducted with no order created.
+
 export const quizBasics = [
   {
     q: 'What does ROLLBACK do to the statements run since BEGIN?',

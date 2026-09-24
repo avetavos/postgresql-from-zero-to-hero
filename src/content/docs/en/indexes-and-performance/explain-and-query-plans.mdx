@@ -56,10 +56,10 @@ The top line also names the strategy: here, an `Index Scan` using a named index,
 
 ## EXPLAIN ANALYZE: what really happened
 
-`EXPLAIN ANALYZE` actually *runs* the query and reports real timings alongside the estimates. Adding `BUFFERS` also reports how many data pages were read, which tells you whether the work came from cache or from disk.
+`EXPLAIN ANALYZE` actually *runs* the query and reports real timings alongside the estimates. As of PostgreSQL 18, `ANALYZE` automatically includes buffer usage too — how many data pages were read, which tells you whether the work came from cache or from disk — so you no longer need to spell out `BUFFERS` separately (on older versions, or to be explicit, you can still write `EXPLAIN (ANALYZE, BUFFERS)`; add `BUFFERS OFF` if you specifically want to suppress it).
 
 ```sql
-EXPLAIN (ANALYZE, BUFFERS)
+EXPLAIN ANALYZE
 SELECT * FROM books WHERE author_id = 4;
 ```
 
@@ -115,8 +115,28 @@ A common surprise: you create an index, but `EXPLAIN` still shows a `Seq Scan`. 
 - Read plan trees inside-out: the most indented nodes execute first and feed their parents.
 
 <Callout title="Let EXPLAIN replace guessing">
-Before you add an index or rewrite a query, run `EXPLAIN (ANALYZE, BUFFERS)` and read what PostgreSQL actually does. The plan tells you the scan type, where the time goes, and whether your estimates match reality — turning performance work from guesswork into measurement.
+Before you add an index or rewrite a query, run `EXPLAIN (ANALYZE, BUFFERS)` (or just `EXPLAIN ANALYZE` on PostgreSQL 18+) and read what PostgreSQL actually does. The plan tells you the scan type, where the time goes, and whether your estimates match reality — turning performance work from guesswork into measurement.
 </Callout>
+
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| `EXPLAIN` | Runs instantly, safe on any query since nothing actually executes | Only gives statistics-based estimates, not real numbers |
+| `EXPLAIN ANALYZE` | Shows real timing, real row counts, and (since PostgreSQL 18) buffer usage by default | Actually runs the query — an `UPDATE`/`DELETE` really changes data |
+| `EXPLAIN (ANALYZE, BUFFERS OFF)` | Slightly less output when you only care about timing, not I/O | You lose the cache-vs-disk information `Buffers` gives you |
+
+## Common mistakes
+
+- **Tuning a query by guesswork instead of running `EXPLAIN` first** — guessing why a query is slow is usually wrong. Run `EXPLAIN` to see what strategy the planner actually chose before changing anything.
+- **Running `EXPLAIN ANALYZE` on an `UPDATE`/`DELETE` without wrapping it in a rollback-able transaction** — `EXPLAIN ANALYZE` really executes the query, so a write statement really changes the data. Wrap it in a transaction and `ROLLBACK` once you have read the plan.
+- **Ignoring a large gap between estimated and actual `rows`** — a wide gap is a sign that statistics are stale, which leads to bad plans. Run `ANALYZE` to refresh those estimates.
+
+> 💡 Real-world example
+>
+> **[pganalyze](https://pganalyze.com/)** — automatically collects `EXPLAIN` plans and tracks query performance trends over time, helping teams catch a regression before users feel it.
+>
+> **[GitLab's database review process](https://docs.gitlab.com/development/database_review/)** — requires a link to an `EXPLAIN ANALYZE` plan for any new or changed query in a merge request, so reviewers see the real impact before it merges.
 
 export const quizExplain = [
   {

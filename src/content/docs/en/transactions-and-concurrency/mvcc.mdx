@@ -147,6 +147,25 @@ The old versions left behind by updates and deletes are called **dead tuples**. 
 The reason a slow analytics query and a flood of updates can run together happily is MVCC. The reader sees a frozen snapshot; the writers append new versions beside the old ones. Nobody blocks anybody. The price is the dead tuples left behind, which is exactly why VACUUM exists.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| MVCC (readers do not block writers, writers do not block readers) | Very high concurrency; a long analytics query can run alongside write load with neither waiting on the other | Must retain old row versions as dead tuples, using extra space and requiring `VACUUM` to clean up |
+| Lock-based concurrency control (used by some other databases) | No accumulating dead tuples, no vacuum needed | Readers and writers block each other, lowering throughput under a mixed read-write workload |
+
+## Common mistakes
+
+- **Assuming `UPDATE` overwrites the row in place with no side effect** — under MVCC, `UPDATE` always creates a new version and leaves the old one behind as a dead tuple; it is not an in-place byte overwrite.
+- **Not realizing a long-running transaction stalls vacuuming for the whole database** — an open transaction's snapshot may still need old versions, so `VACUUM` cannot remove those dead tuples — not just in that transaction's own table, but system-wide.
+- **Forgetting a `SELECT` may be reading from an old snapshot** — while another transaction has already committed a change, yours may still see the earlier value. If your application logic expects the latest value, design the isolation level accordingly.
+
+> 💡 Real-world example
+>
+> **Real-time dashboards and analytics** — can run a query that takes several seconds against the same table an application is continuously writing to, without blocking those writes, because MVCC lets each side work from its own snapshot. This is a major reason many teams choose PostgreSQL for mixed read-write workloads.
+>
+> **SRE teams tuning autovacuum** — companies with large, frequently updated tables (a session store or a counter table) often need a more aggressive `autovacuum_vacuum_scale_factor` to prevent table bloat from dead tuples accumulating faster than autovacuum starts working.
+
 export const quizMvcc = [
   {
     q: 'Under MVCC, what happens to a row when you UPDATE it?',

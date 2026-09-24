@@ -134,6 +134,25 @@ Use a plain view to tidy up and reuse a query whose cost is acceptable on every 
 The whole decision comes down to a trade. A view gives you correctness for free and pays at every read. A materialized view gives you speed and asks you to manage staleness with refreshes. Pick the side of that trade your feature actually needs.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Plain `VIEW` | Always current, no extra disk space | Re-runs the underlying query on every read — full cost every request |
+| Materialized view | Fast reads, since it reads stored rows; can be indexed | Data goes stale until `REFRESH`, and the refresh itself has a cost |
+
+## Common mistakes
+
+- **Expecting fresh data from a materialized view** — it is only as fresh as the last `REFRESH`. Use a plain view or query the table directly if you need real-time data.
+- **Running a plain `REFRESH MATERIALIZED VIEW` on production without thinking** — this holds a lock that blocks reads while it rebuilds. For a non-blocking refresh, use `CONCURRENTLY` together with a unique index on the materialized view.
+- **Using a materialized view for data that changes every second** — if the data changes that fast, a plain view or a direct query is simpler and always correct, with no refresh schedule to manage.
+
+> 💡 Real-world example
+>
+> **Analytics dashboards and reporting tools** — built on PostgreSQL commonly use a materialized view to pre-compute an expensive aggregate, then refresh it on a schedule instead of recomputing it on every request.
+>
+> **Hasura- or PostgREST-based APIs** — often expose a view directly as an endpoint, using a materialized view for heavy reports where some staleness is acceptable, and a plain view for data that must always be current.
+
 export const quizViews = [
   {
     q: 'What happens when you SELECT from a plain (non-materialized) view?',

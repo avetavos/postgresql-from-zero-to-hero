@@ -246,6 +246,25 @@ export const joinDiagram = `flowchart TD
 Decide which table must always appear in the output, put it first, and `LEFT JOIN` the other onto it. "Every author, with their books if any" is a `LEFT JOIN` from `authors`. "Only authors who have books" is an `INNER JOIN`. The English phrasing usually tells you the join type.
 </Callout>
 
+## Trade-offs
+
+| Option | Benefit | Cost |
+|---------|---------|------|
+| Join normalized tables at query time | Data is never duplicated and is always current | Queries are more complex, and the join is recomputed every time |
+| Denormalize / copy data ahead of time | Reads are faster since there is no join at query time | Risk of stale or inconsistent data; you must keep the copies in sync yourself |
+
+## Common mistakes
+
+- **Forgetting the `ON` clause** — PostgreSQL will not warn you; it silently performs a cross join, matching every row with every row and exploding the result set. Check that every join has an `ON`.
+- **Not aliasing tables** — when two tables share a column name like `id`, the query throws an ambiguous column error, or if it does not error, it becomes unreadable to maintain. Always use short aliases like `a`, `b`.
+- **Putting a filter on the right-hand table in `WHERE` instead of `ON`** — with a `LEFT JOIN`, this silently turns the query back into an `INNER JOIN`, because `WHERE` discards rows where the right side is `NULL`. To filter while still keeping every left row, put that condition in `ON`.
+
+> 💡 Real-world example
+>
+> **Activity feeds and message history** — many apps join user, workspace/server, and message tables at query time instead of copying the username into every message row, so a single rename updates everywhere it is shown.
+>
+> **Open-source project trackers** — a merge-request or pipeline history page pulls data from several tables (users, projects, commits) with a join at query time, keeping one single source of truth instead of risking copies that drift out of sync.
+
 export const quizJoins = [
   {
     q: 'Which join returns only the rows that have a match on both sides?',

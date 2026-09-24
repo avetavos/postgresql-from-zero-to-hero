@@ -56,10 +56,10 @@ EXPLAIN SELECT * FROM books WHERE author_id = 4;
 
 ## EXPLAIN ANALYZE: สิ่งที่เกิดขึ้นจริง
 
-`EXPLAIN ANALYZE` *รัน* query จริง ๆ และรายงานเวลาที่เกิดขึ้นจริงควบคู่ไปกับค่าประมาณ การเพิ่ม `BUFFERS` ยังรายงานด้วยว่าอ่านหน้าข้อมูล (data page) ไปกี่หน้า ซึ่งบอกคุณได้ว่างานมาจากแคชหรือจากดิสก์
+`EXPLAIN ANALYZE` *รัน* query จริง ๆ และรายงานเวลาที่เกิดขึ้นจริงควบคู่ไปกับค่าประมาณ ตั้งแต่ PostgreSQL 18 เป็นต้นไป `ANALYZE` รายงานการใช้ buffer ให้อัตโนมัติด้วย — อ่านหน้าข้อมูล (data page) ไปกี่หน้า ซึ่งบอกคุณได้ว่างานมาจากแคชหรือจากดิสก์ — จึงไม่ต้องเขียน `BUFFERS` แยกอีกต่อไป (ในเวอร์ชันเก่ากว่า หรือถ้าต้องการเขียนให้ชัดเจน ยังใช้ `EXPLAIN (ANALYZE, BUFFERS)` ได้เหมือนเดิม และเพิ่ม `BUFFERS OFF` ถ้าต้องการปิดมันโดยเฉพาะ)
 
 ```sql
-EXPLAIN (ANALYZE, BUFFERS)
+EXPLAIN ANALYZE
 SELECT * FROM books WHERE author_id = 4;
 ```
 
@@ -115,7 +115,7 @@ SELECT * FROM books WHERE author_id = 4;
 - จงอ่านต้นไม้ของแผนจากในออกนอก: โหนดที่ย่อหน้ามากที่สุดทำงานก่อนแล้วป้อนข้อมูลให้โหนดแม่
 
 <Callout title="ให้ EXPLAIN เข้ามาแทนการเดา">
-ก่อนที่คุณจะเพิ่ม index หรือเขียน query ใหม่ จงรัน `EXPLAIN (ANALYZE, BUFFERS)` แล้วอ่านว่า PostgreSQL ทำอะไรจริง ๆ แผนจะบอกคุณถึงชนิดของ scan, เวลาหมดไปกับอะไร และค่าประมาณของคุณตรงกับความเป็นจริงหรือไม่ — เปลี่ยนงานด้านประสิทธิภาพจากการเดาให้กลายเป็นการวัดผล
+ก่อนที่คุณจะเพิ่ม index หรือเขียน query ใหม่ จงรัน `EXPLAIN (ANALYZE, BUFFERS)` (หรือแค่ `EXPLAIN ANALYZE` บน PostgreSQL 18 ขึ้นไป) แล้วอ่านว่า PostgreSQL ทำอะไรจริง ๆ แผนจะบอกคุณถึงชนิดของ scan, เวลาหมดไปกับอะไร และค่าประมาณของคุณตรงกับความเป็นจริงหรือไม่ — เปลี่ยนงานด้านประสิทธิภาพจากการเดาให้กลายเป็นการวัดผล
 </Callout>
 
 ## ข้อแลกเปลี่ยน
@@ -123,8 +123,8 @@ SELECT * FROM books WHERE author_id = 4;
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | `EXPLAIN` | ทำงานทันที ปลอดภัยกับทุก query เพราะไม่ได้รันจริง | ได้แค่ค่าประมาณจาก statistics ไม่ใช่ตัวเลขจริง |
-| `EXPLAIN ANALYZE` | เห็นเวลาจริงและจำนวน row จริง เทียบกับค่าประมาณได้ตรง ๆ | รัน query จริง ถ้าเป็น `UPDATE`/`DELETE` จะเปลี่ยนข้อมูลจริงด้วย |
-| `EXPLAIN (ANALYZE, BUFFERS)` | เห็นด้วยว่าข้อมูลมาจากแคชหรือดิสก์ ช่วยวินิจฉัยปัญหา I/O | อ่านผลลัพธ์ซับซ้อนขึ้นอีกนิด ต้องเข้าใจความหมายของ `Buffers` |
+| `EXPLAIN ANALYZE` | เห็นเวลาจริง, จำนวน row จริง และ (ตั้งแต่ PostgreSQL 18) การใช้ buffer มาให้เป็นค่าเริ่มต้น | รัน query จริง ถ้าเป็น `UPDATE`/`DELETE` จะเปลี่ยนข้อมูลจริงด้วย |
+| `EXPLAIN (ANALYZE, BUFFERS OFF)` | ผลลัพธ์สั้นลงอีกนิดเมื่อสนใจแค่เวลา ไม่สนใจ I/O | เสียข้อมูล cache เทียบกับ disk ที่ `Buffers` ให้ไป |
 
 ## ข้อผิดพลาดที่พบบ่อย
 
@@ -134,9 +134,9 @@ SELECT * FROM books WHERE author_id = 4;
 
 > 💡 ตัวอย่างจากของจริง
 >
-> **pganalyze** — เครื่องมืออย่าง pganalyze ถูกสร้างมาเพื่อดึง `EXPLAIN` plan ออกมาอัตโนมัติและแจ้งเตือนเมื่อ query ใดมี plan ที่แย่ลง (regression) ช่วยให้ทีมจับปัญหาได้ก่อนที่ผู้ใช้จะรู้สึก
+> **[pganalyze](https://pganalyze.com/)** — ดึง `EXPLAIN` plan ออกมาอัตโนมัติและติดตามแนวโน้มประสิทธิภาพ query ตามช่วงเวลา ช่วยให้ทีมจับปัญหาได้ก่อนที่ผู้ใช้จะรู้สึก
 >
-> **GitLab** — ทีมด้านประสิทธิภาพของ GitLab กำหนดให้ merge request ที่แก้ query ซึ่งถูกเรียกบ่อย ต้องแนบผลลัพธ์ `EXPLAIN (ANALYZE, BUFFERS)` มาด้วยเสมอ เพื่อให้ reviewer เห็นผลกระทบจริงก่อน merge
+> **[กระบวนการ database review ของ GitLab](https://docs.gitlab.com/development/database_review/)** — กำหนดให้ merge request ที่เพิ่มหรือแก้ query ต้องแนบลิงก์ผลลัพธ์ `EXPLAIN ANALYZE` มาด้วยเสมอ เพื่อให้ reviewer เห็นผลกระทบจริงก่อน merge
 
 export const quizExplain = [
   {
