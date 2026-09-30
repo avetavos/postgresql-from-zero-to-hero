@@ -1,6 +1,6 @@
 ---
-title: การดำเนินงานและการขยายระบบ
-description: การรัน PostgreSQL ในโปรดักชัน — ความพร้อมใช้งานสูงด้วย replication, การรองรับ client จำนวนมากด้วย pooling, การจัดการ table ขนาดใหญ่ด้วย partitioning, และการปกป้องข้อมูลด้วย backup และการควบคุมการเข้าถึง
+title: Operations & Scaling
+description: การรัน PostgreSQL ใน production — high availability ด้วย replication, รองรับ client จำนวนมากด้วย pooling, จัดการ table ใหญ่ด้วย partitioning และปกป้องข้อมูลด้วย backup กับการควบคุมการเข้าถึง — ทุกข้ออ้างวัดในแล็บจริง
 sidebar:
   order: 1
 ---
@@ -11,26 +11,54 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-การเขียน SQL ให้ถูกต้องเป็นเพียงครึ่งหนึ่งของงาน อีกครึ่งหนึ่งคือการทำให้ PostgreSQL server ตัวเดียวยังทำงานได้ดีเมื่อต้องให้บริการผู้ใช้หลายพันคนในทันที รอดจากดิสก์ที่พังลง รองรับ table ที่มีข้อมูลหลายพันล้าน row และปฏิเสธทุกคนที่ไม่ควรเข้ามา กลุ่มของเรื่องเหล่านี้คือสิ่งที่คนเรียกว่า **operations** — งานของการรันฐานข้อมูลในโปรดักชันแทนที่จะรันบนแล็ปท็อปของคุณ
+การเขียน SQL ที่ถูกต้องเป็นแค่ครึ่งเดียวของงาน อีกครึ่งคือการทำให้เซิร์ฟเวอร์ PostgreSQL ตัวเดียวอยู่ดีเมื่อจู่ ๆ ต้องรับใช้ผู้ใช้หลายพัน รอดจากดิสก์พัง เก็บ table ที่มีหลายพันล้าน row และปฏิเสธใครก็ตามที่ไม่ควรเข้ามา ชุดของเรื่องเหล่านี้คือสิ่งที่คนหมายถึงเมื่อพูดว่า **operations** — งานของการรันฐานข้อมูลใน production ไม่ใช่บนแล็ปท็อปของคุณ
 
-โมดูลนี้ก้าวออกจาก syntax ของ query ไปมองรูปร่างของการ deploy จริง ไม่มีอะไรในนี้เปลี่ยน SQL ที่คุณรู้อยู่แล้ว แต่เป็นการล้อม server ตัวนั้นด้วยชิ้นส่วนที่ทำให้เชื่อถือได้เมื่อต้องขยายขนาด
+โมดูลนี้ก้าวออกจาก syntax ของ query และดูรูปร่างของ deployment จริง ไม่มีอะไรที่นี่เปลี่ยน SQL ที่คุณรู้แล้ว แต่มันล้อมเซิร์ฟเวอร์ตัวนั้นด้วยชิ้นส่วนที่ทำให้พึ่งพาได้ในระดับใหญ่ ต่างจากโมดูลก่อนหน้า บทเรียนเหล่านี้ส่วนใหญ่ต้องใช้มากกว่าหนึ่ง process จึงรันในแล็บ Docker ใช้แล้วทิ้งบน **PostgreSQL 18.6** (Docker Desktop บน Mac, กันยายน 2026): primary และ replica บนเครือข่ายภายใน, pooler PgBouncer 1.26, คอนเทนเนอร์ที่มี WAL archiving และการกู้คืน point-in-time จริง แต่ละบทแสดงคำสั่งและผลลัพธ์จริง ตั้งชื่อคอนเทนเนอร์ `postgresql-b3-*` และจบด้วยคำสั่งที่ลบมัน
 
-## เรื่องสำคัญสี่ด้านในโปรดักชัน
+## สี่ความกังวลของ production
 
-แทบทุกหัวข้อด้าน operations ใน PostgreSQL จัดอยู่ภายใต้หนึ่งในสี่หัวข้อนี้ แต่ละหัวข้อตอบคำถามแบบ "จะเกิดอะไรขึ้นเมื่อ..." ที่แตกต่างกัน
+หัวข้อเชิงปฏิบัติการเกือบทั้งหมดใน PostgreSQL อยู่ใต้หนึ่งในสี่หัวข้อ แต่ละอันตอบคำถาม "จะเกิดอะไรขึ้นเมื่อ..." ต่างกัน
 
-| เรื่องสำคัญ           | ตอบคำถามอะไร                                    | คำตอบที่มักใช้กัน           |
+| ความกังวล              | คำถามที่มันตอบ                          | คำตอบที่พบบ่อย            |
 |----------------------|--------------------------------------------------|-----------------------------|
-| High availability    | จะเกิดอะไรขึ้นถ้า primary server ตาย?         | Replication และ failover    |
-| Client จำนวนมาก      | จะเกิดอะไรขึ้นถ้าแอปหลายพันตัวเชื่อมต่อพร้อมกัน?  | Connection pooling          |
-| table ขนาดใหญ่        | จะเกิดอะไรขึ้นถ้า table หนึ่งโตถึงหลายพันล้าน row?   | Partitioning                |
-| Durability และ access | จะเกิดอะไรขึ้นถ้าดิสก์พังหรือมีผู้โจมตีเชื่อมต่อ? | Backup และ security         |
+| High availability    | ถ้าเซิร์ฟเวอร์หลักตายล่ะ?                 | Replication และ failover    |
+| Client จำนวนมาก         | ถ้าแอปหลายพันเชื่อมต่อพร้อมกันล่ะ?       | Connection pooling          |
+| Table ใหญ่           | ถ้า table หนึ่งโตเป็นหลายพันล้าน row ล่ะ?     | Partitioning                |
+| ความคงทนและการเข้าถึง  | ถ้าดิสก์พังหรือผู้โจมตีเชื่อมต่อมาล่ะ?    | Backup และ security         |
 
-โปรเจกต์เล็ก ๆ อาจมองข้ามทั้งสี่ด้านได้ แต่ระบบโปรดักชันที่จริงจังในที่สุดก็ต้องการทุกด้าน และทั้งสี่ด้านนี้มีปฏิสัมพันธ์กัน: replica ช่วยทั้งเรื่องความพร้อมใช้งาน *และ* กระจายภาระการอ่าน, pooling ปกป้อง primary ที่ป้อนข้อมูลให้ replica อยู่ด้วย และอื่น ๆ อีกมากมาย
+โปรเจกต์เล็กอาจข้ามทั้งสี่ ระบบ production จริงจังต้องการทุกอันในที่สุด และทั้งสี่ส่งผลต่อกัน: replica ช่วยความพร้อมใช้งาน *และ* กระจายโหลดอ่าน, pooling ปกป้อง primary ที่กำลังป้อน replica ด้วย และอื่น ๆ
 
-## การ deploy ในรูปแบบโปรดักชัน
+## PostgreSQL 18 ใหม่เอี่ยมให้อะไรคุณ
 
-แล็ปท็อปรัน PostgreSQL หนึ่ง process กับ client หนึ่งตัว แต่การตั้งค่าในโปรดักชันกระจายงานออกไปยังชิ้นส่วนหลายชิ้น ตัว application server ไม่ได้คุยกับฐานข้อมูลโดยตรง แต่คุยผ่าน **connection pooler** ที่คอยถือ server connection จำนวนน้อย ๆ ไว้ใช้ซ้ำ มีโหนดหนึ่งคือ **primary** ที่รับงานเขียน และมี **replica** หนึ่งตัวหรือมากกว่านั้นที่รับสำเนาการเปลี่ยนแปลงอย่างต่อเนื่องและตอบ query แบบอ่านอย่างเดียว
+ฟีเจอร์เหล่านี้ส่วนใหญ่ห่างเพียงการตั้งค่าหนึ่งอัน และหลายอันเปิดอยู่แล้ว นี่คือสิ่งที่เซิร์ฟเวอร์ 18.6 ใหม่เอี่ยมบอกเกี่ยวกับตัวมันเอง:
+
+```sql
+-- sql/defaults.sql
+SELECT name, setting
+FROM pg_settings
+WHERE name IN ('max_connections', 'wal_level', 'max_wal_senders', 'archive_mode', 'ssl', 'listen_addresses', 'password_encryption', 'hot_standby')
+ORDER BY name;
+```
+
+```text
+        name         |    setting    
+---------------------+---------------
+ archive_mode        | off
+ hot_standby         | on
+ listen_addresses    | *
+ max_connections     | 100
+ max_wal_senders     | 10
+ password_encryption | scram-sha-256
+ ssl                 | off
+ wal_level           | replica
+(8 rows)
+```
+
+บทเรียนต่อยอดจากตัวเลขเหล่านี้เป๊ะ `wal_level = replica` และ `max_wal_senders = 10` แปลว่า streaming replication ไม่ต้อง restart เซิร์ฟเวอร์ แค่มี role และบรรทัด `pg_hba.conf` `max_connections = 100` คือเพดานที่บทเรียน pooling ชน `archive_mode = off` คือเหตุผลที่เซิร์ฟเวอร์ใหม่ไม่มี point-in-time recovery จนกว่าคุณเปิด `ssl = off` แสดงว่าการเข้ารหัสเป็นการตัดสินใจของคุณ และ `listen_addresses = *` เป็นการเลือกของ Docker image (default ของ PostgreSQL เองคือ `localhost`, [docs](https://www.postgresql.org/docs/18/runtime-config-connection.html)) การเปิดรับเครือข่ายจึงเป็นอีกการตัดสินใจ และ `password_encryption = scram-sha-256` คือ default สมัยใหม่สำหรับรหัสผ่านที่เก็บ
+
+## deployment รูปแบบ production
+
+แล็ปท็อปรัน process PostgreSQL หนึ่งตัวและ client หนึ่งตัว การตั้งค่า production กระจายงานไปหลายชิ้น เซิร์ฟเวอร์แอปไม่คุยกับฐานข้อมูลโดยตรง แต่ผ่าน **connection pooler** ที่เก็บ server connection ที่ใช้ซ้ำได้จำนวนน้อย หนึ่ง node คือ **primary** ที่รับการเขียน และ **replica** หนึ่งตัวขึ้นไปรับสำเนาต่อเนื่องของการเปลี่ยนแปลงและตอบ query แบบอ่านอย่างเดียว
 
 export const deploymentDiagram = `flowchart TD
   App1[App server] --> Pool[Connection pooler]
@@ -41,62 +69,97 @@ export const deploymentDiagram = `flowchart TD
   Primary -->|streams changes| R2[(Replica - reads)]
   Primary -->|base backup plus WAL| Backup[Backup and archive storage]`;
 
-<Mermaid code={deploymentDiagram} title="การ deploy PostgreSQL ในรูปแบบโปรดักชัน" />
+<Mermaid code={deploymentDiagram} title="deployment PostgreSQL รูปแบบ production" />
 
-อ่านไดอะแกรมจากด้านบน app server จำนวนมากถูกรวมผ่าน pooler ตัวเดียว เพื่อให้ primary ไม่ต้องเจอ connection ดิบจำนวนมหาศาล จากนั้น primary ส่ง stream ของทุกการเปลี่ยนแปลงไปยัง replica ซึ่งช่วยรับภาระการอ่านแทน primary และข้อมูลของ primary ก็ถูกคัดลอกไปยัง backup storage อย่างต่อเนื่อง เพื่อให้สร้างทั้งระบบขึ้นใหม่ได้หลังเกิดภัยพิบัติ
+อ่านแผนภาพจากบน แอปเซิร์ฟเวอร์จำนวนมากผ่าน pooler ตัวเดียวเพื่อไม่ให้ primary เห็น connection ดิบท่วมท้น primary stream ทุกการเปลี่ยนแปลงไปยัง replica ซึ่งรับทราฟฟิกอ่านออกจากหลังมัน และข้อมูลของ primary ถูกคัดลอกต่อเนื่องไปยัง backup storage เพื่อสร้างทั้งหมดใหม่ได้หลังภัยพิบัติ
 
-## โมดูลนี้ครอบคลุมอะไรบ้าง
+## โมดูลนี้ครอบคลุมอะไร
 
-- **Replication** — การ stream write-ahead log ของ primary ไปยัง read replica เพื่อความพร้อมใช้งาน และ logical replication สำหรับคัดลอก table ที่เลือกระหว่าง server
-- **Connection pooling** — ทำไม PostgreSQL connection แต่ละตัวจึงเป็น process ของระบบปฏิบัติการ และ pooler อย่าง PgBouncer ทำ multiplex client จำนวนมากเข้ากับ server connection จำนวนน้อยได้อย่างไร
-- **Partitioning** — การแบ่ง table เชิงตรรกะขนาดมหึมาหนึ่ง table ออกเป็น partition ทางกายภาพจำนวนมาก เพื่อให้ query และงาน maintenance แตะเฉพาะส่วนที่ต้องการ
-- **Backup และ security** — backup แบบ logical และ physical, point-in-time recovery, role และ `GRANT`, row-level security, และการ lock ว่าใครเชื่อมต่อได้บ้าง
+- **Replication** — primary และ replica จริง: `pg_basebackup`, replication lag ที่มองเห็น, synchronous commit ที่ค้างเมื่อ standby หายไป, `pg_promote` และ timeline และ logical replication พร้อมกับดักเรื่อง replica identity, DDL และการเก็บ slot
+- **Connection pooling** — ทำไมแต่ละ connection ของ PostgreSQL เป็น process ระบบปฏิบัติการ (ราว 3 MB ต่ออันในแล็บ), PgBouncer รับใช้ 200 client ด้วย 10 server connection ได้อย่างไร, อะไรพังใน transaction mode และวิธีกำหนดขนาด pool
+- **Partitioning** — range, list และ hash partition, pruning ที่พิสูจน์ด้วย plan, กับดัก default partition และสิ่งที่ partitioning เร่งและไม่เร่ง วัดบน 3 ล้าน row
+- **Backup และ security** — `pg_dump` และ `pg_restore`, point-in-time recovery ที่หยุดก่อน `DELETE`, incremental backup, `pg_hba.conf`, TLS, `GRANT` และ row-level security
 
-## สิ่งนี้อยู่ตรงไหน
+## ที่นี่เข้ากับตรงไหน
 
-คุณรู้วิธีออกแบบโมเดลข้อมูล เขียน query สร้าง index และห่อการเปลี่ยนแปลงไว้ใน transaction แล้ว Operations คือสิ่งที่ทำให้ความรู้เหล่านั้นรอดจากการปะทะกับ traffic จริง ไม่มีอะไรในนี้เป็น PostgreSQL คนละตัว ยังเป็น server ตัวเดิม เพียงแต่ตั้งค่าและล้อมรอบไว้เพื่อให้ขีดจำกัดของเครื่องเดียวและความล้มเหลวของเครื่องเดียวไม่กลายเป็นขีดจำกัดและความล้มเหลวของแอปพลิเคชันคุณ
+คุณรู้แล้วว่าจะ model ข้อมูล query index และห่อการเปลี่ยนแปลงด้วย transaction อย่างไร operations คือสิ่งที่ทำให้ความรู้นั้นรอดจากการเจอทราฟฟิกจริง ไม่มีอะไรที่นี่เป็น PostgreSQL คนละตัว มันคือเซิร์ฟเวอร์เดิมที่ตั้งค่าและล้อมรอบเพื่อให้ข้อจำกัดของเครื่องเดียวและความล้มเหลวของเครื่องเดียวไม่ใช่ข้อจำกัดและความล้มเหลวของแอปคุณ
+
+## Mental Model
+
+คิดว่าเซิร์ฟเวอร์ฐานข้อมูลคือเชฟที่ยุ่งมากคนเดียว replication ให้ครัวมีเชฟคนที่สองที่อ่านสมุดสูตรเล่มเดียวกัน pooling วางพนักงานต้อนรับที่ประตูเพื่อไม่ให้เชฟถูกรุม partitioning จัดห้องเก็บของเพื่อเคลียร์ชั้นหนึ่งได้เร็ว backup คือรูปถ่ายของครัวที่คุณเก็บไว้ในอีกอาคาร และ security คือใครเข้าได้ ใช้ประตูไหน และแตะอะไรได้ ไม่มีอะไรในนี้เปลี่ยนวิธีที่เชฟทำอาหาร
 
 ## เคล็ดลับและข้อควรระวัง
 
-- อย่าเพิ่งคว้า replication หรือ partitioning มาใช้ตั้งแต่วันแรก server ตัวเดียวที่ปรับแต่งดีพร้อม index ที่ดีรองรับภาระได้มากอย่างน่าประหลาดใจ เพิ่มความซับซ้อนก็ต่อเมื่อคุณวัดความจำเป็นได้แล้วเท่านั้น
-- Replica มีไว้เพื่อความพร้อมใช้งานและการขยายการอ่าน ไม่ใช่เพื่อรับงานเขียน — ทุกการเขียนยังคงไปที่ primary ตัวเดียว
-- Backup ที่คุณไม่เคย restore เลยคือความหวัง ไม่ใช่ backup ข้อพิสูจน์เดียวคือการทดสอบ restore ที่สำเร็จ
-- Security ไม่ใช่ขั้นตอนสุดท้ายที่คุณค่อยติดเข้าไป role แบบ least-privilege และการจำกัดการเข้าถึงเครือข่ายตั้งค่าได้ถูกที่สุดก่อนที่จะมีอะไรพึ่งพาเวอร์ชันที่หละหลวม
+- อย่าหยิบ replication หรือ partitioning ตั้งแต่วันแรก เซิร์ฟเวอร์เดียวที่จูนดีพร้อม index ที่ดีรับโหลดได้มากอย่างน่าประหลาดใจ เพิ่มความซับซ้อนเมื่อวัดความต้องการได้เท่านั้น
+- replica มีไว้สำหรับความพร้อมใช้งานและขยายการอ่าน ไม่ใช่รับการเขียน — ทุกการเขียนยังไปที่ primary เดียว และ replica ไม่ใช่ backup
+- backup ที่ไม่เคยกู้คืนคือความหวัง ไม่ใช่ backup หลักฐานเดียวคือการทดสอบกู้คืนที่สำเร็จ
+- security ไม่ใช่ขั้นสุดท้ายที่เอามาติด role แบบ least privilege และการจำกัดการเข้าถึงเครือข่ายถูกที่สุดเมื่อตั้งก่อนที่อะไรจะพึ่งพารุ่นหลวม
 
-<Callout title="ฐานข้อมูลเดิม เวทีที่ใหญ่ขึ้น">
-Operations ไม่ได้มาแทนสิ่งที่คุณเรียนรู้มา แต่ต่อยอดจากสิ่งเหล่านั้น primary ในทุกไดอะแกรมของโมดูลนี้กำลังรัน SQL engine ตัวเดียวกับที่คุณใช้ในบทเรียนก่อนหน้า Replication, pooling, partitioning, และ backup คือตัวประกอบที่ทำให้ engine นั้นแสดงผลได้ในโปรดักชัน
+<Callout title="ฐานข้อมูลเดิม เวทีใหญ่ขึ้น">
+Operations ไม่ได้แทนที่สิ่งที่คุณเรียน — มันขยายมัน primary ในทุกแผนภาพของโมดูลนี้รัน SQL engine ตัวเดียวกับที่คุณใช้ในบทก่อนหน้า replication, pooling, partitioning และ backup คือทีมสนับสนุนที่ทำให้ engine นั้นทำงานได้ใน production
 </Callout>
+
+## Common Misconceptions
+
+- **"operations แปลว่าฐานข้อมูลอีกตัว"** มันคือเซิร์ฟเวอร์เดิมที่มี process ที่สองอยู่ข้าง ๆ (replica, pooler, archive)
+- **"connection มากขึ้นแปลว่า throughput มากขึ้น"** ในแล็บ pooling 200 client บน 10 server connection รันที่ throughput เท่ากับที่น้อยกว่า connection ที่เกินมีแต่เสียหน่วยความจำ
+- **"high availability กับ backup เป็นสิ่งเดียวกัน"** replication คัดลอก `DELETE` ที่ผิดพลาดไปทุก replica; มีแต่ backup พร้อม WAL ที่ archive ไว้ที่ให้ย้อนกลับได้
 
 export const quizIndex = [
   {
-    q: 'งานหลักของ connection pooler ที่อยู่หน้า PostgreSQL คืออะไร?',
+    q: 'งานหลักของ connection pooler หน้า PostgreSQL คืออะไร?',
     options: [
-      'เข้ารหัสข้อมูลที่เก็บไว้บนดิสก์',
-      'ทำ multiplex client connection จำนวนมากเข้ากับ server connection จำนวนน้อย',
-      'เขียน SQL query ให้คุณโดยอัตโนมัติ',
-      'มาแทนความจำเป็นในการ backup',
+      'เข้ารหัสข้อมูลที่เก็บบนดิสก์',
+      'รวม client connection จำนวนมากเข้ากับ server connection จำนวนน้อย',
+      'เขียน query SQL ให้อัตโนมัติ',
+      'ทดแทนความจำเป็นของ backup',
     ],
     answer: 1,
+    explain: 'ในแล็บ pooling PgBouncer ให้ 200 client แชร์ 10 server connection',
   },
   {
-    q: 'ในการตั้งค่าแบบ replicate ทั่วไป statement ที่เป็นการเขียนจะไปที่ไหน?',
+    q: 'ในการตั้งค่าแบบมี replica คำสั่งเขียนไปที่ไหน?',
     options: [
-      'ไปที่ replica ตัวใดก็ได้ที่มีความจุเหลือ',
-      'ไปที่ primary server เท่านั้น',
-      'ไปที่ connection pooler ซึ่งเก็บข้อมูลไว้เอง',
+      'ไปที่ replica ตัวไหนที่มีความจุเหลือ',
+      'เฉพาะเซิร์ฟเวอร์ primary',
+      'ไปที่ connection pooler ที่เก็บมัน',
       'ไปที่ backup archive',
     ],
     answer: 1,
+    explain: 'replica ตอบ INSERT ด้วย `cannot execute INSERT in a read-only transaction`',
   },
   {
-    q: 'partitioning จัดการเรื่องสำคัญด้านใดในโปรดักชันเป็นหลัก?',
+    q: 'partitioning แก้ความกังวลด้าน production ข้อใดเป็นหลัก?',
     options: [
       'รอดจาก primary ที่ล่ม',
-      'รองรับ client พร้อมกันหลายพันราย',
-      'ทำงานได้อย่างมีประสิทธิภาพกับ table หนึ่งที่ใหญ่มาก',
-      'เข้ารหัส traffic บนสาย',
+      'รองรับ client พร้อมกันหลายพัน',
+      'ทำงานกับ table ใหญ่มากตัวเดียวอย่างมีประสิทธิภาพ',
+      'เข้ารหัสทราฟฟิกบนสาย',
     ],
     answer: 2,
+    explain: 'partitioning ทำให้การดูแลจำนวนมากถูก: drop หนึ่งเดือนใช้มิลลิวินาที ขณะที่ DELETE เทียบเท่าใช้นานกว่าและเขียน WAL มากกว่ามาก',
+  },
+  {
+    q: 'เพื่อนร่วมงานบอกว่า "เรามี replica แล้ว ไม่ต้องมี backup" ข้อบกพร่องคืออะไร?',
+    options: [
+      'replica ช้ากว่า backup',
+      'replica replay ทุกการเปลี่ยนแปลง รวมถึง DELETE ที่ผิดพลาด จึงย้อนกลับไม่ได้',
+      'replica promote ไม่ได้',
+      'PostgreSQL ต้องการ backup เพื่อเริ่มต้น',
+    ],
+    answer: 1,
+    explain: 'มีแต่ base backup พร้อม WAL ที่ archive ไว้ที่ให้แล็บกู้คืนไปก่อน DELETE',
+  },
+  {
+    q: 'เซิร์ฟเวอร์ PostgreSQL 18 ใหม่เอี่ยมมีค่า wal_level และ archive_mode เป็นอะไร?',
+    options: [
+      'wal_level = minimal และ archive_mode = on',
+      'wal_level = replica และ archive_mode = off',
+      'wal_level = logical และ archive_mode = on',
+      'ทั้งคู่ไม่ถูกตั้งจนกว่าคุณจะตั้งค่า',
+    ],
+    answer: 1,
+    explain: 'query ที่ต้นบทแสดง `replica` และ `off`: replication พร้อม แต่ archiving สำหรับ PITR ยังไม่พร้อม',
   },
 ];
 

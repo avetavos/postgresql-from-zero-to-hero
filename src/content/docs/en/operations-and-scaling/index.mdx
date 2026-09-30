@@ -1,6 +1,6 @@
 ---
 title: Operations & Scaling
-description: Running PostgreSQL in production — high availability with replication, handling many clients with pooling, taming big tables with partitioning, and protecting data with backups and access control.
+description: Running PostgreSQL in production — high availability with replication, handling many clients with pooling, taming big tables with partitioning, and protecting data with backups and access control — every claim measured in a real lab.
 sidebar:
   order: 1
 ---
@@ -13,7 +13,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 Writing correct SQL is only half the job. The other half is keeping a single PostgreSQL server happy when it suddenly has to serve thousands of users, survive a crashed disk, hold tables with billions of rows, and refuse anyone who should not be there. That collection of concerns is what people mean when they say **operations** — the work of running a database in production rather than on your laptop.
 
-This module steps away from query syntax and looks at the shape of a real deployment. None of it changes the SQL you already know; instead it surrounds that one server with the pieces that make it dependable at scale.
+This module steps away from query syntax and looks at the shape of a real deployment. None of it changes the SQL you already know; instead it surrounds that one server with the pieces that make it dependable at scale. Unlike the earlier modules, most of these lessons need more than one process, so they were run in throw-away Docker labs on **PostgreSQL 18.6** (Docker Desktop on a Mac, September 2026): a primary and a replica on an internal network, a PgBouncer 1.26 pooler, a container with WAL archiving and a real point-in-time restore. Each lesson shows the real commands and output, names its containers `postgresql-b3-*`, and ends with the command that removes them.
 
 ## The four production concerns
 
@@ -27,6 +27,34 @@ Almost every operational topic in PostgreSQL falls under one of four headings. E
 | Durability & access  | What if a disk fails or an attacker connects?    | Backups and security        |
 
 A small project may ignore all four. A serious production system eventually needs every one of them, and the four interact: replicas help availability *and* spread read load, pooling protects a primary that is also feeding replicas, and so on.
+
+## What a fresh PostgreSQL 18 gives you
+
+Most of these features are one setting away, and several are already on. This is what a brand-new 18.6 server says about itself:
+
+```sql
+-- sql/defaults.sql
+SELECT name, setting
+FROM pg_settings
+WHERE name IN ('max_connections', 'wal_level', 'max_wal_senders', 'archive_mode', 'ssl', 'listen_addresses', 'password_encryption', 'hot_standby')
+ORDER BY name;
+```
+
+```text
+        name         |    setting    
+---------------------+---------------
+ archive_mode        | off
+ hot_standby         | on
+ listen_addresses    | *
+ max_connections     | 100
+ max_wal_senders     | 10
+ password_encryption | scram-sha-256
+ ssl                 | off
+ wal_level           | replica
+(8 rows)
+```
+
+The lessons build on exactly these numbers. `wal_level = replica` and `max_wal_senders = 10` mean streaming replication needs no server restart, just a role and a `pg_hba.conf` line. `max_connections = 100` is the ceiling the pooling lesson runs into. `archive_mode = off` is why a fresh server has no point-in-time recovery until you switch it on. `ssl = off` shows that encryption is your decision, and `listen_addresses = *` is the Docker image's choice (PostgreSQL's own default is `localhost`, [docs](https://www.postgresql.org/docs/18/runtime-config-connection.html)), so network exposure is another one, and `password_encryption = scram-sha-256` is the modern default for stored passwords.
 
 ## A production-shaped deployment
 
@@ -47,25 +75,35 @@ Read the diagram from the top. Many app servers funnel through one pooler so the
 
 ## What this module covers
 
-- **Replication** — streaming the primary's write-ahead log to read replicas for availability, and logical replication for copying selected tables between servers.
-- **Connection pooling** — why each PostgreSQL connection is an operating-system process, and how a pooler such as PgBouncer multiplexes many clients onto few server connections.
-- **Partitioning** — splitting one enormous logical table into many physical partitions so queries and maintenance touch only the slice they need.
-- **Backup and security** — logical and physical backups, point-in-time recovery, roles and `GRANT`, row-level security, and locking down who may connect.
+- **Replication** — a real primary and replica: `pg_basebackup`, replication lag you can see, a synchronous commit that hangs when the standby is gone, `pg_promote` and timelines, and logical replication with its replica-identity, DDL and slot-retention traps.
+- **Connection pooling** — why each PostgreSQL connection is an operating-system process (about 3 MB each in the lab), how PgBouncer served 200 clients with 10 server connections, what breaks in transaction mode, and how to size a pool.
+- **Partitioning** — range, list and hash partitions, pruning proven with plans, the default-partition trap, and what partitioning does and does not speed up, measured on 3 million rows.
+- **Backup and security** — `pg_dump` and `pg_restore`, a point-in-time recovery that stopped just before a `DELETE`, incremental backups, `pg_hba.conf`, TLS, `GRANT`, and row-level security.
 
 ## Where this fits
 
 You already know how to model data, query it, index it, and wrap changes in transactions. Operations is what lets that knowledge survive contact with real traffic. Nothing here is a different PostgreSQL; it is the same server, configured and surrounded so that a single machine's limits and a single machine's failures stop being your application's limits and failures.
 
+## Mental Model
+
+Think of the database server as one very busy chef. Replication gives the kitchen a second chef reading the same recipe book; pooling puts a maître d' at the door so the chef is never mobbed; partitioning organises the pantry so one shelf can be cleared quickly; backups are the photographs of the kitchen you keep in a different building; and security is who is allowed in, which door they use, and what they may touch. None of these changes how the chef cooks.
+
 ## Tips / gotchas
 
 - Do not reach for replication or partitioning on day one. A single well-tuned server with good indexes handles a surprising amount of load; add complexity only when you can measure the need.
-- Replicas are for availability and read scaling, not for taking writes — every write still goes to one primary.
+- Replicas are for availability and read scaling, not for taking writes — every write still goes to one primary. And a replica is not a backup.
 - A backup you have never restored is a hope, not a backup. The only proof is a successful test restore.
 - Security is not a final step you bolt on; least-privilege roles and restricted network access are cheapest to set up before anything depends on the loose version.
 
 <Callout title="Same database, bigger stage">
 Operations does not replace what you have learned — it scales it. The primary in every diagram in this module is running the very same SQL engine you used in the earlier lessons. Replication, pooling, partitioning, and backups are the supporting cast that lets that engine perform in production.
 </Callout>
+
+## Common Misconceptions
+
+- **"Operations means a different database."** It is the same server with a second process next to it (a replica, a pooler, an archive).
+- **"More connections means more throughput."** In the pooling lab 200 clients on 10 server connections ran at the same throughput as fewer; the extra connections only cost memory.
+- **"High availability and backups are the same thing."** Replication copies a mistaken `DELETE` to every replica; only a backup with archived WAL lets you rewind.
 
 export const quizIndex = [
   {
@@ -77,6 +115,7 @@ export const quizIndex = [
       'It replaces the need for backups',
     ],
     answer: 1,
+    explain: 'In the pooling lab, PgBouncer let 200 clients share 10 server connections.',
   },
   {
     q: 'In a typical replicated setup, where do write statements go?',
@@ -87,6 +126,7 @@ export const quizIndex = [
       'To the backup archive',
     ],
     answer: 1,
+    explain: 'A replica answered an INSERT with `cannot execute INSERT in a read-only transaction`.',
   },
   {
     q: 'Which production concern does partitioning primarily address?',
@@ -97,6 +137,29 @@ export const quizIndex = [
       'Encrypting traffic on the wire',
     ],
     answer: 2,
+    explain: 'Partitioning makes bulk maintenance cheap: dropping a month took milliseconds where the equivalent DELETE took much longer and wrote far more WAL.',
+  },
+  {
+    q: 'A colleague says "we have a replica, so we do not need backups". What is the flaw?',
+    options: [
+      'Replicas are slower than backups',
+      'A replica replays every change, including a mistaken DELETE, so it cannot rewind',
+      'Replicas cannot be promoted',
+      'Backups are required by PostgreSQL to start',
+    ],
+    answer: 1,
+    explain: 'Only a base backup plus archived WAL let the lab restore to just before the DELETE.',
+  },
+  {
+    q: 'What does a brand-new PostgreSQL 18 server have for wal_level and archive_mode?',
+    options: [
+      'wal_level = minimal and archive_mode = on',
+      'wal_level = replica and archive_mode = off',
+      'wal_level = logical and archive_mode = on',
+      'Both are unset until you configure them',
+    ],
+    answer: 1,
+    explain: 'The query at the top of the lesson shows `replica` and `off`: replication is ready, archiving for PITR is not.',
   },
 ];
 
