@@ -237,7 +237,7 @@ export const joinDiagram = `flowchart TD
 
 ## Tips / gotchas
 
-- Forgetting the `ON` clause turns a join into a cross join (`CROSS JOIN`), pairing every left row with every right row. With ten and ten rows that is one hundred output rows — almost never what you want.
+- `JOIN` without `ON` or `USING` is a syntax error in PostgreSQL. An accidental cross join comes from listing tables with a comma (`FROM a, b`) and forgetting the `WHERE`: every left row pairs with every right row, so ten and ten rows give one hundred output rows.
 - Give each table a short alias such as `a` and `b`, then prefix every column. It keeps queries readable and avoids ambiguity when both tables share a column name like `id`.
 - A `NULL` in an outer-join result means "no matching row was found", not "the value is zero or empty". Test for it with `IS NULL`, never `= NULL`.
 - Putting a filter on the right table in `WHERE` instead of `ON` can quietly turn a `LEFT JOIN` back into an inner one, because `NULL` fails most `WHERE` comparisons.
@@ -255,7 +255,7 @@ Decide which table must always appear in the output, put it first, and `LEFT JOI
 
 ## Common mistakes
 
-- **Forgetting the `ON` clause** — PostgreSQL will not warn you; it silently performs a cross join, matching every row with every row and exploding the result set. Check that every join has an `ON`.
+- **Listing tables with commas and forgetting the join condition** — `FROM a, b` with no matching `WHERE` is a silent cross join that matches every row with every row and explodes the result set (`a JOIN b` without `ON` fails with a syntax error instead). Prefer explicit `JOIN ... ON`.
 - **Not aliasing tables** — when two tables share a column name like `id`, the query throws an ambiguous column error, or if it does not error, it becomes unreadable to maintain. Always use short aliases like `a`, `b`.
 - **Putting a filter on the right-hand table in `WHERE` instead of `ON`** — with a `LEFT JOIN`, this silently turns the query back into an `INNER JOIN`, because `WHERE` discards rows where the right side is `NULL`. To filter while still keeping every left row, put that condition in `ON`.
 

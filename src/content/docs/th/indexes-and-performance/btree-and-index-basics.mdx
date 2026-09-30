@@ -66,10 +66,10 @@ B-tree เก็บรายการทั้งหมดไว้ในลำ�
 | Range                                  | `WHERE published > 2000`                 | ใช่           |
 | Between                                | `WHERE published BETWEEN 1990 AND 2000`  | ใช่           |
 | Sorting                                | `ORDER BY published`                     | ใช่           |
-| Prefix match                           | `WHERE title LIKE 'The %'`               | ใช่           |
+| Prefix match                           | `WHERE title LIKE 'The %'`               | เฉพาะเมื่อใช้ `text_pattern_ops` หรือ collation `C` |
 | Leading wildcard                       | `WHERE title LIKE '%orchard'`            | ไม่           |
 
-สอง row สุดท้ายคือประเด็นสำคัญ B-tree สามารถจัดการ `LIKE 'The %'` ได้เพราะการค้นหายึดไว้ที่จุดเริ่มต้นของค่า แต่ช่วย `LIKE '%orchard'` ไม่ได้ เพราะ leading wildcard หมายความว่าค่าที่ตรงเงื่อนไขกระจัดกระจายอยู่ทั่วทั้งลำดับที่เรียงไว้ ไม่ได้ถูกจัดกลุ่มไว้ด้วยกัน
+สอง row สุดท้ายคือประเด็นสำคัญ B-tree จัดการ `LIKE 'The %'` ได้เฉพาะเมื่อสร้างด้วย `text_pattern_ops` (หรือ column ใช้ collation `C` ถ้าใช้ collation default `en_US.utf8` planner จะ fallback เป็น Seq Scan) เพราะการค้นหายึดไว้ที่จุดเริ่มต้นของค่า แต่ช่วย `LIKE '%orchard'` ไม่ได้ เพราะ leading wildcard หมายความว่าค่าที่ตรงเงื่อนไขกระจัดกระจายอยู่ทั่วทั้งลำดับที่เรียงไว้ ไม่ได้ถูกจัดกลุ่มไว้ด้วยกัน
 
 ## composite index และกฎ left-prefix
 

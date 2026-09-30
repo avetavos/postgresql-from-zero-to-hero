@@ -34,7 +34,7 @@ export const vacuumFlow = `flowchart LR
 
 Two maintenance operations clean up after MVCC:
 
-- **`VACUUM`** scans a table and marks the space used by dead tuples as free for reuse, so future inserts and updates can fill it instead of growing the file. A plain `VACUUM` does not return disk to the operating system; it makes the space reusable *within* the table.
+- **`VACUUM`** scans a table and marks the space used by dead tuples as free for reuse, so future inserts and updates can fill it instead of growing the file. A plain `VACUUM` makes the space reusable *within* the table and only returns disk to the operating system when the empty pages are at the very end of the file (it then truncates them).
 - **`ANALYZE`** samples the table and updates the **planner statistics** — row counts, value distributions, how many distinct values a column has. These are the numbers the planner relies on to choose between a seq scan and an index scan, as you saw in the EXPLAIN lesson.
 
 You can run them by hand, together or separately:
@@ -143,7 +143,7 @@ MVCC trades in-place updates for non-blocking reads, and the price is dead tuple
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Plain `VACUUM` | Does not block reads or writes; safe to run anytime | Only makes space reusable inside the table; does not return disk to the OS |
+| Plain `VACUUM` | Does not block reads or writes; safe to run anytime | Makes space reusable inside the table; returns disk to the OS only by truncating empty pages at the end of the file |
 | `VACUUM FULL` | Rewrites the table compactly and actually returns disk to the OS | Takes an exclusive lock that blocks both reads and writes for the whole run |
 | Autovacuum (automatic) | Runs continuously in the background with almost no upkeep | Cannot be tuned as precisely as a manual run; may fall behind during very heavy bulk loads |
 | Manual vacuum | You control exactly when it runs — good right after a bulk load | More operational burden — someone has to watch for it and trigger it |

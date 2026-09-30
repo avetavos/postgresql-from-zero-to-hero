@@ -225,7 +225,7 @@ Isolation is about ruling out specific anomalies, not about being maximally stri
 >
 > **Bank ledger systems** — a transfer transaction that affects account balances commonly runs at Serializable specifically to prevent write skew between two accounts read and written concurrently, accepting the retry overhead as the cost of correctness.
 >
-> **Sidekiq-style job queues** — use `SKIP LOCKED` together with a weaker isolation level like Read Committed, so multiple workers can grab jobs concurrently without blocking each other, trading away a correctness guarantee this kind of work does not need.
+> **Postgres-backed job queues** — use `SKIP LOCKED` together with a weaker isolation level like Read Committed, so multiple workers can grab jobs concurrently without blocking each other, trading away a correctness guarantee this kind of work does not need.
 
 export const quizIso = [
   {

@@ -183,7 +183,7 @@ Deadlocks are not caused by locking too much, but by locking in conflicting orde
 
 > 💡 Real-world example
 >
-> **Sidekiq-style job queues on PostgreSQL** — use `SELECT ... FOR UPDATE SKIP LOCKED` so multiple workers can each grab a different row concurrently without waiting on each other's locks — a widely used pattern for building a job queue directly on the database without a separate message broker.
+> **Postgres-backed job queues** — use `SELECT ... FOR UPDATE SKIP LOCKED` so multiple workers can each grab a different row concurrently without waiting on each other's locks — a widely used pattern for building a job queue directly on the database without a separate message broker.
 >
 > **Seat/ticket booking systems** — use `SELECT ... FOR UPDATE` to lock a seat before confirming a booking, so two people can never both successfully book the same seat at once.
 

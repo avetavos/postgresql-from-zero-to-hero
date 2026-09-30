@@ -58,7 +58,7 @@ SELECT title, body FROM notes;
 
 ## Boolean
 
-column แบบ `boolean` เก็บ true, false หรือ null PostgreSQL ยอมรับการเขียนได้หลายแบบตอน input — `true`, `'t'`, `'yes'`, `1` และค่า false ที่เทียบเท่ากัน — แต่จะแสดงค่าเป็น `t` หรือ `f` เสมอ
+column แบบ `boolean` เก็บ true, false หรือ null PostgreSQL ยอมรับการเขียนได้หลายแบบตอน input — `true`, `'t'`, `'yes'`, `'1'` และค่า false ที่เทียบเท่ากัน (ตัวเลข `1` เปล่า ๆ จะถูกปฏิเสธใน `INSERT`) — แต่จะแสดงค่าเป็น `t` หรือ `f` เสมอ
 
 ```sql
 SELECT true AS yes, false AS no, null::boolean AS unknown;

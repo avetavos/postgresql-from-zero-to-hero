@@ -165,7 +165,7 @@ table มีชื่อเต็มแบบ **qualified name** ในรูป
 - `CREATE DATABASE` รันภายใน transaction block ไม่ได้ ดังนั้นเครื่องมือต่าง ๆ จึงต้อง commit คำสั่งนี้เดี่ยว ๆ
 - role (บัญชี) และ database (ภาชนะข้อมูล) เป็นแนวคิดที่แยกจากกัน อย่าปฏิบัติต่ออันหนึ่งเสมือนเป็นอีกอัน
 
-<Callout title="cluster, database, schema, table">
+<Callout title="Cluster, database, schema, table: กล่องซ้อนกันสี่ชั้น">
 ลองนึกภาพสี่ชั้นเป็นกล่องที่ซ้อนกัน: server บรรจุ database, database บรรจุ schema, schema บรรจุ table การรู้ว่าคุณอยู่ในกล่องใดตอบคำถาม "table ของฉันอยู่ที่ไหน?" ได้เกือบทั้งหมด และการเขียนชื่อแบบ qualified `schema.table` ช่วยให้คุณรอดพ้นจากเซอร์ไพรส์ของ search_path
 </Callout>
 

@@ -33,7 +33,8 @@ A logical backup runs `pg_dump`, which reads a database and writes out the state
 pg_dump --format=custom --file=shop.dump --dbname=shop
 
 # Restore that archive into a fresh database
-pg_restore --dbname=shop_restored --create shop.dump
+createdb shop_restored
+pg_restore --dbname=shop_restored shop.dump
 ```
 
 The custom format used here lets `pg_restore` selectively restore parts and run in parallel. For small databases a plain SQL file you replay with `psql` works too.

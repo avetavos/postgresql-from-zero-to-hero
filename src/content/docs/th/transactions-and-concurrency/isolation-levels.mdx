@@ -225,7 +225,7 @@ isolation คือการตัดทิ้ง anomaly จำเพาะอ�
 >
 > **ระบบ ledger ของธนาคาร** — transaction โอนยอดเงินที่กระทบยอดคงเหลือมักรันที่ Serializable โดยเฉพาะ เพื่อป้องกัน write skew ระหว่างสองบัญชีที่อ่าน-เขียนพร้อมกัน ยอมรับ overhead ของการ retry เป็นต้นทุนของความถูกต้อง
 >
-> **ระบบ job queue สไตล์ Sidekiq** — ใช้ `SKIP LOCKED` ร่วมกับ isolation level ที่อ่อนกว่าอย่าง Read Committed เพื่อให้ worker หลายตัวคว้างานพร้อมกันได้โดยไม่บล็อกกัน แลกกับการไม่ต้องการ correctness guarantee ระดับสูงสำหรับงานประเภทนี้
+> **ระบบ job queue ที่ใช้ Postgres เป็น backend** — ใช้ `SKIP LOCKED` ร่วมกับ isolation level ที่อ่อนกว่าอย่าง Read Committed เพื่อให้ worker หลายตัวคว้างานพร้อมกันได้โดยไม่บล็อกกัน แลกกับการไม่ต้องการ correctness guarantee ระดับสูงสำหรับงานประเภทนี้
 
 export const quizIso = [
   {

@@ -39,7 +39,7 @@ SELECT to_tsvector('english', 'The cats were running quickly');
 (1 row)
 ```
 
-Notice what happened: "The" and "were" were dropped as stop words, "cats" became "cat", "running" became "run", and "quickly" became "quick". Both a document and a query pass through the same normalization, so "running" in a search matches "ran" in the text.
+Notice what happened: "The" and "were" were dropped as stop words, "cats" became "cat", "running" became "run", and "quickly" became "quick". Both a document and a query pass through the same normalization, so "running" in a search matches "runs" or "run" in the text (the stemmer does not map irregular forms such as "ran" to "run").
 
 ## Matching with the @@ operator
 
@@ -223,7 +223,7 @@ ORDER BY rank DESC;
 
 ## Tips / gotchas
 
-- Always pass a language configuration such as `'english'`. The configuration controls stemming and stop words; the wrong one (or the default `simple`, which does neither) changes which rows match.
+- Always pass a language configuration such as `'english'`. The configuration controls stemming and stop words; the wrong one (or `simple`, which does neither) changes which rows match.
 - Use the same configuration for both the stored `tsvector` and the query. A document built with `english` will not match a query parsed with a different configuration.
 - Precompute the `tsvector` in a generated column for any table you search repeatedly. It moves the cost to write time and lets a GIN index do its job.
 - Pick the right query function: `plainto_tsquery` for raw user input (it ands the words), `to_tsquery` when you need explicit `&`, `|`, and `!` operators, and `websearch_to_tsquery` for Google-style quoted phrases.

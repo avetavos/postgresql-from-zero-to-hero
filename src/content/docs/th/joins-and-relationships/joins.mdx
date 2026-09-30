@@ -237,7 +237,7 @@ export const joinDiagram = `flowchart TD
 
 ## เคล็ดลับและข้อควรระวัง
 
-- การลืม `ON` clause จะเปลี่ยน join ให้กลายเป็น cross join (`CROSS JOIN`) ที่จับคู่ทุก row ฝั่งซ้ายกับทุก row ฝั่งขวา ด้วยสิบ row กับอีกสิบ row ก็ได้ผลลัพธ์ออกมาหนึ่งร้อย row — ซึ่งแทบไม่ใช่สิ่งที่คุณต้องการเลย
+- `JOIN` ที่ไม่มี `ON` หรือ `USING` เป็น syntax error ใน PostgreSQL ส่วน cross join โดยไม่ตั้งใจเกิดจากการเขียน table คั่นด้วย comma (`FROM a, b`) แล้วลืม `WHERE`: ทุก row ฝั่งซ้ายจับคู่กับทุก row ฝั่งขวา สิบ row กับสิบ row ได้ผลลัพธ์หนึ่งร้อย row
 - ตั้ง alias สั้น ๆ ให้แต่ละ table เช่น `a` และ `b` แล้วใส่นำหน้าทุก column วิธีนี้ทำให้ query อ่านง่ายและเลี่ยงความกำกวมเมื่อทั้งสอง table มี column ชื่อเดียวกันอย่าง `id`
 - `NULL` ในผลลัพธ์ของ outer join หมายถึง "ไม่พบ row ที่ตรงกัน" ไม่ได้หมายถึง "ค่าเป็นศูนย์หรือว่างเปล่า" ทดสอบด้วย `IS NULL` ห้ามใช้ `= NULL` เด็ดขาด
 - การใส่ตัวกรองให้ table ฝั่งขวาใน `WHERE` แทนที่จะเป็น `ON` อาจเปลี่ยน `LEFT JOIN` กลับให้เป็น inner join อย่างเงียบ ๆ เพราะ `NULL` ไม่ผ่านการเปรียบเทียบใน `WHERE` ส่วนใหญ่
@@ -255,7 +255,7 @@ export const joinDiagram = `flowchart TD
 
 ## ข้อผิดพลาดที่พบบ่อย
 
-- **ลืมใส่ `ON` clause** — PostgreSQL จะไม่เตือนว่าคุณพลาด แต่จะทำ cross join จับคู่ทุก row กับทุก row ทำให้ผลลัพธ์ระเบิด (row explosion) ตรวจสอบว่าทุก join มี `ON` เสมอ
+- **เขียน table คั่นด้วย comma แล้วลืมเงื่อนไข join** — `FROM a, b` ที่ไม่มี `WHERE` ที่จับคู่กัน คือ cross join แบบเงียบ ๆ ที่จับคู่ทุก row กับทุก row จนผลลัพธ์ระเบิด (row explosion) (ส่วน `a JOIN b` ที่ไม่มี `ON` จะ error เป็น syntax error) ควรใช้ `JOIN ... ON` แบบ explicit
 - **ไม่ตั้ง alias ให้ table** — เมื่อสอง table มี column ชื่อเดียวกันอย่าง `id` query จะโยน ambiguous column error หรือแม้ไม่ error ก็อ่านยากจนดูแลต่อไม่ได้ ใช้ alias สั้น ๆ อย่าง `a`, `b` เสมอ
 - **ใส่ filter ของ table ฝั่งขวาไว้ใน `WHERE` แทน `ON`** — กับ `LEFT JOIN` แล้วพฤติกรรมจะกลายเป็น `INNER JOIN` อย่างเงียบ ๆ เพราะ `WHERE` จะทิ้ง row ที่มีค่า `NULL` ทางฝั่งขวาไปด้วย ถ้าอยากกรองแต่ยังเก็บ row ฝั่งซ้ายไว้ครบ ต้องใส่เงื่อนไขนั้นใน `ON`
 

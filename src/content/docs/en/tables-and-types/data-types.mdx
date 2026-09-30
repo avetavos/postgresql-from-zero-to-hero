@@ -58,7 +58,7 @@ SELECT title, body FROM notes;
 
 ## Booleans
 
-A `boolean` column holds true, false, or null. PostgreSQL accepts several spellings on input — `true`, `'t'`, `'yes'`, `1` and their false equivalents — but always displays the value as `t` or `f`.
+A `boolean` column holds true, false, or null. PostgreSQL accepts several spellings on input — `true`, `'t'`, `'yes'`, `'1'` and their false equivalents (a bare integer `1` is rejected in an `INSERT`) — but always displays the value as `t` or `f`.
 
 ```sql
 SELECT true AS yes, false AS no, null::boolean AS unknown;

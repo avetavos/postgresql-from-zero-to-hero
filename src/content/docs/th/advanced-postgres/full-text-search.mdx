@@ -39,7 +39,7 @@ SELECT to_tsvector('english', 'The cats were running quickly');
 (1 row)
 ```
 
-สังเกตว่าเกิดอะไรขึ้น "The" และ "were" ถูกตัดทิ้งในฐานะ stop word "cats" กลายเป็น "cat" "running" กลายเป็น "run" และ "quickly" กลายเป็น "quick" ทั้งเอกสารและ query ผ่านการทำให้เป็นมาตรฐานแบบเดียวกัน ดังนั้น "running" ในการค้นหาจึง match กับ "ran" ในข้อความ
+สังเกตว่าเกิดอะไรขึ้น "The" และ "were" ถูกตัดทิ้งในฐานะ stop word "cats" กลายเป็น "cat" "running" กลายเป็น "run" และ "quickly" กลายเป็น "quick" ทั้งเอกสารและ query ผ่านการทำให้เป็นมาตรฐานแบบเดียวกัน ดังนั้น "running" ในการค้นหาจึง match กับ "runs" หรือ "run" ในข้อความ (stemmer ไม่แปลงรูปพิเศษอย่าง "ran" เป็น "run")
 
 ## การจับคู่ด้วย operator @@
 
@@ -223,7 +223,7 @@ ORDER BY rank DESC;
 
 ## เคล็ดลับและข้อควรระวัง
 
-- ส่ง language configuration อย่าง `'english'` เสมอ configuration นี้ควบคุม stemming และ stop word การใช้ผิด (หรือใช้ค่า default `simple` ซึ่งไม่ทำทั้งสองอย่าง) จะเปลี่ยนว่า row ใดจะ match
+- ส่ง language configuration อย่าง `'english'` เสมอ configuration นี้ควบคุม stemming และ stop word การใช้ผิด (หรือใช้ `simple` ซึ่งไม่ทำทั้งสองอย่าง) จะเปลี่ยนว่า row ใดจะ match
 - ใช้ configuration เดียวกันทั้งสำหรับ `tsvector` ที่เก็บไว้และสำหรับ query เอกสารที่สร้างด้วย `english` จะไม่ match กับ query ที่ parse ด้วย configuration อื่น
 - คำนวณ `tsvector` ล่วงหน้าใน generated column สำหรับ table ใด ๆ ที่คุณค้นหาซ้ำ ๆ วิธีนี้ย้ายต้นทุนไปอยู่ตอนเขียน และปล่อยให้ GIN index ทำงานได้เต็มที่
 - เลือกฟังก์ชัน query ให้ถูก: `plainto_tsquery` สำหรับ input ดิบจากผู้ใช้ (จะ and คำทั้งหมดเข้าด้วยกัน), `to_tsquery` เมื่อคุณต้องการ operator `&`, `|` และ `!` ที่ระบุชัดเจน และ `websearch_to_tsquery` สำหรับวลีในเครื่องหมายคำพูดแบบ Google

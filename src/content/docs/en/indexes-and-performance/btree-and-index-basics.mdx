@@ -66,10 +66,10 @@ A B-tree keeps its entries in sorted order, which is what makes it so versatile.
 | Range                                  | `WHERE published > 2000`                 | Yes           |
 | Between                                | `WHERE published BETWEEN 1990 AND 2000`  | Yes           |
 | Sorting                                | `ORDER BY published`                     | Yes           |
-| Prefix match                           | `WHERE title LIKE 'The %'`               | Yes           |
+| Prefix match                           | `WHERE title LIKE 'The %'`               | Only with `text_pattern_ops` or the `C` collation |
 | Leading wildcard                       | `WHERE title LIKE '%orchard'`            | No            |
 
-The last two rows are the key insight: a B-tree can satisfy `LIKE 'The %'` because the search anchors to the start of the value, but it cannot help `LIKE '%orchard'` because a leading wildcard means the matching values are scattered throughout the sorted order rather than grouped together.
+The last two rows are the key insight: a B-tree can satisfy `LIKE 'The %'` only when it is built with `text_pattern_ops` (or the column uses the `C` collation; under the default `en_US.utf8` collation the planner falls back to a Seq Scan), because the search anchors to the start of the value, but it cannot help `LIKE '%orchard'` because a leading wildcard means the matching values are scattered throughout the sorted order rather than grouped together.
 
 ## Composite indexes and the left-prefix rule
 

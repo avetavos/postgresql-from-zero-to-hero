@@ -22,7 +22,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 docker run --name pg \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
-  -v pgdata:/var/lib/postgresql/data \
+  -v pgdata:/var/lib/postgresql \
   -d postgres:18
 ```
 
@@ -31,7 +31,7 @@ docker run --name pg \
 - `--name pg` ตั้งชื่อที่จำง่ายให้ container เพื่อให้คำสั่งทีหลังอ้างชื่อนี้ได้
 - `-e POSTGRES_PASSWORD=secret` ตั้งรหัสผ่านสำหรับ user `postgres` เริ่มต้น ตัวแปรนี้บังคับ ถ้าไม่ใส่ image จะไม่ยอมเริ่มทำงาน
 - `-p 5432:5432` แมป PostgreSQL port ของ container ไปยัง port เดียวกันบนเครื่องของคุณ เพื่อให้เครื่องมือบน host เชื่อมต่อกับ `localhost:5432` ได้
-- `-v pgdata:/var/lib/postgresql/data` mount named volume ที่ directory ซึ่ง Postgres ใช้เก็บไฟล์ข้อมูล เพื่อให้ข้อมูลของคุณไม่สูญหายเมื่อ container ถูกลบ
+- `-v pgdata:/var/lib/postgresql` mount named volume หนึ่งระดับเหนือ data directory (image `postgres:18` เก็บ cluster ไว้ที่ `18/docker` ข้างใน ถ้า mount ที่ `/var/lib/postgresql/data` container จะ exit) เพื่อให้ข้อมูลของคุณไม่สูญหายเมื่อ container ถูกลบ
 - `-d postgres:18` รัน image อย่างเป็นทางการ tag `18` ในเบื้องหลัง
 
 ## docker-compose.yml สำหรับการตั้งค่าที่ทำซ้ำได้
@@ -48,7 +48,7 @@ services:
     ports:
       - '5432:5432'
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
 
   pgadmin:
     image: dpage/pgadmin4

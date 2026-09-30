@@ -22,7 +22,7 @@ This single command pulls the image if needed and starts a database. It sets the
 docker run --name pg \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
-  -v pgdata:/var/lib/postgresql/data \
+  -v pgdata:/var/lib/postgresql \
   -d postgres:18
 ```
 
@@ -31,7 +31,7 @@ A quick tour of the flags:
 - `--name pg` gives the container a memorable name so later commands can refer to it.
 - `-e POSTGRES_PASSWORD=secret` sets the password for the default `postgres` user. This variable is required; the image refuses to start without it.
 - `-p 5432:5432` maps the container's PostgreSQL port to the same port on your machine, so tools on the host can connect to `localhost:5432`.
-- `-v pgdata:/var/lib/postgresql/data` mounts a named volume at the directory where Postgres stores its files, so your data is not lost when the container is removed.
+- `-v pgdata:/var/lib/postgresql` mounts a named volume one level above the data directory (the `postgres:18` image keeps the cluster in `18/docker` below it; mounting `/var/lib/postgresql/data` makes the container exit), so your data is not lost when the container is removed.
 - `-d postgres:18` runs the official image, tag `18`, in the background.
 
 ## A docker-compose.yml for repeatable setups
@@ -48,7 +48,7 @@ services:
     ports:
       - '5432:5432'
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
 
   pgadmin:
     image: dpage/pgadmin4
