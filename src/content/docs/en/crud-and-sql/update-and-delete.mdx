@@ -1,6 +1,6 @@
 ---
 title: Updating and deleting
-description: Change rows with UPDATE and remove them with DELETE — always with a WHERE clause, why a missing WHERE is dangerous, and using RETURNING to confirm.
+description: Change and remove rows with UPDATE and DELETE — targeting rows with WHERE, confirming changes with RETURNING, and guarding against the missing-WHERE disaster.
 sidebar:
   order: 4
 ---
@@ -9,21 +9,53 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 The last two CRUD verbs change existing data. `UPDATE` sets new column values on rows that match a condition, and `DELETE` removes matching rows. Both lean heavily on the `WHERE` clause you learned for `SELECT` — and both become destructive mistakes if you forget it.
 
-We continue with the `authors` and `books` tables.
+Everything below is real output from **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026), run top to bottom in one empty database that starts with the course's canonical dataset. Most changes are wrapped in `BEGIN ... ROLLBACK` so that every example starts from the same rows; the command tags (`UPDATE 1`, `DELETE 2`) are what a real run prints.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## Updating columns
 
-`UPDATE` names the table, lists `SET column = value` pairs, and uses `WHERE` to pick the rows. Without `WHERE`, every row is changed.
+`UPDATE` names the table, lists `SET column = value` pairs, and uses `WHERE` to pick the rows. Without `WHERE`, every row is changed. The new value can reference the old one, as `copies_sold + 500` shows.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/update-basic.sql
+    BEGIN;
     UPDATE books
     SET copies_sold = copies_sold + 500
     WHERE id = 1;
+    SELECT id, title, copies_sold FROM books WHERE id = 1;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -60,7 +92,37 @@ We continue with the `authors` and `books` tables.
   </TabItem>
 </Tabs>
 
-The new value can reference the old one, as `copies_sold + 500` shows. You can set several columns at once by separating the assignments with commas.
+```text
+BEGIN
+UPDATE 1
+ id |     title     | copies_sold 
+----+---------------+-------------
+  1 | Quiet Harbors |         950
+(1 row)
+
+ROLLBACK
+```
+
+You can set several columns at once by separating the assignments with commas:
+
+```sql
+-- sql/update-several-columns.sql
+BEGIN;
+UPDATE books SET published = 2004, copies_sold = 0 WHERE title = 'Unlinked Draft';
+SELECT id, title, published, copies_sold FROM books WHERE id = 4;
+ROLLBACK;
+```
+
+```text
+BEGIN
+UPDATE 1
+ id |     title      | published | copies_sold 
+----+----------------+-----------+-------------
+  4 | Unlinked Draft |      2004 |           0
+(1 row)
+
+ROLLBACK
+```
 
 **In pgAdmin:** run this in the Query Tool; the message panel reports `UPDATE 1`, the count of rows changed.
 
@@ -71,17 +133,20 @@ Just like `INSERT`, both `UPDATE` and `DELETE` accept `RETURNING`. This is the c
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/update-returning.sql
+    BEGIN;
     UPDATE books
-    SET published = 2005
+    SET published = 2019
     WHERE title = 'The Glass Orchard'
     RETURNING id, title, published;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(
       'UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published',
-      [2005, 'The Glass Orchard'],
+      [2019, 'The Glass Orchard'],
     );
     console.log(res.rows);
     ```
@@ -90,7 +155,7 @@ Just like `INSERT`, both `UPDATE` and `DELETE` accept `RETURNING`. This is the c
     ```python
     cur.execute(
         "UPDATE books SET published = %s WHERE title = %s RETURNING id, title, published",
-        (2005, "The Glass Orchard"),
+        (2019, "The Glass Orchard"),
     )
     changed = cur.fetchall()
     ```
@@ -99,7 +164,7 @@ Just like `INSERT`, both `UPDATE` and `DELETE` accept `RETURNING`. This is the c
     ```go
     rows, err := conn.Query(ctx,
         "UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published",
-        2005, "The Glass Orchard")
+        2019, "The Glass Orchard")
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -107,7 +172,7 @@ Just like `INSERT`, both `UPDATE` and `DELETE` accept `RETURNING`. This is the c
     let rows = sqlx::query(
         "UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published",
     )
-    .bind(2005_i32)
+    .bind(2019_i32)
     .bind("The Glass Orchard")
     .fetch_all(&pool)
     .await?;
@@ -116,11 +181,68 @@ Just like `INSERT`, both `UPDATE` and `DELETE` accept `RETURNING`. This is the c
 </Tabs>
 
 ```text
- id |       title       | published
+BEGIN
+ id |       title       | published 
 ----+-------------------+-----------
-  1 | The Glass Orchard |      2005
+  2 | The Glass Orchard |      2019
 (1 row)
+
+UPDATE 1
+ROLLBACK
 ```
+
+PostgreSQL 18 adds `old` and `new` aliases to `RETURNING`, so one statement can report both the value before and the value after ([release notes](https://www.postgresql.org/docs/18/release-18.html)). Before PostgreSQL 18 this needed a `SELECT` first or a trigger:
+
+```sql
+-- sql/update-returning-old-new.sql
+BEGIN;
+UPDATE books
+SET copies_sold = copies_sold + 5
+WHERE id = 2
+RETURNING id, title, old.copies_sold AS was, new.copies_sold AS now;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |       title       | was  | now  
+----+-------------------+------+------
+  2 | The Glass Orchard | 1250 | 1255
+(1 row)
+
+UPDATE 1
+ROLLBACK
+```
+
+### UPDATE ... FROM
+
+To set values from another table, add a `FROM` clause and join in `WHERE`. Here each book's `copies_sold` is recomputed from its `sales` rows. Books 1 and 3 already agree with their sales; book 2 has 200 copies unaccounted for in `sales` (1250 vs 1050), and the statement would silently overwrite them:
+
+```sql
+-- sql/update-from.sql
+BEGIN;
+UPDATE books b
+SET copies_sold = s.total
+FROM (SELECT book_id, sum(copies) AS total FROM sales GROUP BY book_id) s
+WHERE s.book_id = b.id
+RETURNING b.id, b.title, old.copies_sold AS was, new.copies_sold AS now;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |       title       | was  | now  
+----+-------------------+------+------
+  1 | Quiet Harbors     |  450 |  450
+  2 | The Glass Orchard | 1250 | 1050
+  3 | Tidal Notes       |  600 |  600
+(3 rows)
+
+UPDATE 3
+ROLLBACK
+```
+
+The `FROM` list is a join, and the `WHERE` is the join condition. That is powerful and easy to get wrong (see the last section).
 
 ## Deleting rows
 
@@ -129,9 +251,12 @@ Just like `INSERT`, both `UPDATE` and `DELETE` accept `RETURNING`. This is the c
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/delete-basic.sql
+    BEGIN;
     DELETE FROM books
     WHERE copies_sold = 0
     RETURNING id, title;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -169,25 +294,108 @@ Just like `INSERT`, both `UPDATE` and `DELETE` accept `RETURNING`. This is the c
 </Tabs>
 
 ```text
- id |     title
+BEGIN
+ id |     title      
 ----+----------------
-  3 | Quiet Harbors
+  4 | Unlinked Draft
 (1 row)
+
+DELETE 1
+ROLLBACK
+```
+
+`DELETE ... USING` is the delete counterpart of `UPDATE ... FROM`: delete `sales` rows by looking at another table (here, every sale of a book by author 2):
+
+```sql
+-- sql/delete-using.sql
+BEGIN;
+DELETE FROM sales s
+USING books b
+WHERE s.book_id = b.id AND b.author_id = 2
+RETURNING s.id, s.region, s.copies;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id | region | copies 
+----+--------+--------
+  2 | West   |    400
+  4 | East   |    200
+(2 rows)
+
+DELETE 2
+ROLLBACK
+```
+
+A delete can be refused when other rows still reference the target. Both statements fail with SQLSTATE `23503`, and the message names the constraint and the referencing table:
+
+```sql
+-- @expect-error 23503
+DELETE FROM books WHERE id = 1;
+```
+
+```text
+ERROR:  update or delete on table "books" violates foreign key constraint "sales_book_id_fkey" on table "sales"
+DETAIL:  Key (id)=(1) is still referenced from table "sales".
+```
+
+```sql
+-- @expect-error 23503
+DELETE FROM authors WHERE id = 1;
+```
+
+```text
+ERROR:  update or delete on table "authors" violates foreign key constraint "books_author_id_fkey" on table "books"
+DETAIL:  Key (id)=(1) is still referenced from table "books".
 ```
 
 ## The danger of a missing WHERE
 
-`UPDATE` and `DELETE` apply to every row that matches the condition — and if there is no condition, every row matches. Running `DELETE FROM books;` empties the entire table, and `UPDATE books SET copies_sold = 0;` zeroes every record. There is no undo button.
+`UPDATE` and `DELETE` apply to every row that matches the condition — and if there is no condition, every row matches. `DELETE FROM books;` would empty the table, and `UPDATE books SET copies_sold = 0;` zeroes every record. The command tag is the only warning: `UPDATE 4` where you expected `UPDATE 1`.
 
-A safe habit is to run the same `WHERE` as a `SELECT` first, confirm the row count, then switch the verb. Wrapping risky changes in a transaction gives you an escape hatch.
+A safe habit is to run the same `WHERE` as a `SELECT` first, confirm the row count, then switch the verb. Wrapping risky changes in a transaction gives you an escape hatch, as here (the whole table zeroed, then undone):
+
+```sql
+-- sql/missing-where.sql
+SELECT count(*) AS rows_that_match FROM books WHERE author_id = 1;
+BEGIN;
+UPDATE books SET copies_sold = 0;
+SELECT sum(copies_sold) AS total_after FROM books;
+ROLLBACK;
+SELECT sum(copies_sold) AS total_after_rollback FROM books;
+```
+
+```text
+ rows_that_match 
+-----------------
+               2
+(1 row)
+
+BEGIN
+UPDATE 4
+ total_after 
+-------------
+           0
+(1 row)
+
+ROLLBACK
+ total_after_rollback 
+----------------------
+                 2300
+(1 row)
+```
+
+The same pattern from psql and the drivers — inspect inside the transaction, then decide:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/transaction-escape-hatch.sql
     BEGIN;
-    DELETE FROM books WHERE author_id = 4;
-    -- inspect the result, then decide:
-    ROLLBACK;  -- or COMMIT; to keep the change
+    DELETE FROM sales WHERE book_id = 3;
+    SELECT count(*) AS sales_left FROM sales;   -- inspect the result, then decide:
+    ROLLBACK;                                   -- or COMMIT; to keep the change
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -195,7 +403,7 @@ A safe habit is to run the same `WHERE` as a `SELECT` first, confirm the row cou
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('DELETE FROM books WHERE author_id = $1', [4]);
+      await client.query('DELETE FROM sales WHERE book_id = $1', [3]);
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK');
@@ -208,7 +416,7 @@ A safe habit is to run the same `WHERE` as a `SELECT` first, confirm the row cou
   <TabItem label="Python">
     ```python
     with conn.transaction():
-        cur.execute("DELETE FROM books WHERE author_id = %s", (4,))
+        cur.execute("DELETE FROM sales WHERE book_id = %s", (3,))
     # commits if the block succeeds, rolls back on exception
     ```
   </TabItem>
@@ -218,7 +426,7 @@ A safe habit is to run the same `WHERE` as a `SELECT` first, confirm the row cou
     if err != nil {
         return err
     }
-    if _, err := tx.Exec(ctx, "DELETE FROM books WHERE author_id = $1", 4); err != nil {
+    if _, err := tx.Exec(ctx, "DELETE FROM sales WHERE book_id = $1", 3); err != nil {
         tx.Rollback(ctx)
         return err
     }
@@ -228,8 +436,8 @@ A safe habit is to run the same `WHERE` as a `SELECT` first, confirm the row cou
   <TabItem label="Rust">
     ```rust
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM books WHERE author_id = $1")
-        .bind(4_i64)
+    sqlx::query("DELETE FROM sales WHERE book_id = $1")
+        .bind(3_i64)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -237,15 +445,245 @@ A safe habit is to run the same `WHERE` as a `SELECT` first, confirm the row cou
   </TabItem>
 </Tabs>
 
-Inside a transaction, nothing is permanent until you `COMMIT`; a `ROLLBACK` throws the changes away. Transactions get a full lesson of their own later in the course.
+```text
+BEGIN
+DELETE 2
+ sales_left 
+------------
+          4
+(1 row)
+
+ROLLBACK
+```
+
+Inside a transaction, nothing is permanent until you `COMMIT`; a `ROLLBACK` throws the changes away. Transactions get a full module of their own later in the course. Each driver snippet was run once against a scratch copy of the dataset (the transaction ones commit, leaving 4 of the 6 sales rows):
+
+```text
+$ (each snippet run once against the course dataset in a scratch database, reset before every run; the program prints what it got back)
+[UPDATE (then SELECT copies_sold of book 1)] Node.js (pg 8.23.0): { copies_sold: 950 }
+[UPDATE (then SELECT copies_sold of book 1)] Python (psycopg 3.3.6): (950,)
+[UPDATE (then SELECT copies_sold of book 1)] Go (pgx v5.11.0): 950
+[UPDATE (then SELECT copies_sold of book 1)] Rust (sqlx 0.9.0): 950
+[UPDATE ... RETURNING] Node.js (pg 8.23.0): [ { id: '2', title: 'The Glass Orchard', published: 2019 } ]
+[UPDATE ... RETURNING] Python (psycopg 3.3.6): [(2, 'The Glass Orchard', 2019)]
+[UPDATE ... RETURNING] Go (pgx v5.11.0): [2 The Glass Orchard 2019]
+[UPDATE ... RETURNING] Rust (sqlx 0.9.0): 2 The Glass Orchard 2019
+[DELETE ... RETURNING] Node.js (pg 8.23.0): [ { id: '4', title: 'Unlinked Draft' } ]
+[DELETE ... RETURNING] Python (psycopg 3.3.6): [(4, 'Unlinked Draft')]
+[DELETE ... RETURNING] Go (pgx v5.11.0): [4 Unlinked Draft]
+[DELETE ... RETURNING] Rust (sqlx 0.9.0): 4 Unlinked Draft
+[DELETE in a transaction (then count(*) of sales)] Node.js (pg 8.23.0): { count: '4' }
+[DELETE in a transaction (then count(*) of sales)] Python (psycopg 3.3.6): (4,)
+[DELETE in a transaction (then count(*) of sales)] Go (pgx v5.11.0): 4
+[DELETE in a transaction (then count(*) of sales)] Rust (sqlx 0.9.0): 4
+```
+
+## TRUNCATE
+
+To remove every row, `TRUNCATE` is the tool: it is much faster than `DELETE FROM` on a big table and it is transactional in PostgreSQL. It refuses when a foreign key points at the table, unless you truncate the referencing table too or say `CASCADE` (which also empties tables you may not have intended):
+
+```sql
+-- sql/truncate.sql
+BEGIN;
+TRUNCATE sales;
+SELECT count(*) AS sales_rows FROM sales;
+ROLLBACK;
+SELECT count(*) AS sales_rows_after_rollback FROM sales;
+```
+
+```text
+BEGIN
+TRUNCATE TABLE
+ sales_rows 
+------------
+          0
+(1 row)
+
+ROLLBACK
+ sales_rows_after_rollback 
+---------------------------
+                         6
+(1 row)
+```
+
+```sql
+-- @expect-error 0A000
+TRUNCATE books;
+```
+
+```text
+ERROR:  cannot truncate a table referenced in a foreign key constraint
+DETAIL:  Table "sales" references "books".
+HINT:  Truncate table "sales" at the same time, or use TRUNCATE ... CASCADE.
+```
+
+```sql
+-- sql/truncate-cascade.sql
+BEGIN;
+TRUNCATE books CASCADE;
+SELECT (SELECT count(*) FROM books) AS books, (SELECT count(*) FROM sales) AS sales, (SELECT count(*) FROM authors) AS authors;
+ROLLBACK;
+```
+
+```text
+BEGIN
+NOTICE:  truncate cascades to table "sales"
+TRUNCATE TABLE
+ books | sales | authors 
+-------+-------+---------
+     0 |     0 |       3
+(1 row)
+
+ROLLBACK
+```
+
+## What DELETE and UPDATE leave behind
+
+PostgreSQL never overwrites a row in place. An `UPDATE` writes a new version of the row and leaves the old one as a **dead tuple** until `VACUUM` reclaims it, and a `DELETE` just marks the row dead. Proof on 100,000 rows: one full-table `UPDATE` doubles the heap file; `VACUUM` makes the dead space reusable (it does not shrink the file), and a second full-table `UPDATE` then fits in the same space. `pg_stat_force_next_flush()` is a testing helper that publishes this session's statistics immediately; normally they show up about a second later:
+
+```sql
+-- sql/dead-tuples.sql
+CREATE TABLE counters (id int PRIMARY KEY, n int NOT NULL);
+INSERT INTO counters SELECT g, 0 FROM generate_series(1, 100000) g;
+VACUUM (ANALYZE) counters;
+SELECT pg_size_pretty(pg_relation_size('counters')) AS fresh_heap;
+UPDATE counters SET n = n + 1;
+SELECT pg_size_pretty(pg_relation_size('counters')) AS after_one_full_update;
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'counters';
+VACUUM counters;
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'counters';
+UPDATE counters SET n = n + 1;
+SELECT pg_size_pretty(pg_relation_size('counters')) AS after_second_update_with_reuse;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+VACUUM
+ fresh_heap 
+------------
+ 3544 kB
+(1 row)
+
+UPDATE 100000
+ after_one_full_update 
+-----------------------
+ 7080 kB
+(1 row)
+
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_live_tup | n_dead_tup 
+------------+------------
+     200000 |     100000
+(1 row)
+
+VACUUM
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_live_tup | n_dead_tup 
+------------+------------
+     100000 |          0
+(1 row)
+
+UPDATE 100000
+ after_second_update_with_reuse 
+--------------------------------
+ 7080 kB
+(1 row)
+```
+
+The MVCC lesson and the vacuum lesson return to this in depth. For now: a `DELETE` does not return disk space to the operating system, and update-heavy tables need regular vacuuming (autovacuum does it by default).
+
+## Reading AI-generated code
+
+The task was "sync `books.copies_sold` from the East region sales". The assistant writes an `UPDATE ... FROM`, and it even reads well:
+
+<SpotTheBug lang="sql" code={`-- migration: sync books.copies_sold from the East region sales
+-- AI comment: "pull the East figures into the books table"
+UPDATE books
+SET copies_sold = s.copies
+FROM sales s
+WHERE s.region = 'East';`}>
+
+The bug is the missing join condition. The `WHERE` filters `sales` to the East rows but never ties a sale to its book, so every book is joined with every East sale, and PostgreSQL applies one arbitrary match to each. It runs without error and touches every row, including the book that has no sales at all (`UPDATE 4`):
+
+```sql
+-- sql/update-from-bug.sql
+BEGIN;
+UPDATE books
+SET copies_sold = s.copies
+FROM sales s
+WHERE s.region = 'East'
+RETURNING books.id, books.title, old.copies_sold AS was, new.copies_sold AS now;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |       title       | was  | now 
+----+-------------------+------+-----
+  1 | Quiet Harbors     |  450 | 900
+  2 | The Glass Orchard | 1250 | 900
+  3 | Tidal Notes       |  600 | 900
+  4 | Unlinked Draft    |    0 | 900
+(4 rows)
+
+UPDATE 4
+ROLLBACK
+```
+
+Every book now claims 900 copies (the value of the first East sale the join happened to pick). The fix joins on the key and aggregates first, so each book gets one value and only books with East sales are touched:
+
+```sql
+-- sql/update-from-fixed.sql
+BEGIN;
+UPDATE books b
+SET copies_sold = e.total
+FROM (SELECT book_id, sum(copies) AS total FROM sales WHERE region = 'East' GROUP BY book_id) e
+WHERE e.book_id = b.id
+RETURNING b.id, b.title, old.copies_sold AS was, new.copies_sold AS now;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |       title       | was  | now 
+----+-------------------+------+-----
+  1 | Quiet Harbors     |  450 |  50
+  2 | The Glass Orchard | 1250 | 900
+  3 | Tidal Notes       |  600 | 200
+(3 rows)
+
+UPDATE 3
+ROLLBACK
+```
+
+`RETURNING old.x, new.x` is what made the bug obvious. Use it (or a preceding `SELECT count(*)`) for every data fix.
+
+</SpotTheBug>
+
+## Mental Model
+
+`UPDATE` and `DELETE` are `SELECT` plus an action: the `WHERE` (and `FROM`/`USING` join) selects a set of rows, and the action applies to that set. If the set is wrong, the action is wrong, silently. So every safe workflow is about checking the set before acting: `SELECT count(*)` first, `RETURNING` after, a transaction around it. Inside, MVCC means neither statement is in place; both create dead row versions that vacuum cleans up later.
 
 ## Tips / gotchas
 
 - Always include a `WHERE` clause on `UPDATE` and `DELETE` unless you genuinely intend to touch every row. A forgotten `WHERE` rewrites or empties the whole table.
 - Preview destructive statements by running the matching `SELECT count(*) ... WHERE ...` first to confirm how many rows you are about to affect.
 - Wrap risky or multi-step changes in a transaction so you can `ROLLBACK` if the result is wrong.
-- Use `RETURNING` to verify exactly which rows changed instead of trusting the row count alone.
-- A `DELETE` may fail if other tables reference the row through a foreign key; you will revisit this in the joins and relationships module.
+- Use `RETURNING` (with `old`/`new` in PostgreSQL 18) to verify exactly which rows changed instead of trusting the row count alone.
+- In `UPDATE ... FROM` and `DELETE ... USING`, always include the join condition in `WHERE`.
+- A `DELETE` may fail if other tables reference the row through a foreign key (`23503`); `ON DELETE CASCADE` changes that, at the price of larger deletes.
+- Use `TRUNCATE` (not `DELETE`) to empty a whole table.
 
 <Callout title="WHERE is not optional in practice">
 The single most common production accident with SQL is an `UPDATE` or `DELETE` that ran without its `WHERE` clause. Build the muscle memory: type the `WHERE` first, the values second. When in doubt, do it inside a transaction you can roll back.
@@ -259,18 +697,15 @@ The single most common production accident with SQL is an `UPDATE` or `DELETE` t
 | `UPDATE`/`DELETE` with no `WHERE` | Fast to write, no condition to think about | Hits every row immediately — a disaster if run against the wrong table or environment |
 | Wrapped in a transaction you can `ROLLBACK` | An emergency exit before the real `COMMIT` | Have to remember to open/close the transaction and check the result every time |
 | Run directly outside a transaction | Fast, no transaction to manage | No undo button if the result is wrong |
+| `TRUNCATE` instead of `DELETE FROM` | Instant, no per-row work | Needs a strong lock, refused with foreign keys unless `CASCADE` |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Running `UPDATE`/`DELETE` with no `WHERE` clause** — this hits every row in the table immediately. Build the habit of typing `WHERE` before filling in the condition.
-- **Not testing the condition with a `SELECT` first** — always run the matching `SELECT count(*) ... WHERE ...` to confirm how many rows will be affected before switching to `UPDATE`/`DELETE`.
-- **Assuming `DELETE` reclaims disk space immediately** — `DELETE` only marks rows as dead; reclaiming the space is `VACUUM`'s job.
-
-> 💡 Real-world example
->
-> **Production data-change processes** — teams that treat data changes with care require a dry run of destructive SQL as a `SELECT` first, with the affected row count reviewed before anyone approves the real `UPDATE`/`DELETE`.
->
-> **Manual data fixes** — a common SRE practice wraps every hand-run data change in a transaction that can `ROLLBACK`, with a second person reviewing the result before `COMMIT`.
+- **"`DELETE` frees disk space."** It marks rows dead. Only `VACUUM` makes the space reusable, and only trailing empty pages are returned to the OS (the heap above did not shrink).
+- **"An UPDATE changes the row in place."** It writes a new version (the heap doubled after one full-table update).
+- **"`UPDATE ... FROM` without a join is a syntax error."** It is valid SQL and updates every row with an arbitrary match (proved above).
+- **"The row count is enough to know it worked."** `UPDATE 4` looks fine until you expected 1; `RETURNING` shows which rows.
+- **"`TRUNCATE` cannot be rolled back."** In PostgreSQL it can, inside a transaction.
 
 export const quizUpdateDelete = [
   {
@@ -282,11 +717,13 @@ export const quizUpdateDelete = [
       'Nothing changes until you commit',
     ],
     answer: 1,
+    explain: 'The lesson shows `UPDATE 4` and a total of 0 (rolled back afterwards: 2300 again). Without a transaction the change is immediately committed.',
   },
   {
     q: 'Which clause lets an UPDATE or DELETE report exactly which rows it changed?',
     options: ['SET', 'RETURNING', 'WHERE', 'LIMIT'],
     answer: 1,
+    explain: '`RETURNING` returns the affected rows; in PostgreSQL 18 `old.col` and `new.col` return the before and after values.',
   },
   {
     q: 'How can you make a risky DELETE reversible while you check the result?',
@@ -297,6 +734,29 @@ export const quizUpdateDelete = [
       'Use DELETE ALL instead',
     ],
     answer: 1,
+    explain: 'Nothing is permanent until COMMIT. `BEGIN; DELETE ...; SELECT ...; ROLLBACK;` undoes it (the sales example).',
+  },
+  {
+    q: 'An `UPDATE books SET copies_sold = s.copies FROM sales s WHERE s.region = \'East\'` has no join condition between books and sales. What does it do?',
+    options: [
+      'Fails with a syntax error',
+      'Updates every book with an arbitrary matching sale',
+      'Updates only books that have East sales',
+      'Does nothing',
+    ],
+    answer: 1,
+    explain: 'The FROM list is a cross join filtered only by region, so every book matches. All four books became 900 copies in the lesson.',
+  },
+  {
+    q: 'After a full-table UPDATE of 100,000 rows the table file roughly doubles. Why?',
+    options: [
+      'PostgreSQL duplicates the table for safety',
+      'The update writes new row versions and the old ones stay as dead tuples until VACUUM',
+      'Indexes are stored in the heap',
+      'The statistics were not refreshed',
+    ],
+    answer: 1,
+    explain: 'MVCC: an update is an insert of a new version plus marking the old one dead. VACUUM makes that space reusable, so the second update did not grow the file.',
   },
 ];
 

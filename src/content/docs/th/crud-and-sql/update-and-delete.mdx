@@ -1,6 +1,6 @@
 ---
 title: การ update และ delete
-description: เปลี่ยน row ด้วย UPDATE และลบด้วย DELETE — ใช้ WHERE clause เสมอ, ทำไม WHERE ที่หายไปจึงอันตราย และการใช้ RETURNING เพื่อยืนยัน
+description: แก้ไขและลบ row ด้วย UPDATE และ DELETE — เลือก row ด้วย WHERE, ยืนยันการเปลี่ยนแปลงด้วย RETURNING และป้องกันหายนะจากการลืม WHERE
 sidebar:
   order: 4
 ---
@@ -9,21 +9,53 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-สองคำกริยา CRUD สุดท้ายเปลี่ยนแปลงข้อมูลที่มีอยู่ `UPDATE` ตั้งค่า column ใหม่บน row ที่ตรงกับเงื่อนไข และ `DELETE` ลบ row ที่ตรงกัน ทั้งคู่พึ่งพา `WHERE` clause ที่คุณเรียนมาสำหรับ `SELECT` อย่างมาก — และทั้งคู่กลายเป็นความผิดพลาดที่สร้างความเสียหายหากคุณลืมใส่
+กริยา CRUD สองตัวสุดท้ายเปลี่ยนข้อมูลที่มีอยู่ `UPDATE` ตั้งค่า column ใหม่ให้ row ที่ตรงเงื่อนไข และ `DELETE` ลบ row ที่ตรง ทั้งสองพึ่ง clause `WHERE` ที่คุณเรียนจาก `SELECT` อย่างมาก — และทั้งสองกลายเป็นความผิดพลาดที่ทำลายล้างถ้าคุณลืมมัน
 
-เราใช้ table `authors` และ `books` กันต่อไป
+ทุกอย่างด้านล่างเป็น output จริงจาก **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัวที่เริ่มด้วยชุดข้อมูลมาตรฐานของคอร์ส การเปลี่ยนแปลงส่วนใหญ่ครอบด้วย `BEGIN ... ROLLBACK` เพื่อให้ทุกตัวอย่างเริ่มจาก row เดียวกัน command tag (`UPDATE 1`, `DELETE 2`) คือสิ่งที่การรันจริงพิมพ์
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## การ update column
 
-`UPDATE` ระบุชื่อ table แสดงรายการคู่ `SET column = value` และใช้ `WHERE` เพื่อเลือก row หากไม่มี `WHERE` ทุก row จะถูกเปลี่ยน
+`UPDATE` ระบุ table ลิสต์คู่ `SET column = value` และใช้ `WHERE` เลือก row ถ้าไม่มี `WHERE` ทุก row ถูกเปลี่ยน ค่าใหม่อ้างถึงค่าเก่าได้ ดังที่ `copies_sold + 500` แสดง
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/update-basic.sql
+    BEGIN;
     UPDATE books
     SET copies_sold = copies_sold + 500
     WHERE id = 1;
+    SELECT id, title, copies_sold FROM books WHERE id = 1;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -60,28 +92,61 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-ค่าใหม่สามารถอ้างถึงค่าเก่าได้ ดังที่ `copies_sold + 500` แสดงให้เห็น คุณสามารถตั้งค่าหลาย column พร้อมกันได้โดยคั่นการกำหนดค่าแต่ละอันด้วยเครื่องหมายจุลภาค
+```text
+BEGIN
+UPDATE 1
+ id |     title     | copies_sold 
+----+---------------+-------------
+  1 | Quiet Harbors |         950
+(1 row)
 
-**ใน pgAdmin:** รันสิ่งนี้ใน Query Tool แผงข้อความจะรายงานว่า `UPDATE 1` ที่เป็นจำนวน row ที่ถูกเปลี่ยน
+ROLLBACK
+```
 
-## การยืนยันการเปลี่ยนแปลงด้วย RETURNING
+ตั้งหลาย column พร้อมกันได้โดยคั่นการกำหนดค่าด้วยเครื่องหมายจุลภาค:
 
-เช่นเดียวกับ `INSERT` ทั้ง `UPDATE` และ `DELETE` รองรับ `RETURNING` นี่เป็นวิธีที่สะอาดที่สุดในการดูว่า row ใดถูกเปลี่ยนแปลงเป๊ะ ๆ และค่าใหม่เป็นอะไร
+```sql
+-- sql/update-several-columns.sql
+BEGIN;
+UPDATE books SET published = 2004, copies_sold = 0 WHERE title = 'Unlinked Draft';
+SELECT id, title, published, copies_sold FROM books WHERE id = 4;
+ROLLBACK;
+```
+
+```text
+BEGIN
+UPDATE 1
+ id |     title      | published | copies_sold 
+----+----------------+-----------+-------------
+  4 | Unlinked Draft |      2004 |           0
+(1 row)
+
+ROLLBACK
+```
+
+**ใน pgAdmin:** รันใน Query Tool แผงข้อความรายงาน `UPDATE 1` คือจำนวน row ที่เปลี่ยน
+
+## ยืนยันการเปลี่ยนแปลงด้วย RETURNING
+
+เหมือน `INSERT` ทั้ง `UPDATE` และ `DELETE` รับ `RETURNING` นี่คือวิธีที่สะอาดที่สุดในการเห็นว่า row ไหนเปลี่ยนและค่าใหม่คืออะไร
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/update-returning.sql
+    BEGIN;
     UPDATE books
-    SET published = 2005
+    SET published = 2019
     WHERE title = 'The Glass Orchard'
     RETURNING id, title, published;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(
       'UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published',
-      [2005, 'The Glass Orchard'],
+      [2019, 'The Glass Orchard'],
     );
     console.log(res.rows);
     ```
@@ -90,7 +155,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     ```python
     cur.execute(
         "UPDATE books SET published = %s WHERE title = %s RETURNING id, title, published",
-        (2005, "The Glass Orchard"),
+        (2019, "The Glass Orchard"),
     )
     changed = cur.fetchall()
     ```
@@ -99,7 +164,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     ```go
     rows, err := conn.Query(ctx,
         "UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published",
-        2005, "The Glass Orchard")
+        2019, "The Glass Orchard")
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -107,7 +172,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     let rows = sqlx::query(
         "UPDATE books SET published = $1 WHERE title = $2 RETURNING id, title, published",
     )
-    .bind(2005_i32)
+    .bind(2019_i32)
     .bind("The Glass Orchard")
     .fetch_all(&pool)
     .await?;
@@ -116,22 +181,82 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- id |       title       | published
+BEGIN
+ id |       title       | published 
 ----+-------------------+-----------
-  1 | The Glass Orchard |      2005
+  2 | The Glass Orchard |      2019
 (1 row)
+
+UPDATE 1
+ROLLBACK
 ```
+
+PostgreSQL 18 เพิ่ม alias `old` และ `new` ให้ `RETURNING` ทำให้ statement เดียวรายงานทั้งค่าก่อนและหลังได้ ([release notes](https://www.postgresql.org/docs/18/release-18.html)) ก่อน PostgreSQL 18 ต้อง `SELECT` ก่อนหรือใช้ trigger:
+
+```sql
+-- sql/update-returning-old-new.sql
+BEGIN;
+UPDATE books
+SET copies_sold = copies_sold + 5
+WHERE id = 2
+RETURNING id, title, old.copies_sold AS was, new.copies_sold AS now;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |       title       | was  | now  
+----+-------------------+------+------
+  2 | The Glass Orchard | 1250 | 1255
+(1 row)
+
+UPDATE 1
+ROLLBACK
+```
+
+### UPDATE ... FROM
+
+เพื่อตั้งค่าจาก table อื่น เพิ่ม clause `FROM` และ join ใน `WHERE` ที่นี่ `copies_sold` ของแต่ละหนังสือถูกคำนวณใหม่จาก row ใน `sales` หนังสือ 1 และ 3 ตรงกับยอดขายอยู่แล้ว หนังสือ 2 มี 200 copy ที่ไม่ปรากฏใน `sales` (1250 กับ 1050) และ statement จะเขียนทับมันแบบเงียบ ๆ:
+
+```sql
+-- sql/update-from.sql
+BEGIN;
+UPDATE books b
+SET copies_sold = s.total
+FROM (SELECT book_id, sum(copies) AS total FROM sales GROUP BY book_id) s
+WHERE s.book_id = b.id
+RETURNING b.id, b.title, old.copies_sold AS was, new.copies_sold AS now;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |       title       | was  | now  
+----+-------------------+------+------
+  1 | Quiet Harbors     |  450 |  450
+  2 | The Glass Orchard | 1250 | 1050
+  3 | Tidal Notes       |  600 |  600
+(3 rows)
+
+UPDATE 3
+ROLLBACK
+```
+
+รายการ `FROM` คือ join และ `WHERE` คือเงื่อนไข join ทรงพลังและผิดพลาดง่าย (ดูส่วนสุดท้าย)
 
 ## การลบ row
 
-`DELETE FROM` ลบ row ที่ตรงกับ `WHERE` clause เช่นเดียวกับ `UPDATE` คุณสามารถเพิ่ม `RETURNING` เพื่อดูว่าอะไรถูกลบไป
+`DELETE FROM` ลบ row ที่ตรงกับ clause `WHERE` เหมือน `UPDATE` คุณเพิ่ม `RETURNING` เพื่อดูว่าอะไรถูกลบได้
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/delete-basic.sql
+    BEGIN;
     DELETE FROM books
     WHERE copies_sold = 0
     RETURNING id, title;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -169,25 +294,108 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- id |     title
+BEGIN
+ id |     title      
 ----+----------------
-  3 | Quiet Harbors
+  4 | Unlinked Draft
+(1 row)
+
+DELETE 1
+ROLLBACK
+```
+
+`DELETE ... USING` คือคู่ของ `UPDATE ... FROM` สำหรับการลบ: ลบ row ของ `sales` โดยดูจาก table อื่น (ที่นี่ ทุกยอดขายของหนังสือโดย author 2):
+
+```sql
+-- sql/delete-using.sql
+BEGIN;
+DELETE FROM sales s
+USING books b
+WHERE s.book_id = b.id AND b.author_id = 2
+RETURNING s.id, s.region, s.copies;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id | region | copies 
+----+--------+--------
+  2 | West   |    400
+  4 | East   |    200
+(2 rows)
+
+DELETE 2
+ROLLBACK
+```
+
+การลบถูกปฏิเสธได้เมื่อ row อื่นยังอ้างอิงเป้าหมายอยู่ ทั้งสอง statement ล้มเหลวด้วย SQLSTATE `23503` และข้อความระบุ constraint กับ table ที่อ้างอิง:
+
+```sql
+-- @expect-error 23503
+DELETE FROM books WHERE id = 1;
+```
+
+```text
+ERROR:  update or delete on table "books" violates foreign key constraint "sales_book_id_fkey" on table "sales"
+DETAIL:  Key (id)=(1) is still referenced from table "sales".
+```
+
+```sql
+-- @expect-error 23503
+DELETE FROM authors WHERE id = 1;
+```
+
+```text
+ERROR:  update or delete on table "authors" violates foreign key constraint "books_author_id_fkey" on table "books"
+DETAIL:  Key (id)=(1) is still referenced from table "books".
+```
+
+## อันตรายของการลืม WHERE
+
+`UPDATE` และ `DELETE` ใช้กับทุก row ที่ตรงเงื่อนไข — และถ้าไม่มีเงื่อนไข ทุก row ตรง `DELETE FROM books;` จะทำให้ table ว่าง และ `UPDATE books SET copies_sold = 0;` ทำให้ทุก record เป็นศูนย์ คำเตือนเดียวคือ command tag: `UPDATE 4` ทั้งที่คุณคาดหวัง `UPDATE 1`
+
+นิสัยที่ปลอดภัยคือรัน `WHERE` เดียวกันเป็น `SELECT` ก่อน ยืนยันจำนวน row แล้วค่อยเปลี่ยนกริยา การครอบการเปลี่ยนแปลงเสี่ยงด้วย transaction ให้ทางหนี ดังตัวอย่าง (ทั้ง table ถูกทำเป็นศูนย์ แล้วย้อนกลับ):
+
+```sql
+-- sql/missing-where.sql
+SELECT count(*) AS rows_that_match FROM books WHERE author_id = 1;
+BEGIN;
+UPDATE books SET copies_sold = 0;
+SELECT sum(copies_sold) AS total_after FROM books;
+ROLLBACK;
+SELECT sum(copies_sold) AS total_after_rollback FROM books;
+```
+
+```text
+ rows_that_match 
+-----------------
+               2
+(1 row)
+
+BEGIN
+UPDATE 4
+ total_after 
+-------------
+           0
+(1 row)
+
+ROLLBACK
+ total_after_rollback 
+----------------------
+                 2300
 (1 row)
 ```
 
-## อันตรายของ WHERE ที่หายไป
-
-`UPDATE` และ `DELETE` ทำกับทุก row ที่ตรงกับเงื่อนไข — และถ้าไม่มีเงื่อนไข ทุก row ก็ตรงทั้งหมด การรัน `DELETE FROM books;` จะล้าง table ทั้งหมดให้ว่างเปล่า และ `UPDATE books SET copies_sold = 0;` จะทำให้ทุกระเบียนเป็นศูนย์ ไม่มีปุ่ม undo
-
-นิสัยที่ปลอดภัยคือการรัน `WHERE` เดียวกันเป็น `SELECT` ก่อน ยืนยันจำนวน row แล้วค่อยสลับคำกริยา การห่อการเปลี่ยนแปลงที่เสี่ยงไว้ใน transaction จะให้ทางหนีฉุกเฉินแก่คุณ
+รูปแบบเดียวกันจาก psql และ driver — ตรวจภายใน transaction แล้วค่อยตัดสินใจ:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/transaction-escape-hatch.sql
     BEGIN;
-    DELETE FROM books WHERE author_id = 4;
-    -- inspect the result, then decide:
-    ROLLBACK;  -- or COMMIT; to keep the change
+    DELETE FROM sales WHERE book_id = 3;
+    SELECT count(*) AS sales_left FROM sales;   -- inspect the result, then decide:
+    ROLLBACK;                                   -- or COMMIT; to keep the change
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -195,7 +403,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('DELETE FROM books WHERE author_id = $1', [4]);
+      await client.query('DELETE FROM sales WHERE book_id = $1', [3]);
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK');
@@ -208,7 +416,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   <TabItem label="Python">
     ```python
     with conn.transaction():
-        cur.execute("DELETE FROM books WHERE author_id = %s", (4,))
+        cur.execute("DELETE FROM sales WHERE book_id = %s", (3,))
     # commits if the block succeeds, rolls back on exception
     ```
   </TabItem>
@@ -218,7 +426,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     if err != nil {
         return err
     }
-    if _, err := tx.Exec(ctx, "DELETE FROM books WHERE author_id = $1", 4); err != nil {
+    if _, err := tx.Exec(ctx, "DELETE FROM sales WHERE book_id = $1", 3); err != nil {
         tx.Rollback(ctx)
         return err
     }
@@ -228,8 +436,8 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   <TabItem label="Rust">
     ```rust
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM books WHERE author_id = $1")
-        .bind(4_i64)
+    sqlx::query("DELETE FROM sales WHERE book_id = $1")
+        .bind(3_i64)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -237,66 +445,318 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
 </Tabs>
 
-ภายใน transaction ไม่มีอะไรถาวรจนกว่าคุณจะ `COMMIT` ส่วน `ROLLBACK` จะทิ้งการเปลี่ยนแปลงไป transaction มีบทเรียนเต็ม ๆ ของตัวเองอยู่ช่วงหลังของคอร์ส
+```text
+BEGIN
+DELETE 2
+ sales_left 
+------------
+          4
+(1 row)
+
+ROLLBACK
+```
+
+ภายใน transaction ไม่มีอะไรถาวรจนกว่าคุณ `COMMIT` และ `ROLLBACK` ทิ้งการเปลี่ยนแปลง transaction มีโมดูลเต็มของตัวเองภายหลังในคอร์ส snippet ของ driver แต่ละตัวรันหนึ่งครั้งกับสำเนาชั่วคราวของชุดข้อมูล (ตัวที่เป็น transaction commit จริง เหลือ 4 จาก 6 row ของ sales):
+
+```text
+$ (each snippet run once against the course dataset in a scratch database, reset before every run; the program prints what it got back)
+[UPDATE (then SELECT copies_sold of book 1)] Node.js (pg 8.23.0): { copies_sold: 950 }
+[UPDATE (then SELECT copies_sold of book 1)] Python (psycopg 3.3.6): (950,)
+[UPDATE (then SELECT copies_sold of book 1)] Go (pgx v5.11.0): 950
+[UPDATE (then SELECT copies_sold of book 1)] Rust (sqlx 0.9.0): 950
+[UPDATE ... RETURNING] Node.js (pg 8.23.0): [ { id: '2', title: 'The Glass Orchard', published: 2019 } ]
+[UPDATE ... RETURNING] Python (psycopg 3.3.6): [(2, 'The Glass Orchard', 2019)]
+[UPDATE ... RETURNING] Go (pgx v5.11.0): [2 The Glass Orchard 2019]
+[UPDATE ... RETURNING] Rust (sqlx 0.9.0): 2 The Glass Orchard 2019
+[DELETE ... RETURNING] Node.js (pg 8.23.0): [ { id: '4', title: 'Unlinked Draft' } ]
+[DELETE ... RETURNING] Python (psycopg 3.3.6): [(4, 'Unlinked Draft')]
+[DELETE ... RETURNING] Go (pgx v5.11.0): [4 Unlinked Draft]
+[DELETE ... RETURNING] Rust (sqlx 0.9.0): 4 Unlinked Draft
+[DELETE in a transaction (then count(*) of sales)] Node.js (pg 8.23.0): { count: '4' }
+[DELETE in a transaction (then count(*) of sales)] Python (psycopg 3.3.6): (4,)
+[DELETE in a transaction (then count(*) of sales)] Go (pgx v5.11.0): 4
+[DELETE in a transaction (then count(*) of sales)] Rust (sqlx 0.9.0): 4
+```
+
+## TRUNCATE
+
+เพื่อลบทุก row `TRUNCATE` คือเครื่องมือ: เร็วกว่า `DELETE FROM` บน table ใหญ่มากและเป็น transactional ใน PostgreSQL มันปฏิเสธเมื่อมี foreign key ชี้มาที่ table เว้นแต่คุณ truncate table ที่อ้างอิงด้วยหรือบอก `CASCADE` (ซึ่งล้าง table ที่คุณอาจไม่ได้ตั้งใจด้วย):
+
+```sql
+-- sql/truncate.sql
+BEGIN;
+TRUNCATE sales;
+SELECT count(*) AS sales_rows FROM sales;
+ROLLBACK;
+SELECT count(*) AS sales_rows_after_rollback FROM sales;
+```
+
+```text
+BEGIN
+TRUNCATE TABLE
+ sales_rows 
+------------
+          0
+(1 row)
+
+ROLLBACK
+ sales_rows_after_rollback 
+---------------------------
+                         6
+(1 row)
+```
+
+```sql
+-- @expect-error 0A000
+TRUNCATE books;
+```
+
+```text
+ERROR:  cannot truncate a table referenced in a foreign key constraint
+DETAIL:  Table "sales" references "books".
+HINT:  Truncate table "sales" at the same time, or use TRUNCATE ... CASCADE.
+```
+
+```sql
+-- sql/truncate-cascade.sql
+BEGIN;
+TRUNCATE books CASCADE;
+SELECT (SELECT count(*) FROM books) AS books, (SELECT count(*) FROM sales) AS sales, (SELECT count(*) FROM authors) AS authors;
+ROLLBACK;
+```
+
+```text
+BEGIN
+NOTICE:  truncate cascades to table "sales"
+TRUNCATE TABLE
+ books | sales | authors 
+-------+-------+---------
+     0 |     0 |       3
+(1 row)
+
+ROLLBACK
+```
+
+## สิ่งที่ DELETE และ UPDATE ทิ้งไว้
+
+PostgreSQL ไม่เคยเขียนทับ row ในที่เดิม `UPDATE` เขียน row เวอร์ชันใหม่และทิ้งเวอร์ชันเก่าเป็น **dead tuple** จนกว่า `VACUUM` จะเก็บกลับ และ `DELETE` แค่ทำเครื่องหมายว่า row ตาย หลักฐานบน 100,000 row: `UPDATE` ทั้ง table หนึ่งครั้งทำให้ไฟล์ heap ใหญ่ขึ้นเท่าตัว `VACUUM` ทำให้พื้นที่ตายนั้นใช้ซ้ำได้ (ไม่ทำให้ไฟล์เล็กลง) และ `UPDATE` ทั้ง table ครั้งที่สองก็พอดีในพื้นที่เดิม `pg_stat_force_next_flush()` เป็นตัวช่วยสำหรับการทดสอบที่เผยแพร่สถิติของ session นี้ทันที ปกติจะโผล่ราวหนึ่งวินาทีต่อมา:
+
+```sql
+-- sql/dead-tuples.sql
+CREATE TABLE counters (id int PRIMARY KEY, n int NOT NULL);
+INSERT INTO counters SELECT g, 0 FROM generate_series(1, 100000) g;
+VACUUM (ANALYZE) counters;
+SELECT pg_size_pretty(pg_relation_size('counters')) AS fresh_heap;
+UPDATE counters SET n = n + 1;
+SELECT pg_size_pretty(pg_relation_size('counters')) AS after_one_full_update;
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'counters';
+VACUUM counters;
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'counters';
+UPDATE counters SET n = n + 1;
+SELECT pg_size_pretty(pg_relation_size('counters')) AS after_second_update_with_reuse;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+VACUUM
+ fresh_heap 
+------------
+ 3544 kB
+(1 row)
+
+UPDATE 100000
+ after_one_full_update 
+-----------------------
+ 7080 kB
+(1 row)
+
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_live_tup | n_dead_tup 
+------------+------------
+     200000 |     100000
+(1 row)
+
+VACUUM
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_live_tup | n_dead_tup 
+------------+------------
+     100000 |          0
+(1 row)
+
+UPDATE 100000
+ after_second_update_with_reuse 
+--------------------------------
+ 7080 kB
+(1 row)
+```
+
+บท MVCC และบท vacuum จะกลับมาที่เรื่องนี้อย่างลึก ตอนนี้: `DELETE` ไม่คืนพื้นที่ดิสก์ให้ระบบปฏิบัติการ และ table ที่ update บ่อยต้อง vacuum สม่ำเสมอ (autovacuum ทำให้โดยค่าเริ่มต้น)
+
+## Reading AI-generated code
+
+โจทย์คือ "sync `books.copies_sold` จากยอดขายภูมิภาค East" ผู้ช่วย AI เขียน `UPDATE ... FROM` และอ่านแล้วดูดีด้วย:
+
+<SpotTheBug lang="sql" code={`-- migration: sync books.copies_sold from the East region sales
+-- AI comment: "pull the East figures into the books table"
+UPDATE books
+SET copies_sold = s.copies
+FROM sales s
+WHERE s.region = 'East';`}>
+
+bug คือไม่มีเงื่อนไข join `WHERE` กรอง `sales` เหลือ row ของ East แต่ไม่เคยผูกยอดขายกับหนังสือของมัน หนังสือทุกเล่มจึงถูก join กับทุกยอดขายของ East และ PostgreSQL ใช้ผลจับคู่ตามอำเภอใจหนึ่งค่ากับแต่ละเล่ม มันรันโดยไม่มี error และแตะทุก row รวมถึงหนังสือที่ไม่มียอดขายเลย (`UPDATE 4`):
+
+```sql
+-- sql/update-from-bug.sql
+BEGIN;
+UPDATE books
+SET copies_sold = s.copies
+FROM sales s
+WHERE s.region = 'East'
+RETURNING books.id, books.title, old.copies_sold AS was, new.copies_sold AS now;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |       title       | was  | now 
+----+-------------------+------+-----
+  1 | Quiet Harbors     |  450 | 900
+  2 | The Glass Orchard | 1250 | 900
+  3 | Tidal Notes       |  600 | 900
+  4 | Unlinked Draft    |    0 | 900
+(4 rows)
+
+UPDATE 4
+ROLLBACK
+```
+
+หนังสือทุกเล่มตอนนี้อ้างว่ามี 900 copy (ค่าของยอดขาย East แรกที่ join เลือกได้) วิธีแก้คือ join บน key และ aggregate ก่อน แต่ละเล่มจึงได้ค่าเดียว และแตะเฉพาะหนังสือที่มียอดขาย East:
+
+```sql
+-- sql/update-from-fixed.sql
+BEGIN;
+UPDATE books b
+SET copies_sold = e.total
+FROM (SELECT book_id, sum(copies) AS total FROM sales WHERE region = 'East' GROUP BY book_id) e
+WHERE e.book_id = b.id
+RETURNING b.id, b.title, old.copies_sold AS was, new.copies_sold AS now;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |       title       | was  | now 
+----+-------------------+------+-----
+  1 | Quiet Harbors     |  450 |  50
+  2 | The Glass Orchard | 1250 | 900
+  3 | Tidal Notes       |  600 | 200
+(3 rows)
+
+UPDATE 3
+ROLLBACK
+```
+
+`RETURNING old.x, new.x` คือสิ่งที่ทำให้ bug ชัด ใช้มัน (หรือ `SELECT count(*)` นำหน้า) กับทุกการแก้ข้อมูล
+
+</SpotTheBug>
+
+## Mental Model
+
+`UPDATE` และ `DELETE` คือ `SELECT` บวก action: `WHERE` (และ join `FROM`/`USING`) เลือกเซตของ row และ action ใช้กับเซตนั้น ถ้าเซตผิด action ก็ผิดแบบเงียบ ๆ ทุก workflow ที่ปลอดภัยจึงเกี่ยวกับการตรวจเซตก่อนลงมือ: `SELECT count(*)` ก่อน `RETURNING` หลัง และครอบด้วย transaction ภายใน MVCC หมายความว่าทั้งสอง statement ไม่ทำในที่เดิม ทั้งคู่สร้าง row เวอร์ชันตายให้ vacuum เก็บภายหลัง
 
 ## เคล็ดลับและข้อควรระวัง
 
-- ใส่ `WHERE` clause บน `UPDATE` และ `DELETE` เสมอ เว้นแต่คุณตั้งใจจริง ๆ ที่จะแตะต้องทุก row การลืม `WHERE` จะเขียนทับหรือล้าง table ทั้งหมดให้ว่างเปล่า
-- แสดงตัวอย่างคำสั่งที่สร้างความเสียหายล่วงหน้าโดยการรัน `SELECT count(*) ... WHERE ...` ที่ตรงกันก่อน เพื่อยืนยันว่าคุณกำลังจะกระทบกี่ row
-- ห่อการเปลี่ยนแปลงที่เสี่ยงหรือหลายขั้นตอนไว้ใน transaction เพื่อให้คุณ `ROLLBACK` ได้ถ้าผลลัพธ์ผิด
-- ใช้ `RETURNING` เพื่อตรวจสอบว่า row ใดถูกเปลี่ยนแปลงเป๊ะ ๆ แทนการไว้ใจแค่จำนวน row เพียงอย่างเดียว
-- `DELETE` อาจล้มเหลวได้ถ้า table อื่นอ้างถึง row นั้นผ่าน foreign key คุณจะกลับมาเจอเรื่องนี้อีกในโมดูล join และความสัมพันธ์
+- ใส่ clause `WHERE` ให้ `UPDATE` และ `DELETE` เสมอ เว้นแต่คุณตั้งใจแตะทุก row จริง ๆ `WHERE` ที่ลืมเขียนทับหรือทำให้ทั้ง table ว่าง
+- ดูตัวอย่าง statement ที่ทำลายล้างก่อนด้วย `SELECT count(*) ... WHERE ...` ที่ตรงกัน เพื่อยืนยันว่าคุณกำลังจะกระทบกี่ row
+- ครอบการเปลี่ยนแปลงที่เสี่ยงหรือหลายขั้นด้วย transaction เพื่อ `ROLLBACK` ได้ถ้าผลผิด
+- ใช้ `RETURNING` (พร้อม `old`/`new` ใน PostgreSQL 18) เพื่อตรวจว่า row ไหนเปลี่ยนแน่ ๆ แทนที่จะเชื่อจำนวน row อย่างเดียว
+- ใน `UPDATE ... FROM` และ `DELETE ... USING` ใส่เงื่อนไข join ใน `WHERE` เสมอ
+- `DELETE` อาจล้มเหลวถ้า table อื่นอ้างอิง row ผ่าน foreign key (`23503`) `ON DELETE CASCADE` เปลี่ยนสิ่งนั้น ด้วยราคาคือการลบที่ใหญ่ขึ้น
+- ใช้ `TRUNCATE` (ไม่ใช่ `DELETE`) เพื่อล้างทั้ง table
 
-<Callout title="WHERE ไม่ใช่ตัวเลือกในทางปฏิบัติ">
-อุบัติเหตุบน production ที่พบบ่อยที่สุดอันดับหนึ่งกับ SQL คือ `UPDATE` หรือ `DELETE` ที่รันโดยไม่มี `WHERE` clause สร้างความเคยชินให้กล้ามเนื้อจดจำ: พิมพ์ `WHERE` ก่อน แล้วค่อยพิมพ์ค่าทีหลัง เมื่อสงสัย ให้ทำใน transaction ที่ rollback ได้
+<Callout title="WHERE ไม่ใช่ทางเลือกในทางปฏิบัติ">
+อุบัติเหตุ production ที่พบบ่อยที่สุดข้อเดียวของ SQL คือ `UPDATE` หรือ `DELETE` ที่รันโดยไม่มี clause `WHERE` สร้างความจำของกล้ามเนื้อ: พิมพ์ `WHERE` ก่อน ค่าทีหลัง เมื่อสงสัย ให้ทำภายใน transaction ที่ rollback ได้
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `UPDATE`/`DELETE` พร้อม `WHERE` ที่เจาะจง | ปลอดภัย กระทบเฉพาะ row ที่ตั้งใจ | ต้องคิดเงื่อนไขให้ถูกต้องครบถ้วนก่อนรัน |
-| `UPDATE`/`DELETE` โดยไม่มี `WHERE` | เขียนเร็ว ไม่ต้องคิดเงื่อนไข | กระทบทุก row ในทันที เป็นหายนะถ้ารันผิด table หรือผิด environment |
-| ห่อไว้ใน transaction แล้ว `ROLLBACK` ได้ | มีทางหนีฉุกเฉินก่อน `COMMIT` จริง | ต้องจำเปิด/ปิด transaction และตรวจผลก่อน commit ทุกครั้ง |
-| รันตรง ๆ นอก transaction | เร็ว ไม่ต้องจัดการ transaction | ไม่มีปุ่ม undo ถ้าผลลัพธ์ผิดพลาด |
+| `UPDATE`/`DELETE` พร้อม `WHERE` เฉพาะ | ปลอดภัย แตะเฉพาะ row ที่ตั้งใจ | ต้องทำเงื่อนไขให้ถูกต้องสมบูรณ์ก่อนรัน |
+| `UPDATE`/`DELETE` ที่ไม่มี `WHERE` | เขียนเร็ว ไม่ต้องคิดเงื่อนไข | โดนทุก row ทันที — หายนะถ้ารันผิด table หรือผิดสภาพแวดล้อม |
+| ครอบด้วย transaction ที่ `ROLLBACK` ได้ | ทางออกฉุกเฉินก่อน `COMMIT` จริง | ต้องจำเปิด/ปิด transaction และตรวจผลทุกครั้ง |
+| รันตรง ๆ นอก transaction | เร็ว ไม่ต้องจัดการ transaction | ไม่มีปุ่มยกเลิกถ้าผลผิด |
+| `TRUNCATE` แทน `DELETE FROM` | ทันที ไม่มีงานต่อ row | ต้องใช้ lock แรง ถูกปฏิเสธเมื่อมี foreign key เว้นแต่ `CASCADE` |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **รัน `UPDATE`/`DELETE` โดยไม่มี `WHERE` clause** — กระทบทุก row ใน table ทันที ให้สร้างนิสัยพิมพ์ `WHERE` ก่อนแล้วค่อยเติมเงื่อนไข
-- **ไม่ทดสอบเงื่อนไขด้วย `SELECT` ก่อน** — ควรรัน `SELECT count(*) ... WHERE ...` ที่ตรงกันก่อนเสมอ เพื่อยืนยันจำนวน row ที่จะโดนผลกระทบ ก่อนสลับเป็น `UPDATE`/`DELETE`
-- **คิดว่า `DELETE` คืนพื้นที่ดิสก์ทันที** — `DELETE` แค่ทำเครื่องหมาย row ว่าตายแล้ว การคืนพื้นที่จริงเป็นหน้าที่ของ `VACUUM`
-
-> 💡 ตัวอย่างจากของจริง
->
-> **กระบวนการเปลี่ยนแปลงข้อมูล production ที่รัดกุม** — กำหนดให้ dry-run คำสั่ง SQL ที่ทำลายข้อมูล (destructive) ด้วยเวอร์ชัน `SELECT` ก่อนเสมอ แล้วให้ทีมรีวิวจำนวน row ก่อนอนุมัติให้รัน `UPDATE`/`DELETE` จริง
->
-> **ทีม SRE ทั่วไปที่ทำ manual data fix** — บังคับให้ทุกการเปลี่ยนแปลงข้อมูลด้วยมือห่อด้วย transaction ที่ `ROLLBACK` ได้ พร้อมมีคนที่สองช่วยรีวิวผลก่อน `COMMIT`
+- **"`DELETE` คืนพื้นที่ดิสก์"** มันแค่ทำเครื่องหมาย row ว่าตาย มีแต่ `VACUUM` ที่ทำให้พื้นที่ใช้ซ้ำได้ และมีเพียง page ว่างท้ายไฟล์ที่ถูกคืนให้ OS (heap ข้างบนไม่เล็กลง)
+- **"UPDATE เปลี่ยน row ในที่เดิม"** มันเขียนเวอร์ชันใหม่ (heap ใหญ่ขึ้นเท่าตัวหลัง update ทั้ง table หนึ่งครั้ง)
+- **"`UPDATE ... FROM` ที่ไม่มี join เป็น syntax error"** เป็น SQL ที่ถูกต้องและ update ทุก row ด้วยผลจับคู่ตามอำเภอใจ (พิสูจน์ข้างบน)
+- **"จำนวน row พอจะรู้ว่าสำเร็จ"** `UPDATE 4` ดูปกติจนกว่าคุณคาดหวัง 1 ส่วน `RETURNING` แสดงว่า row ไหน
+- **"`TRUNCATE` rollback ไม่ได้"** ใน PostgreSQL ทำได้ ภายใน transaction
 
 export const quizUpdateDelete = [
   {
-    q: 'จะเกิดอะไรขึ้นถ้ารัน UPDATE books SET copies_sold = 0; โดยไม่มี WHERE clause?',
+    q: 'จะเกิดอะไรขึ้นถ้ารัน UPDATE books SET copies_sold = 0; โดยไม่มี WHERE?',
     options: [
-      'อัปเดตแค่ row แรก',
+      'update เฉพาะ row แรก',
       'ทุก row ใน table ถูกตั้งเป็น 0',
-      'PostgreSQL ปฏิเสธไม่ยอมรัน',
-      'ยังไม่มีอะไรเปลี่ยนจนกว่าจะ commit',
+      'PostgreSQL ปฏิเสธที่จะรัน',
+      'ไม่มีอะไรเปลี่ยนจนกว่าจะ commit',
     ],
     answer: 1,
+    explain: 'บทเรียนแสดง `UPDATE 4` และผลรวมเป็น 0 (rollback ทีหลัง: กลับเป็น 2300) ถ้าไม่มี transaction การเปลี่ยนแปลงถูก commit ทันที',
   },
   {
-    q: 'clause ตัวไหนทำให้ UPDATE หรือ DELETE รายงานได้ว่าเปลี่ยน row ไหนไปบ้าง?',
+    q: 'clause ใดทำให้ UPDATE หรือ DELETE รายงานว่า row ไหนเปลี่ยนแน่ ๆ?',
     options: ['SET', 'RETURNING', 'WHERE', 'LIMIT'],
     answer: 1,
+    explain: '`RETURNING` คืน row ที่ได้รับผลกระทบ ใน PostgreSQL 18 `old.col` และ `new.col` คืนค่าก่อนและหลัง',
   },
   {
-    q: 'จะทำให้ DELETE ที่เสี่ยงสามารถย้อนกลับได้ระหว่างที่ยังตรวจผลอยู่ได้อย่างไร?',
+    q: 'จะทำให้ DELETE ที่เสี่ยงย้อนกลับได้ขณะตรวจผลได้อย่างไร?',
     options: [
-      'รันซ้ำสองครั้ง',
-      'ห่อไว้ใน transaction แล้ว ROLLBACK ถ้าผิด',
+      'รันสองครั้ง',
+      'ครอบด้วย transaction แล้ว ROLLBACK ถ้าผิด',
       'เพิ่ม ORDER BY',
       'ใช้ DELETE ALL แทน',
     ],
     answer: 1,
+    explain: 'ไม่มีอะไรถาวรจนกว่า COMMIT `BEGIN; DELETE ...; SELECT ...; ROLLBACK;` ย้อนกลับได้ (ตัวอย่าง sales)',
+  },
+  {
+    q: '`UPDATE books SET copies_sold = s.copies FROM sales s WHERE s.region = \'East\'` ไม่มีเงื่อนไข join ระหว่าง books กับ sales มันทำอะไร?',
+    options: [
+      'ล้มเหลวด้วย syntax error',
+      'update หนังสือทุกเล่มด้วยยอดขายที่จับคู่ได้ตามอำเภอใจ',
+      'update เฉพาะหนังสือที่มียอดขาย East',
+      'ไม่ทำอะไร',
+    ],
+    answer: 1,
+    explain: 'รายการ FROM เป็น cross join ที่กรองด้วย region อย่างเดียว หนังสือทุกเล่มจึงตรง หนังสือทั้งสี่เล่มกลายเป็น 900 copy ในบทเรียน',
+  },
+  {
+    q: 'หลัง UPDATE ทั้ง table 100,000 row ไฟล์ table ใหญ่ขึ้นราวเท่าตัว เพราะอะไร?',
+    options: [
+      'PostgreSQL ทำสำเนา table เพื่อความปลอดภัย',
+      'update เขียน row เวอร์ชันใหม่ และเวอร์ชันเก่าคงอยู่เป็น dead tuple จนกว่า VACUUM',
+      'index ถูกเก็บใน heap',
+      'สถิติไม่ได้ refresh',
+    ],
+    answer: 1,
+    explain: 'MVCC: update คือการ insert เวอร์ชันใหม่บวกทำเครื่องหมายเวอร์ชันเก่าว่าตาย VACUUM ทำให้พื้นที่นั้นใช้ซ้ำได้ update ครั้งที่สองจึงไม่ทำให้ไฟล์โต',
   },
 ];
 
