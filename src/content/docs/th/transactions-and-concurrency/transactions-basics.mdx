@@ -1,6 +1,6 @@
 ---
-title: Transaction basics
-description: ใช้ BEGIN, COMMIT และ ROLLBACK เพื่อทำให้กลุ่มคำสั่งเป็น atomic และใช้ SAVEPOINT กับ ROLLBACK TO สำหรับการ roll back บางส่วน ทั้งหมดผ่านตัวอย่างการโอนเงินระหว่างบัญชี
+title: พื้นฐาน Transaction
+description: ใช้ BEGIN, COMMIT และ ROLLBACK ทำให้กลุ่ม statement เป็น atomic และใช้ SAVEPOINT กับ ROLLBACK TO เพื่อ rollback บางส่วน — พิสูจน์ด้วยการโอนเงินระหว่างบัญชี ข้อความ error จริง และ bug ธุรกรรมรั่ว
 sidebar:
   order: 2
 ---
@@ -10,12 +10,16 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-transaction เปลี่ยนหลายคำสั่งให้กลายเป็นหน่วยเดียวที่แบ่งแยกไม่ได้ คุณเปิดด้วย `BEGIN` รันคำสั่งที่ต้องการจัดกลุ่ม แล้วปิดด้วย `COMMIT` เพื่อเก็บงานไว้ หรือ `ROLLBACK` เพื่อทิ้งงานนั้น สิ่งที่อยู่ภายใน transaction จะไม่ปรากฏให้ connection อื่นเห็นจนกว่าคุณจะ commit
+transaction ทำให้หลาย statement เป็นหน่วยเดียวที่แบ่งแยกไม่ได้ คุณเปิดด้วย `BEGIN` รัน statement ที่ต้องการจัดกลุ่ม แล้วปิดด้วย `COMMIT` เพื่อเก็บงานไว้ หรือ `ROLLBACK` เพื่อทิ้ง ไม่มีอะไรใน transaction ที่ connection อื่นมองเห็นจนกว่าคุณจะ commit ([docs](https://www.postgresql.org/docs/18/tutorial-transactions.html))
 
-เราจะใช้ table `accounts` เล็ก ๆ ในทุกตัวอย่างของบทเรียนนี้
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) ตัวอย่าง session เดียวคือ fence `sql` ที่รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ตัวอย่างสอง session เป็นการรันจริงของสองโปรเซส `psql` ส่วน snippet ของ driver รันอย่างละหนึ่งครั้ง (pg 8.23.0, psycopg 3.3.6, pgx v5.11.0, sqlx 0.9.0)
+
+ทุกตัวอย่างใช้ table `accounts` เล็ก ๆ ตัวเดียว `CHECK` constraint สำคัญ เพราะเป็นวิธีที่เราจะทำให้ statement ล้มเหลวโดยตั้งใจ
 
 ```sql
+-- sql/setup.sql
 CREATE TABLE accounts (
   id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   owner   text NOT NULL,
@@ -27,11 +31,12 @@ INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
 
 ## การโอนเงินแบบคลาสสิก
 
-การย้ายเงิน 100 จาก Ada ไปยัง Linus คือการ update สองครั้งที่ต้องเกิดขึ้นพร้อมกัน ถ้า server crash ระหว่างสองคำสั่งนั้น atomicity รับประกันว่าจะไม่มีการเปลี่ยนแปลงใดอยู่รอด เงินจึงไม่ถูกสร้างขึ้นหรือหายไป
+โอน 100 จาก Ada ไป Linus คือสอง update ที่ต้องเกิดพร้อมกัน ถ้าเซิร์ฟเวอร์ crash ระหว่างสองอัน atomicity รับประกันว่าไม่มีการเปลี่ยนแปลงใดรอด เงินจึงไม่ถูกสร้างหรือหายไป
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/transfer.sql
     BEGIN;
     UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
     UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus';
@@ -68,15 +73,14 @@ INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
     if err != nil {
         return err
     }
+    defer tx.Rollback(ctx) // a no-op after a successful Commit
     if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE owner = $2", 100, "Ada"); err != nil {
-        tx.Rollback(ctx)
         return err
     }
     if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE owner = $2", 100, "Linus"); err != nil {
-        tx.Rollback(ctx)
         return err
     }
-    err = tx.Commit(ctx)
+    return tx.Commit(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -91,46 +95,63 @@ INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
   </TabItem>
 </Tabs>
 
-หลังจาก commit ยอดเงินคงเหลือสะท้อนการ update ทั้งสองครั้งไปด้วยกัน
+หลัง commit ยอดคงเหลือสะท้อนทั้งสอง update ไปพร้อมกัน
+
+```sql
+-- sql/after-transfer.sql
+SELECT * FROM accounts ORDER BY id;
+```
 
 ```text
- id | owner | balance
+ id | owner | balance 
 ----+-------+---------
   1 | Ada   |     400
   2 | Linus |     200
 (2 rows)
 ```
 
-## เลือกที่จะละทิ้งงาน
+## เลือกทิ้งงาน
 
-หากมีอะไรดูผิดปกติก่อนที่คุณจะ commit `ROLLBACK` จะทิ้งทุกการเปลี่ยนแปลงที่ทำไปตั้งแต่ `BEGIN` ราวกับว่า transaction นั้นไม่เคยรันเลย ในที่นี้ Ada มีเงินไม่พอ เราจึงทิ้งทั้งหมด
+ถ้าอะไรดูผิดก่อน commit `ROLLBACK` ทิ้งทุกการเปลี่ยนแปลงตั้งแต่ `BEGIN` เหมือน transaction ไม่เคยรัน สังเกตว่าใน transaction คุณเห็นการเปลี่ยนแปลงที่ยังไม่ commit ของตัวเอง (Ada แสดง 300) หลัง rollback มันหายไป
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/rollback.sql
     BEGIN;
     UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+    SELECT owner, balance FROM accounts ORDER BY id;
     -- on reflection, cancel everything:
     ROLLBACK;
+    SELECT owner, balance FROM accounts ORDER BY id;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
+    const client = await pool.connect();
     await client.query('BEGIN');
     await client.query('UPDATE accounts SET balance = balance - $1 WHERE owner = $2', [100, 'Ada']);
     await client.query('ROLLBACK');
+    client.release();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    conn.rollback()  # discards everything since the transaction began
+    with conn.transaction():
+        cur.execute("UPDATE accounts SET balance = balance - %s WHERE owner = %s", (100, "Ada"))
+        raise psycopg.Rollback()  # leaves the block and rolls it back; no error escapes
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    tx, _ := conn.Begin(ctx)
-    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE owner = $2", 100, "Ada")
-    tx.Rollback(ctx)
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE owner = $2", 100, "Ada"); err != nil {
+        return err
+    }
+    return tx.Rollback(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -143,32 +164,142 @@ INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
   </TabItem>
 </Tabs>
 
-## วงจรชีวิตของ transaction
+```text
+BEGIN
+UPDATE 1
+ owner | balance 
+-------+---------
+ Ada   |     300
+ Linus |     200
+(2 rows)
 
-ทุก transaction เดินตามเส้นทางเดียวกัน คือเริ่มต้น รันคำสั่งข้างใน แล้วจบลงทางใดทางหนึ่งในสองทางนี้เท่านั้น ไม่มีสถานะระหว่างกลางเมื่อคุณตัดสินใจแล้ว
+ROLLBACK
+ owner | balance 
+-------+---------
+ Ada   |     400
+ Linus |     200
+(2 rows)
+```
+
+driver ทั้งสี่ แต่ละ snippet รันหนึ่งครั้งกับฐานข้อมูล scratch ที่รีเซ็ตเป็น Ada 500 / Linus 100 ก่อนทุกครั้ง กลุ่มสุดท้ายคือตัวอย่าง savepoint จากด้านล่าง จึงพิมพ์ไว้ที่นี่ด้วย:
+
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[transfer] Node.js (pg 8.23.0): Ada 400, Linus 200
+[transfer] Python (psycopg 3.3.6): Ada 400, Linus 200
+[transfer] Go (pgx v5.11.0): Ada 400, Linus 200
+[transfer] Rust (sqlx 0.9.0): Ada 400, Linus 200
+[rollback] Node.js (pg 8.23.0): Ada 500, Linus 100
+[rollback] Python (psycopg 3.3.6): Ada 500, Linus 100
+[rollback] Go (pgx v5.11.0): Ada 500, Linus 100
+[rollback] Rust (sqlx 0.9.0): Ada 500, Linus 100
+[savepoint] Node.js (pg 8.23.0): rolling back to the savepoint: 23514 | Ada 400, Linus 200
+[savepoint] Python (psycopg 3.3.6): rolling back to the savepoint: 23514 | Ada 400, Linus 200
+[savepoint] Go (pgx v5.11.0): rolling back to the savepoint: 23514 | Ada 400, Linus 200
+[savepoint] Rust (sqlx 0.9.0): rolling back to the savepoint: 23514 | Ada 400, Linus 200
+```
+
+## ชีวิตของ transaction
+
+ทุก transaction เดินทางเส้นเดียวกัน: เริ่ม รัน statement และจบในสองทางใดทางหนึ่งเท่านั้น เมื่อคุณตัดสินใจแล้วไม่มีสถานะกึ่งกลาง
 
 export const txnFlow = `flowchart TD
   A[BEGIN] --> B[Run statements]
-  B --> C{Everything correct?}
+  B --> C{"Everything correct?"}
   C -->|Yes| D[COMMIT: changes become permanent]
   C -->|No| E[ROLLBACK: changes discarded]
   D --> F[Transaction ends]
   E --> F`;
 
-<Mermaid code={txnFlow} title="transaction เริ่ม รัน แล้วเลือกที่จะ commit หรือ roll back" />
+<Mermaid code={txnFlow} title="transaction เริ่ม รัน แล้ว commit หรือ rollback" />
 
-## การ roll back บางส่วนด้วย SAVEPOINT
+## ไม่มี BEGIN ก็ไม่มีอะไร atomic
 
-บางครั้งคุณต้องการยกเลิกเพียงบางส่วนของ transaction โดยไม่ละทิ้งส่วนที่เหลือ `SAVEPOINT` คือเครื่องหมายที่มีชื่อภายใน transaction `ROLLBACK TO` จะย้อนกลับไปยังเครื่องหมายนั้น โดยเก็บทุกอย่างก่อนหน้าเครื่องหมายไว้ และทิ้งทุกอย่างหลังจากนั้น
+โดยปกติ connection อยู่ในโหมด **auto-commit**: แต่ละ statement เดี่ยวคือ transaction ของตัวเอง และถูก commit ทันทีที่เสร็จ ที่นี่เราย้าย 500 จาก Linus (ที่มีแค่ 200) ไป Ada ด้วยสอง statement แยกกัน การเพิ่มเงินสำเร็จและถูก commit ทันที แล้วการหักเงินล้มเหลวที่ `CHECK`:
+
+```sql
+-- @expect-error 23514
+-- move 500 from Linus (who has 200) to Ada, WITHOUT BEGIN: each statement is its own transaction
+UPDATE accounts SET balance = balance + 500 WHERE owner = 'Ada';
+UPDATE accounts SET balance = balance - 500 WHERE owner = 'Linus';
+```
+
+```text
+UPDATE 1
+ERROR:  new row for relation "accounts" violates check constraint "accounts_balance_check"
+DETAIL:  Failing row contains (2, Linus, -300).
+```
+
+```sql
+-- sql/half-done.sql
+SELECT owner, balance, sum(balance) OVER () AS total FROM accounts ORDER BY id;
+```
+
+```text
+ owner | balance | total 
+-------+---------+-------
+ Ada   |     900 |  1100
+ Linus |     200 |  1100
+(2 rows)
+```
+
+Ada ได้ 500 ที่ไม่มีใครเสีย: ยอดรวมจาก 600 กลายเป็น 1100 นี่คือสถานะทำครึ่งเดียวที่ transaction มีไว้ป้องกัน ดึง 500 กลับด้วยมือ:
+
+```sql
+-- sql/repair.sql
+UPDATE accounts SET balance = balance - 500 WHERE owner = 'Ada';
+```
+
+ทีนี้สอง statement เดิมภายใน `BEGIN` ... `COMMIT` การหักเงินล้มเหลว และ PostgreSQL ใส่ transaction เข้าสถานะ **aborted**: ทุกคำสั่งหลังจากนั้นถูกปฏิเสธด้วย SQLSTATE `25P02` จนกว่าคุณจะจบ transaction แม้แต่ `COMMIT` ก็ช่วยไม่ได้ และมันตอบด้วย command tag `ROLLBACK` ไม่ใช่ `COMMIT`:
+
+```sql
+-- @expect-error 23514
+BEGIN;
+UPDATE accounts SET balance = balance + 500 WHERE owner = 'Ada';
+UPDATE accounts SET balance = balance - 500 WHERE owner = 'Linus';
+SELECT 1;
+COMMIT;
+```
+
+```text
+BEGIN
+UPDATE 1
+ERROR:  new row for relation "accounts" violates check constraint "accounts_balance_check"
+DETAIL:  Failing row contains (2, Linus, -300).
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ROLLBACK
+```
+
+```sql
+-- sql/atomic-check.sql
+SELECT owner, balance, sum(balance) OVER () AS total FROM accounts ORDER BY id;
+```
+
+```text
+ owner | balance | total 
+-------+---------+-------
+ Ada   |     400 |   600
+ Linus |     200 |   600
+(2 rows)
+```
+
+ไม่มีอะไรเปลี่ยน: Ada 400, Linus 200 ยอดรวม 600 การเพิ่มเงินที่รันก่อนความล้มเหลวถูกทิ้งไปพร้อมกับทุกอย่าง
+
+## Rollback บางส่วนด้วย SAVEPOINT
+
+บางครั้งคุณอยากยกเลิกแค่บางส่วนของ transaction โดยไม่ทิ้งส่วนที่เหลือ `SAVEPOINT` คือจุดหมายที่มีชื่อภายใน transaction `ROLLBACK TO` ย้อนกลับไปที่จุดนั้น เก็บทุกอย่างก่อนหน้าและทิ้งทุกอย่างหลังจากนั้น มันยังเป็นวิธีเดียวที่จะกู้จาก error แล้วไปต่อได้: `ROLLBACK TO` พา transaction ออกจากสถานะ aborted ([docs](https://www.postgresql.org/docs/18/sql-savepoint.html))
+
+statement ที่ล้มเหลวต้องล้มเหลวจริง อันนี้ทำให้ยอดของ Ada ติดลบและชน `CHECK` (`UPDATE` ที่ไม่ตรงกับ row ใดเลย เช่น `WHERE owner = 'Nobody'` ไม่ raise error เลย มันแค่รายงาน `UPDATE 0` จึงไม่มีอะไรให้ rollback ไป)
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- @expect-error 23514
     BEGIN;
     UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
     SAVEPOINT after_debit;
-    UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody';
-    -- that owner does not exist; undo just the second update:
+    UPDATE accounts SET balance = balance - 1000 WHERE owner = 'Ada';  -- violates the CHECK
+    -- the transaction is now aborted; undo just the failed part:
     ROLLBACK TO after_debit;
     UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus';
     COMMIT;
@@ -176,13 +307,25 @@ export const txnFlow = `flowchart TD
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await client.query('BEGIN');
-    await client.query("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'");
-    await client.query('SAVEPOINT after_debit');
-    await client.query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'");
-    await client.query('ROLLBACK TO after_debit');
-    await client.query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'");
-    await client.query('COMMIT');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'");
+      await client.query('SAVEPOINT after_debit');
+      try {
+        await client.query("UPDATE accounts SET balance = balance - 1000 WHERE owner = 'Ada'");
+      } catch (e) {
+        console.log('rolling back to the savepoint:', e.code);
+        await client.query('ROLLBACK TO after_debit');
+      }
+      await client.query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'");
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
     ```
   </TabItem>
   <TabItem label="Python">
@@ -190,23 +333,31 @@ export const txnFlow = `flowchart TD
     with conn.transaction():
         cur.execute("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
         try:
-            with conn.transaction():  # a nested block acts as a savepoint
-                cur.execute("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
-                raise ValueError("undo just this part")
-        except ValueError:
-            pass
+            with conn.transaction():  # a nested block is a SAVEPOINT
+                cur.execute("UPDATE accounts SET balance = balance - 1000 WHERE owner = 'Ada'")
+        except psycopg.errors.CheckViolation:
+            print("rolling back to the savepoint: 23514")
         cur.execute("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    tx, _ := conn.Begin(ctx)
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback(ctx)
     tx.Exec(ctx, "UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
     tx.Exec(ctx, "SAVEPOINT after_debit")
-    tx.Exec(ctx, "UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
-    tx.Exec(ctx, "ROLLBACK TO after_debit")
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance - 1000 WHERE owner = 'Ada'"); err != nil {
+        var pgErr *pgconn.PgError
+        if errors.As(err, &pgErr) {
+            fmt.Println("rolling back to the savepoint:", pgErr.Code)
+        }
+        tx.Exec(ctx, "ROLLBACK TO after_debit")
+    }
     tx.Exec(ctx, "UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
-    tx.Commit(ctx)
+    return tx.Commit(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -215,9 +366,12 @@ export const txnFlow = `flowchart TD
     sqlx::query("UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada'")
         .execute(&mut *tx).await?;
     sqlx::query("SAVEPOINT after_debit").execute(&mut *tx).await?;
-    sqlx::query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Nobody'")
-        .execute(&mut *tx).await?;
-    sqlx::query("ROLLBACK TO after_debit").execute(&mut *tx).await?;
+    if let Err(e) = sqlx::query("UPDATE accounts SET balance = balance - 1000 WHERE owner = 'Ada'")
+        .execute(&mut *tx).await
+    {
+        println!("rolling back to the savepoint: {}", e.as_database_error().unwrap().code().unwrap());
+        sqlx::query("ROLLBACK TO after_debit").execute(&mut *tx).await?;
+    }
     sqlx::query("UPDATE accounts SET balance = balance + 100 WHERE owner = 'Linus'")
         .execute(&mut *tx).await?;
     tx.commit().await?;
@@ -225,76 +379,315 @@ export const txnFlow = `flowchart TD
   </TabItem>
 </Tabs>
 
-การหักเงินและการเพิ่มเงินครั้งสุดท้ายถูกเก็บไว้ มีเพียงงานระหว่าง savepoint กับ `ROLLBACK TO` เท่านั้นที่ถูกทิ้งไป
+```text
+BEGIN
+UPDATE 1
+SAVEPOINT
+ERROR:  new row for relation "accounts" violates check constraint "accounts_balance_check"
+DETAIL:  Failing row contains (1, Ada, -700).
+ROLLBACK
+UPDATE 1
+COMMIT
+```
+
+การหักเงินและการเพิ่มเงินสุดท้ายถูกเก็บไว้ เฉพาะ statement ที่ล้มเหลวระหว่าง savepoint กับ `ROLLBACK TO` ที่ถูกทิ้ง เริ่มจาก Ada 400 / Linus 200 ผลคือ Ada 300 / Linus 300 และยอดรวมยัง 600:
+
+```sql
+-- sql/savepoint-check.sql
+SELECT owner, balance, sum(balance) OVER () AS total FROM accounts ORDER BY id;
+```
 
 ```text
- owner | balance
--------+---------
- Ada   |     400
- Linus |     200
+ owner | balance | total 
+-------+---------+-------
+ Ada   |     300 |   600
+ Linus |     300 |   600
 (2 rows)
 ```
 
+## สิ่งที่ rollback ไม่ย้อน
+
+rollback ทิ้งการเปลี่ยนแปลง row และใน PostgreSQL ทิ้งการเปลี่ยน schema ด้วย: DDL เป็น transactional แต่ไม่คืนค่า sequence ดังนั้น identity id มีช่องว่างหลัง rollback (เหตุผลเดียวกับบทเรียน upsert):
+
+```sql
+-- sql/side-effects.sql
+CREATE TABLE ledger (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, note text);
+
+BEGIN;
+INSERT INTO ledger (note) VALUES ('rolled back') RETURNING id;
+ROLLBACK;
+
+INSERT INTO ledger (note) VALUES ('kept') RETURNING id;
+
+BEGIN;
+CREATE TABLE scratch (x int);
+INSERT INTO scratch VALUES (1);
+ROLLBACK;
+SELECT to_regclass('scratch') AS scratch_exists;
+```
+
+```text
+CREATE TABLE
+BEGIN
+ id 
+----
+  1
+(1 row)
+
+INSERT 0 1
+ROLLBACK
+ id 
+----
+  2
+(1 row)
+
+INSERT 0 1
+BEGIN
+CREATE TABLE
+INSERT 0 1
+ROLLBACK
+ scratch_exists 
+----------------
+ 
+(1 row)
+```
+
+insert ที่ถูก rollback ใช้ id 1 ไปแล้ว row ถัดไปจึงได้ 2 และ `CREATE TABLE` ใน transaction ที่ถูก rollback ไม่ทิ้ง table ไว้ (`to_regclass` คืน NULL)
+
+ทุก transaction ที่เขียนข้อมูลได้ transaction id `pg_current_xact_id()` คืนค่านั้น ซึ่งเท่าเดิมตลอดหนึ่ง transaction แต่ใหม่ทุกครั้งสำหรับแต่ละ statement ที่ auto-commit (ตัวเลขของคุณจะต่างไป รูปแบบจะไม่ต่าง):
+
+```sql
+-- sql/xid.sql
+BEGIN;
+SELECT pg_current_xact_id() = pg_current_xact_id() AS same_xid_in_tx;
+COMMIT;
+SELECT pg_current_xact_id() AS first_autocommit;
+SELECT pg_current_xact_id() AS second_autocommit;
+```
+
+```text
+BEGIN
+ same_xid_in_tx 
+----------------
+ t
+(1 row)
+
+COMMIT
+ first_autocommit 
+------------------
+           324811
+(1 row)
+
+ second_autocommit 
+-------------------
+            324812
+(1 row)
+```
+
+## transaction ที่ลืมไว้ไม่ฟรี
+
+transaction ที่เปิดอยู่ถือ lock และ snapshot ของมัน session ที่รัน `BEGIN` แล้วเงียบไปจะปรากฏใน `pg_stat_activity` เป็น `idle in transaction` และใครที่ต้องใช้ row ที่มันแตะต้องรอ session A update Ada แล้วไม่ทำอะไรเลย 3 วินาที session B ที่วินาทีแรกดู `pg_stat_activity` และพยายาม update row เดียวกัน:
+
+```text
+-- session A: script
+BEGIN;
+UPDATE accounts SET balance = balance WHERE owner = 'Ada';
+\! sleep 3
+ROLLBACK;
+-- session A: psql output
+BEGIN
+UPDATE 1
+ROLLBACK
+
+-- session B: script
+\! sleep 1
+SELECT state, wait_event_type, query
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend';
+\timing on
+UPDATE accounts SET balance = balance WHERE owner = 'Ada';
+-- session B: psql output
+        state        | wait_event_type |                           query                            
+---------------------+-----------------+------------------------------------------------------------
+ idle in transaction | Client          | UPDATE accounts SET balance = balance WHERE owner = 'Ada';
+(1 row)
+
+Timing is on.
+UPDATE 1
+Time: 1997.304 ms (00:01.997)
+```
+
+B รอประมาณสองวินาที — จนกว่า A จบ — เพื่อการเปลี่ยนแปลงที่ A ไม่ได้ต้องการด้วยซ้ำ เซิร์ฟเวอร์จบ session แบบนี้ให้ได้ด้วย `idle_in_transaction_session_timeout` connection ถูกปิดด้วย `FATAL` และ client ต้องเชื่อมต่อใหม่:
+
+```text
+-- session A: script
+SET idle_in_transaction_session_timeout = '1s';
+BEGIN;
+SELECT 1 AS still_alive;
+\! sleep 2
+SELECT 2 AS after_the_nap;
+-- session A: psql output
+SET
+BEGIN
+ still_alive 
+-------------
+           1
+(1 row)
+
+FATAL:  terminating connection due to idle-in-transaction timeout
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+connection to server was lost
+```
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอให้เขียนการโอนแบบ atomic ด้วย `node-postgres` และเขียนเส้นทางปกติ พร้อมคอมเมนต์ที่บอกตรงกับที่เราต้องการเป๊ะ:
+
+<SpotTheBug lang="js" code={`// AI comment: "transfer money atomically inside a transaction"
+async function transfer(pool, from, to, amount) {
+  const client = await pool.connect();
+  await client.query('BEGIN');
+  await client.query('UPDATE accounts SET balance = balance - $1 WHERE owner = $2', [amount, from]);
+  await client.query('UPDATE accounts SET balance = balance + $1 WHERE owner = $2', [amount, to]);
+  await client.query('COMMIT');
+  client.release();
+}`}>
+
+มัน atomic เฉพาะตอนที่ไม่มีอะไรผิดพลาด เมื่อ `UPDATE` ที่สอง (หรือแรก ถ้า Ada เงินไม่พอ) throw การควบคุมออกจากฟังก์ชันก่อน `COMMIT` และก่อน `client.release()` ไม่มี `ROLLBACK` ดังนั้น connection ค้างอยู่ใน transaction ที่ aborted และไม่ถูกคืนเข้า pool รันสามครั้งด้วยจำนวนที่ Ada จ่ายไม่ไหว (pg 8.23.0, pool 5 ตัว, `amount = 1000`):
+
+```text
+$ node transfer.js buggy      # 3 calls of transfer(pool, "Ada", "Linus", 1000), pool of 5
+call failed: 23514 new row for relation "accounts" violates check constraint "accounts_balance_check"
+call failed: 23514 new row for relation "accounts" violates check constraint "accounts_balance_check"
+call failed: 23514 new row for relation "accounts" violates check constraint "accounts_balance_check"
+after 3 failed calls: [{"state":"idle in transaction (aborted)","n":3}]
+pool: total 3 idle 0 waiting 0
+
+$ node transfer.js fixed
+call failed: 23514 new row for relation "accounts" violates check constraint "accounts_balance_check"
+call failed: 23514 new row for relation "accounts" violates check constraint "accounts_balance_check"
+call failed: 23514 new row for relation "accounts" violates check constraint "accounts_balance_check"
+after 3 failed calls: []
+pool: total 1 idle 1 waiting 0
+```
+
+สาม backend ค้างเป็น `idle in transaction (aborted)` และ pool เสียไปสามจากห้า client หลังความล้มเหลวแบบนี้ห้าครั้ง ทุก request จะรอ connection ตลอดไป คุณจะหาเจอด้วย query แบบนี้:
+
+```sql
+SELECT state, count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle' GROUP BY state;
+```
+
+วิธีแก้คือรูปแบบ try / catch / finally จากแท็บ transfer: `ROLLBACK` บนเส้นทาง error และ `release()` ใน `finally` เพื่อให้ connection ถูกคืนเสมอ การเรียกที่ล้มเหลวสามครั้งเดิมไม่ทิ้งอะไรเปิดอยู่ (การรันที่สองข้างบน):
+
+```js
+async function transfer(pool, from, to, amount) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('UPDATE accounts SET balance = balance - $1 WHERE owner = $2', [amount, from]);
+    await client.query('UPDATE accounts SET balance = balance + $1 WHERE owner = $2', [amount, to]);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+transaction คือกระดาษทดส่วนตัว ทุกสิ่งที่คุณทำลงบนกระดาษของคุณก่อน คนอื่นมองไม่เห็น `COMMIT` เผยแพร่ทั้งแผ่นในพริบตาเดียว `ROLLBACK` ฉีกทิ้ง นอก `BEGIN` PostgreSQL ห่อแต่ละ statement ด้วยกระดาษแผ่นเล็กของมันเอง error ในกระดาษไม่ได้ทำให้ statement เดียวล้ม — มันทำให้กระดาษเสีย และมีแต่ `ROLLBACK` (หรือ `ROLLBACK TO` savepoint) เท่านั้นที่ให้เขียนต่อได้
+
 ## เคล็ดลับและข้อควรระวัง
 
-- ทำให้ transaction สั้น transaction ที่เปิดค้างไว้จะถือทรัพยากรไว้ และอย่างที่บทเรียน MVCC แสดงไว้ ยังอาจหน่วงการเก็บกวาด row เวอร์ชันเก่าด้วย
-- โดยค่าเริ่มต้น connection อยู่ในโหมด auto-commit คือแต่ละคำสั่งเดี่ยว ๆ เป็น transaction ที่ commit ของตัวเอง คุณออกจากโหมดนั้นได้ด้วยการสั่ง `BEGIN` เท่านั้น
-- error ภายใน transaction จะผลัก transaction เข้าสู่สถานะ aborted แล้ว PostgreSQL จะปฏิเสธคำสั่งต่อไปจนกว่าคุณจะ `ROLLBACK` (หรือ `ROLLBACK TO` ไปยัง savepoint)
-- ในโค้ดแอปพลิเคชัน ให้จับคู่ `BEGIN` กับ `ROLLBACK` บนเส้นทาง error เสมอ ตัวอย่าง driver ด้านบนแสดงรูปแบบ try-or-finally ที่รับประกันว่า connection จะไม่ปล่อย transaction ที่เปิดค้างหลุดออกไป
+- ทำ transaction ให้สั้น transaction ที่เปิดค้างถือ lock (B รอสองวินาทีข้างบน) และตามที่บทเรียน MVCC แสดง มันยับยั้งการเก็บกวาด row version เก่า
+- error ใน transaction พาไปสถานะ aborted (`25P02` สำหรับทุกคำสั่งหลังจากนั้น) `COMMIT` บน transaction ที่ aborted กลายเป็น rollback เงียบ ๆ
+- `UPDATE` ที่ไม่ตรงกับอะไรเลยไม่ใช่ error ตรวจจำนวน row (`UPDATE 0`) ถ้าต้องรู้
+- ในโค้ดแอป จับคู่ `BEGIN` กับ `ROLLBACK` บนเส้นทาง error เสมอ และปล่อย connection ใน `finally` ตัวอย่าง driver ข้างบนแสดงรูปแบบ bug ข้างบนแสดงสิ่งที่เกิดขึ้นถ้าไม่มี
+- ตั้ง `idle_in_transaction_session_timeout` บน production เป็นตาข่ายรองรับโค้ดที่ลืม
+- sequence และ `nextval` ไม่ถูก rollback อย่าพึ่งพา id ที่ไม่มีช่องว่าง
 
-<Callout title="commit คือจุดที่ย้อนกลับไม่ได้">
-ก่อน `COMMIT` การเปลี่ยนแปลงของคุณอยู่เฉพาะใน transaction ของคุณ และสามารถหายไปด้วย `ROLLBACK` เพียงครั้งเดียว หลัง `COMMIT` durability เข้ามาทำหน้าที่และการเปลี่ยนแปลงถูกเขียนลงเพื่อให้อยู่รอดผ่านการ crash จงถือว่าการ commit คือช่วงเวลาที่คุณมั่นใจแล้ว
+<Callout title="Commit คือจุดที่ย้อนกลับไม่ได้">
+ก่อน `COMMIT` การเปลี่ยนแปลงของคุณอยู่แค่ใน transaction ของคุณและหายไปได้ด้วย `ROLLBACK` เดียว หลัง `COMMIT` durability เข้ามารับช่วง และการเปลี่ยนแปลงถูกเขียนให้รอดจาก crash ให้ถือ commit เป็นช่วงเวลาที่คุณมั่นใจแล้ว
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| ห่อคำสั่งที่เกี่ยวข้องกันด้วย `BEGIN...COMMIT` | atomicity รับประกันว่างานทั้งหมดสำเร็จหรือไม่มีอะไรเกิดขึ้นเลย | ต้องเขียนโค้ดจัดการ error path (`ROLLBACK`) เอง และ transaction ที่เปิดค้างจะถือ lock ไว้นานขึ้น |
-| ปล่อยให้แต่ละคำสั่งรันแบบ auto-commit | เขียนโค้ดง่ายกว่า ไม่ต้องจัดการ transaction เอง | ถ้า crash หรือ error เกิดขึ้นกลางทาง ข้อมูลอาจไม่สอดคล้องกัน เพราะแต่ละคำสั่ง commit แยกกัน |
+| ห่อ statement ที่เกี่ยวข้องด้วย `BEGIN...COMMIT` | Atomicity — ทั้งหมดสำเร็จหรือไม่มีอะไรเกิดขึ้น (ยอดรวม 600 ข้างบน) | ต้องจัดการเส้นทาง error (`ROLLBACK`) เอง และ transaction ที่เปิดค้างถือ lock นานขึ้น |
+| ปล่อยให้แต่ละ statement auto-commit | โค้ดง่ายกว่า ไม่ต้องจัดการ transaction | error กลางทางทิ้งงานครึ่งหนึ่งที่ commit ไปแล้ว (ยอดรวม 1100 ข้างบน) |
+| `SAVEPOINT` รอบ statement เสี่ยง | กู้จากความล้มเหลวหนึ่งครั้งโดยไม่เสียส่วนที่เหลือ | แต่ละ savepoint เริ่ม subtransaction ใช้ในที่ที่คาดว่าจะเกิด error ไม่ใช่รอบทุก statement |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ลืม `COMMIT` หรือ `ROLLBACK` แล้วปล่อย transaction ค้างไว้** — transaction ที่เปิดค้างยังถือ lock และหน่วงการเก็บกวาดของ VACUUM อยู่ ให้จับคู่ `BEGIN` กับ path จบเสมอ ไม่ว่าจะสำเร็จหรือ error
-- **คิดว่าคำสั่งหลายคำสั่งเป็น atomic โดยอัตโนมัติ** — ถ้าไม่ได้ห่อด้วย `BEGIN` แต่ละคำสั่งจะ commit แยกกันทันที การ crash ระหว่างคำสั่งจะทิ้งข้อมูลไว้ครึ่ง ๆ กลาง ๆ
-- **ไม่จัดการ error ระหว่าง transaction** — เมื่อคำสั่งหนึ่ง fail transaction จะเข้าสู่สถานะ aborted ทันที คำสั่งถัดไปทั้งหมดจะถูกปฏิเสธเงียบ ๆ จนกว่าคุณจะ `ROLLBACK`
-
-> 💡 ตัวอย่างจากของจริง
->
-> **ระบบธนาคารและ payment gateway** — การโอนเงินหักบัญชีหนึ่งแล้วเพิ่มอีกบัญชีหนึ่งต้องห่อด้วย transaction เดียวเสมอ เพื่อไม่ให้ crash ระหว่างสองคำสั่งทำให้เงินหายหรือถูกสร้างขึ้นมาลอย ๆ นี่คือเหตุผลคลาสสิกที่ ACID transaction ถูกออกแบบมา
->
-> **ระบบ payment และ e-commerce** — เมื่อสร้างคำสั่งซื้อ ระบบต้องหักสต็อกสินค้าและบันทึก order พร้อมกันในหนึ่ง transaction ถ้าขั้นตอนใดล้มเหลว ทั้งสอง operation ต้อง roll back กลับไปพร้อมกัน ไม่ปล่อยให้สต็อกถูกหักแต่ order ไม่ถูกสร้าง
+- **"หลาย statement atomic โดยอัตโนมัติ"** ถ้าไม่มี `BEGIN` แต่ละ statement commit เอง ความล้มเหลวระหว่างกลางทิ้งข้อมูลทำครึ่งเดียว (Ada +500 โดยไม่มีการหักเงินคู่กัน)
+- **"COMMIT commit เสมอ"** บน transaction ที่ aborted มัน rollback และบอกด้วย tag `ROLLBACK`
+- **"error ล้มแค่ statement นั้น"** ใน transaction มันล้มส่วนที่เหลือด้วย จนกว่าจะ `ROLLBACK` หรือ `ROLLBACK TO`
+- **"ROLLBACK ย้อนทุกอย่าง"** มันไม่คืนค่า sequence (id 1 ถูกเผาไปแล้ว) และไม่ใช่ตัวแทนของการปิด connection ให้ถูกต้อง
+- **"ลืมปิด transaction ไม่เป็นอันตราย"** มันบล็อกผู้เขียนคนอื่นและยับยั้ง vacuum เป็นหนึ่งในเหตุการณ์ production ที่พบบ่อยที่สุด
 
 export const quizBasics = [
   {
-    q: 'ROLLBACK ทำอะไรกับ statement ที่รันไปตั้งแต่ BEGIN?',
+    q: 'ROLLBACK ทำอะไรกับ statement ที่รันตั้งแต่ BEGIN?',
     options: [
-      'commit คำสั่งเหล่านั้นให้เร็วขึ้น',
-      'ทิ้งทั้งหมดราวกับไม่เคยรันเลย',
-      'ใช้เฉพาะคำสั่งแรกเท่านั้น',
-      'บันทึกไว้ใน table แยกต่างหาก',
+      'commit ให้เร็วขึ้น',
+      'ทิ้งมันเหมือนไม่เคยรัน',
+      'ใช้เฉพาะอันแรก',
+      'บันทึกไว้ใน table แยก',
     ],
     answer: 1,
+    explain: 'การเปลี่ยนแปลงทั้งหมดตั้งแต่ `BEGIN` ถูกทิ้ง ในบทเรียน Ada แสดง 300 ใน transaction และกลับเป็น 400 หลัง `ROLLBACK`',
   },
   {
     q: 'SAVEPOINT มีไว้เพื่ออะไร?',
     options: [
       'commit บางส่วนของ transaction อย่างถาวร',
-      'ให้คุณ roll back กลับไปยังเครื่องหมายได้โดยไม่ทิ้งทั้ง transaction',
+      'ให้ rollback ไปที่จุดหมายได้โดยไม่ทิ้งทั้ง transaction',
       'ทำให้ COMMIT ครั้งถัดไปเร็วขึ้น',
-      'สร้างไฟล์สำรองบนดิสก์',
+      'สร้างไฟล์ backup บนดิสก์',
     ],
     answer: 1,
+    explain: '`ROLLBACK TO` ย้อนไปที่จุดหมาย เก็บงานก่อนหน้า และพา transaction ที่ aborted กลับสู่สถานะที่ใช้ได้',
   },
   {
-    q: 'statement เดี่ยว ๆ ที่รันแบบไม่อยู่ใน transaction จะถูก commit อัตโนมัติเมื่อไหร่?',
+    q: 'statement เดี่ยวถูก commit เองโดยอัตโนมัติเมื่อไร?',
     options: [
-      'ไม่มีทาง คุณต้องพิมพ์ COMMIT เสมอ',
-      'เมื่อ connection อยู่ในโหมด auto-commit นอก BEGIN ใด ๆ',
-      'เฉพาะบน table ที่มี primary key เท่านั้น',
-      'เฉพาะเมื่อใช้ RETURNING เท่านั้น',
+      'ไม่เคย ต้องพิมพ์ COMMIT เสมอ',
+      'เมื่อ connection อยู่ในโหมด auto-commit นอก BEGIN',
+      'เฉพาะ table ที่มี primary key',
+      'เฉพาะเมื่อใช้ RETURNING',
     ],
     answer: 1,
+    explain: 'นอก `BEGIN` ทุก statement คือ transaction ของตัวเอง นั่นคือเหตุผลที่ Ada เก็บ 500 ที่เพิ่มมาไว้เมื่อการหักเงินล้มเหลว',
+  },
+  {
+    q: 'ใน transaction มี statement ล้มเหลวด้วย CHECK violation แล้วคุณส่ง COMMIT จะเกิดอะไรขึ้น?',
+    options: [
+      'statement ก่อนหน้าถูก commit และข้ามเฉพาะอันที่ล้ม',
+      'PostgreSQL rollback ทั้ง transaction และตอบด้วย command tag ROLLBACK',
+      'PostgreSQL ลอง statement ที่ล้มใหม่',
+      'COMMIT รอจนกว่าคุณจะแก้ statement',
+    ],
+    answer: 1,
+    explain: 'transaction ถูก abort (`25P02` สำหรับทุกคำสั่งหลังจากนั้น) `COMMIT` บน transaction ที่ aborted ทำ rollback ตามที่ผลลัพธ์ในบทเรียนแสดง',
+  },
+  {
+    q: 'ฟังก์ชัน Node.js รัน BEGIN, สอง UPDATE, COMMIT และ client.release() โดยไม่มี try/catch แล้ว UPDATE ตัวหนึ่ง throw อะไรถูกทิ้งไว้?',
+    options: [
+      'ไม่มีอะไร driver rollback ให้อัตโนมัติ',
+      'connection ที่ค้างเป็น idle in transaction (aborted) และไม่กลับเข้า pool',
+      'การโอนครึ่งเดียวที่ commit แล้ว',
+      'deadlock',
+    ],
+    answer: 1,
+    explain: 'การควบคุมออกก่อน `ROLLBACK` และ `release()` การรันในบทเรียนแสดงสาม backend ในสถานะ `idle in transaction (aborted)` หลังล้มเหลวสามครั้ง',
   },
 ];
 
