@@ -1,6 +1,6 @@
 ---
 title: การสร้าง table
-description: ใช้ CREATE TABLE เพื่อประกาศ column และชนิด สร้าง primary key ด้วย IDENTITY หรือ SERIAL ป้องกันข้อผิดพลาดด้วย IF NOT EXISTS และลบ table ด้วย DROP TABLE
+description: พื้นฐาน CREATE TABLE — ชื่อ column และ type, การตรวจสอบด้วย backslash-d, primary key อัตโนมัติด้วย IDENTITY, การรัน DDL จาก driver และ IF NOT EXISTS / DROP TABLE
 sidebar:
   order: 2
 ---
@@ -9,63 +9,237 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-ทุก table เริ่มต้นชีวิตด้วยคำสั่ง `CREATE TABLE` คุณตั้งชื่อ table จากนั้นไล่รายชื่อ column ไว้ในวงเล็บ โดยแต่ละตัวมีชื่อและ data type ตัว server จะเก็บคำนิยามนั้นไว้ และนับจากนั้นก็จะบังคับใช้กับทุก row ที่คุณ insert การสร้าง table คือ **DDL** — data definition language — และมักจะเขียนและรันเป็น SQL ธรรมดา ไม่ว่าคุณจะพิมพ์ลงใน `psql` หรือป้อนให้กับเครื่องมือ migration
+ทุก table เริ่มต้นชีวิตด้วย statement `CREATE TABLE` คุณตั้งชื่อ table แล้วเรียง column ในวงเล็บ โดยแต่ละ column มีชื่อและ data type เซิร์ฟเวอร์เก็บนิยามนั้นไว้และบังคับใช้กับทุก row ที่คุณ insert นับจากนั้น การสร้าง table คือ **DDL** — data definition language — และแทบทุกครั้งเขียนและรันเป็น SQL ธรรมดา ไม่ว่าจะพิมพ์ใน `psql` หรือป้อนให้เครื่องมือ migration
 
-เราจะสร้าง table `products` สำหรับร้านค้าเล็ก ๆ แล้วค่อย ๆ ทำให้ table นี้เติบโตขึ้นตามบทเรียน
+เราจะสร้าง table `products` สำหรับร้านค้าเล็ก ๆ และขยายมันไปตามบทเรียน ทุก output ด้านล่างเป็นของจริงจาก **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) แต่ละ fence รันในฐานข้อมูลเปล่า จากบนลงล่าง
 
-## รูปทรงพื้นฐาน
+## รูปร่างพื้นฐาน
 
-อย่างน้อยที่สุดคือชื่อ table และ column หนึ่งตัวขึ้นไป แต่ละ column คือชื่อตามด้วยชนิด โดย column ต่าง ๆ คั่นด้วยจุลภาค
+ขั้นต่ำคือชื่อ table และ column หนึ่งตัวขึ้นไป แต่ละ column คือชื่อตามด้วย type คั่นด้วยเครื่องหมายจุลภาค ใน `psql` คำสั่ง `\d` จะอธิบายผลลัพธ์: column, type, nullability และ default
 
 ```sql
+-- sql/loose-table.sql
 CREATE TABLE products (
   id     integer,
   name   text,
   price  numeric(10, 2)
 );
-```
-
-นั่นสร้าง table ที่มีสาม column: `id` ที่เป็นจำนวนเต็ม, `name` ที่เป็น text และ `price` ที่เก็บเป็นทศนิยมแบบแม่นยำได้ถึงสิบหลักและสองหลักหลังจุด แบบนี้ใช้ได้ แต่หลวมเกินไป — ไม่มีอะไรห้ามสินค้าสองชิ้นใช้ `id` ร่วมกัน และทุก column ปล่อยว่างไว้ได้หมด เราจะแก้ปัญหานั้นด้วย primary key และ constraints ในลำดับถัดไป
-
-**ใน pgAdmin:** หลังจากรันคำสั่งใน Query Tool ให้ refresh โหนด Tables ในแผนผัง browser แล้ว table `products` ใหม่จะปรากฏขึ้น พอกางออกจะเห็นโหนด Columns ที่ไล่รายชื่อแต่ละ column พร้อมชนิดข้อมูล
-
-## ตรวจสอบ table ด้วย backslash-d
-
-ใน `psql` คำสั่ง `\d` จะอธิบาย table ให้ครบ ทั้ง column, ชนิดข้อมูล, ความเป็น null ได้ และ default ต่าง ๆ นี่คือวิธีที่เร็วที่สุดในการยืนยันว่า table มีหน้าตาอย่างที่คุณตั้งใจไว้
-
-```sql
 \d products
 ```
 
 ```text
-                        Table "public.products"
- Column |     Type      | Collation | Nullable | Default
+CREATE TABLE
+                 Table "public.products"
+ Column |     Type      | Collation | Nullable | Default 
 --------+---------------+-----------+----------+---------
- id     | integer       |           |          |
- name   | text          |           |          |
- price  | numeric(10,2) |           |          |
+ id     | integer       |           |          | 
+ name   | text          |           |          | 
+ price  | numeric(10,2) |           |          | 
 ```
 
-ตอนนี้ทุก column สามารถเป็น null ได้และยังไม่มี default เมื่อเราเพิ่ม primary key และ constraints เซลล์เหล่านั้นจะค่อย ๆ เต็มขึ้น
-
-## สร้าง primary key โดยอัตโนมัติ
-
-คุณแทบไม่อยากกำหนดเลข id ด้วยมือเลย PostgreSQL ทำให้คุณได้ วิธีสมัยใหม่คือ `GENERATED ALWAYS AS IDENTITY` ซึ่งให้ server จัดหาค่าถัดไปให้อัตโนมัติ ทางลัดแบบเก่าคือ `SERIAL` ซึ่งคุณยังคงพบเห็นได้ในโค้ดที่มีอยู่จำนวนมาก
+นั่นสร้าง table ที่มีสาม column: `id` เป็นจำนวนเต็ม, `name` เป็นข้อความ และ `price` เก็บเป็นทศนิยมแม่นยำสูงสุดสิบหลักและสองหลักหลังจุด ใช้งานได้ แต่หลวมเกินไป — ทุก column เป็น nullable และไม่มี default ไม่มีอะไรห้ามสองสินค้าใช้ `id` เดียวกัน หรือ row ที่ว่างเปล่าทั้งแถว:
 
 ```sql
+-- sql/loose-rows.sql
+INSERT INTO products VALUES (1, 'Notebook', 4.50), (1, 'Pen', NULL), (NULL, NULL, NULL);
+SELECT * FROM products;
+```
+
+```text
+INSERT 0 3
+ id |   name   | price 
+----+----------+-------
+  1 | Notebook |  4.50
+  1 | Pen      |      
+    |          |      
+(3 rows)
+```
+
+เข้าไปสาม row สองตัว `id` ซ้ำกัน และหนึ่งตัวไม่มีอะไรเลย เราจะแก้ด้วย primary key และ constraint ต่อไป
+
+**ใน pgAdmin:** หลังรัน statement ใน Query Tool ให้ refresh node Tables ใน browser tree แล้ว table `products` ใหม่จะปรากฏ ขยายดูจะเห็น node Columns ที่แสดงแต่ละ column และ type
+
+## การสร้าง primary key อัตโนมัติ
+
+คุณแทบไม่อยากกำหนดเลข id ด้วยมือ PostgreSQL ทำให้ได้ วิธีสมัยใหม่คือ `GENERATED ALWAYS AS IDENTITY` ที่ให้เซิร์ฟเวอร์ใส่ค่าถัดไปให้อัตโนมัติ ทางลัดแบบเก่าคือ `SERIAL` ซึ่งคุณยังเห็นในโค้ดเดิมมากมาย
+
+```sql
+-- sql/identity-table.sql
+DROP TABLE products;
 CREATE TABLE products (
   id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name   text NOT NULL,
   price  numeric(10, 2) NOT NULL
 );
+\d products
 ```
 
-ตอนนี้ server เป็นคนเติม `id` ให้ พร้อมประกาศเป็น primary key ส่วน `name` กับ `price` ก็ปล่อยว่างไม่ได้อีกต่อไป table เดียวกันนี้ถ้าเขียนด้วยสไตล์เก่าจะใช้ `id bigserial PRIMARY KEY` ทั้งสองแบบให้คีย์ที่เพิ่มค่าอัตโนมัติ แบบ `IDENTITY` เป็นแบบที่เป็นมาตรฐาน SQL และเป็นที่นิยมกว่าใน PostgreSQL สมัยใหม่
+```text
+DROP TABLE
+CREATE TABLE
+                           Table "public.products"
+ Column |     Type      | Collation | Nullable |           Default            
+--------+---------------+-----------+----------+------------------------------
+ id     | bigint        |           | not null | generated always as identity
+ name   | text          |           | not null | 
+ price  | numeric(10,2) |           | not null | 
+Indexes:
+    "products_pkey" PRIMARY KEY, btree (id)
+```
 
-## สร้าง table จาก driver
+ตอนนี้ `id` ถูกเติมโดยเซิร์ฟเวอร์ ประกาศเป็น primary key (`not null` แฝงมาด้วย และสร้าง index `products_pkey`) และ `name` กับ `price` ปล่อยว่างไม่ได้อีกต่อไป `\d` แสดง default `generated always as identity` table เดียวกันที่เขียนแบบเก่าจะใช้ `id bigserial PRIMARY KEY` ทั้งสองแบบให้ key ที่เพิ่มค่าอัตโนมัติ แต่แบบ `IDENTITY` เป็นมาตรฐาน SQL และเป็นที่นิยมใน PostgreSQL สมัยใหม่ ([docs](https://www.postgresql.org/docs/18/sql-createtable.html))
 
-แอปพลิเคชันส่วนใหญ่รันคำสั่ง `CREATE TABLE` เพียงครั้งเดียว ตอน setup หรือผ่านขั้นตอน migration แทนที่จะรันในทุก request นี่คือ migration เดียวกันที่ส่งจากแต่ละ driver — มีประโยชน์เมื่อแอปพลิเคชันของคุณเป็นเจ้าของ schema เอง
+```sql
+-- sql/identity-insert.sql
+INSERT INTO products (name, price) VALUES ('Notebook', 4.50), ('Pen', 1.20) RETURNING id, name;
+```
+
+```text
+ id |   name   
+----+----------
+  1 | Notebook
+  2 | Pen
+(2 rows)
+
+INSERT 0 2
+```
+
+### ALWAYS, BY DEFAULT และสิ่งที่ serial ทำต่างออกไป
+
+`GENERATED ALWAYS` ปฏิเสธค่าที่คุณส่งเข้าไป ด้วย error ที่บอกวิธีแก้ (SQLSTATE `428C9`):
+
+```sql
+-- @expect-error 428C9
+INSERT INTO products (id, name, price) VALUES (100, 'Stapler', 8.00);
+```
+
+```text
+ERROR:  cannot insert a non-DEFAULT value into column "id"
+DETAIL:  Column "id" is an identity column defined as GENERATED ALWAYS.
+HINT:  Use OVERRIDING SYSTEM VALUE to override.
+```
+
+`OVERRIDING SYSTEM VALUE` คือทางหนีที่ตั้งใจใช้ (bulk load, restore) สังเกตว่ามัน **ไม่** ทำให้ sequence เดินหน้า:
+
+```sql
+-- sql/overriding.sql
+INSERT INTO products (id, name, price) OVERRIDING SYSTEM VALUE VALUES (100, 'Stapler', 8.00);
+SELECT id, name FROM products ORDER BY id;
+```
+
+```text
+INSERT 0 1
+ id  |   name   
+-----+----------
+   1 | Notebook
+   2 | Pen
+ 100 | Stapler
+(3 rows)
+```
+
+`GENERATED BY DEFAULT` รับค่าที่ระบุเอง ซึ่งเป็นสาเหตุของการชนกันภายหลัง: ตัวสร้างไม่รู้ว่าคุณ insert `1` ด้วยมือไปแล้ว
+
+```sql
+-- sql/by-default.sql
+CREATE TABLE tags (id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, label text NOT NULL);
+INSERT INTO tags (id, label) VALUES (1, 'imported');
+```
+
+```sql
+-- @expect-error 23505
+INSERT INTO tags (label) VALUES ('first generated');
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "tags_pkey"
+DETAIL:  Key (id)=(1) already exists.
+```
+
+`SERIAL` เป็นชวเลขของ sequence แยกต่างหากบวก default `nextval(...)` ดูที่ column `Default` และเทียบว่า column แต่ละแบบเป็นเจ้าของ sequence ตัวไหน:
+
+```sql
+-- sql/serial.sql
+CREATE TABLE legacy (id bigserial PRIMARY KEY, name text NOT NULL);
+\d legacy
+SELECT pg_get_serial_sequence('legacy', 'id') AS serial_sequence,
+       pg_get_serial_sequence('products', 'id') AS identity_sequence;
+```
+
+```text
+CREATE TABLE
+                            Table "public.legacy"
+ Column |  Type  | Collation | Nullable |              Default               
+--------+--------+-----------+----------+------------------------------------
+ id     | bigint |           | not null | nextval('legacy_id_seq'::regclass)
+ name   | text   |           | not null | 
+Indexes:
+    "legacy_pkey" PRIMARY KEY, btree (id)
+
+   serial_sequence    |   identity_sequence    
+----------------------+------------------------
+ public.legacy_id_seq | public.products_id_seq
+(1 row)
+```
+
+sequence แยกต่างหากนั้นคือ "ข้อแปลกเรื่องความเป็นเจ้าของ" ที่คนพูดถึง: table เป็น object หนึ่ง sequence เป็นอีกหนึ่ง และสิทธิ์ถูกตรวจบนทั้งสอง role ที่ `INSERT` เข้า table แบบ serial ได้แต่ไม่มีสิทธิ์บน sequence จะล้มเหลว ส่วน identity column ซึ่ง sequence เป็นของภายใน ไม่ล้มเหลว:
+
+```sql
+-- sql/sequence-privileges.sql
+CREATE ROLE writer LOGIN PASSWORD '<writer-password>';
+GRANT INSERT ON legacy, products TO writer;
+SET ROLE writer;
+INSERT INTO products (name, price) VALUES ('Eraser', 0.80);
+RESET ROLE;
+```
+
+```text
+CREATE ROLE
+GRANT
+SET
+INSERT 0 1
+RESET
+```
+
+```sql
+-- @expect-error 42501
+BEGIN;
+SET ROLE writer;
+INSERT INTO legacy (name) VALUES ('Eraser');
+```
+
+```text
+BEGIN
+SET
+ERROR:  permission denied for sequence legacy_id_seq
+```
+
+sequence ไม่เคย rollback การ insert ที่ถูก rollback ก็ยังใช้ค่าไปหนึ่งค่า identity column จึงมีช่องว่างโดยการออกแบบ (อย่าใช้เป็นตัวนับที่ไม่มีช่องว่าง) ด้านบน `Eraser` ได้ id 3, `Discarded` ที่ถูก rollback เผาค่า 4 ทิ้ง และ `Ruler` ได้ 5:
+
+```sql
+-- sql/identity-gaps.sql
+BEGIN;
+INSERT INTO products (name, price) VALUES ('Discarded', 1.00);
+ROLLBACK;
+INSERT INTO products (name, price) VALUES ('Ruler', 2.10) RETURNING id;
+```
+
+```text
+BEGIN
+INSERT 0 1
+ROLLBACK
+ id 
+----
+  5
+(1 row)
+
+INSERT 0 1
+```
+
+## การสร้าง table จาก driver
+
+แอปพลิเคชันส่วนใหญ่รัน `CREATE TABLE` ครั้งเดียวตอนติดตั้งหรือผ่านขั้นตอน migration ไม่ใช่ทุก request นี่คือ migration เดียวกันที่ส่งจากแต่ละ driver — มีประโยชน์เมื่อแอปพลิเคชันของคุณเป็นเจ้าของ schema
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -124,64 +298,226 @@ CREATE TABLE products (
   </TabItem>
 </Tabs>
 
-SQL เหมือนกันทุกที่ ต่างกันแค่วิธีที่คุณส่งไปให้ server เท่านั้น เนื่องจาก DDL ไม่รับ input จากผู้ใช้ ที่นี่จึงไม่มี parameter ให้ bind
+SQL เหมือนกันทุกที่ ต่างกันแค่วิธีส่งให้เซิร์ฟเวอร์ เพราะ DDL ไม่รับ input ของผู้ใช้ จึงไม่มี parameter ให้ bind แต่ละ snippet รันหนึ่งครั้งกับฐานข้อมูลชั่วคราว แล้วถามว่า `products` มีกี่ column:
+
+```text
+$ node app.mjs        # pg 8.23.0 (count(*) is a bigint, which node-postgres returns as a string)
+{ columns: '3' }
+
+$ python app.py        # psycopg 3.3.6
+(3,)
+
+$ go run .        # pgx v5.11.0
+columns: 3
+
+$ cargo run        # sqlx 0.9.0
+columns: 3
+```
 
 ## IF NOT EXISTS และ DROP TABLE
 
-การรัน `CREATE TABLE products` เป็นครั้งที่สองจะเป็น error เพราะ table มีอยู่แล้ว การเพิ่ม `IF NOT EXISTS` ทำให้คำสั่งกลายเป็น no-op เมื่อ table มีอยู่แล้ว ซึ่งสะดวกในสคริปต์ setup ที่อาจถูกรันมากกว่าหนึ่งครั้ง
+การรัน `CREATE TABLE products` ครั้งที่สองเป็น error เพราะ table มีอยู่แล้ว (SQLSTATE `42P07`):
 
 ```sql
-CREATE TABLE IF NOT EXISTS products (
-  id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+-- @expect-error 42P07
+CREATE TABLE products (id integer);
+```
+
+```text
+ERROR:  relation "products" already exists
+```
+
+การเพิ่ม `IF NOT EXISTS` ทำให้ statement ไม่ทำอะไรเมื่อ table มีอยู่แล้ว และบอกคุณด้วย NOTICE ซึ่งสะดวกในสคริปต์ setup ที่อาจรันมากกว่าหนึ่งครั้ง สังเกตว่ามันตรวจแค่ *ชื่อ*: ไม่ได้ตรวจว่า table ที่มีอยู่มี column ตามที่คุณขอหรือไม่
+
+```sql
+-- sql/if-not-exists.sql
+CREATE TABLE IF NOT EXISTS products (id integer);
+```
+
+```text
+NOTICE:  relation "products" already exists, skipping
+CREATE TABLE
+```
+
+เพื่อลบ table และทุก row ของมัน ใช้ `DROP TABLE` มันถาวรและทันที ควรระวังเท่ากับ `DELETE` `DROP TABLE IF EXISTS` หลีกเลี่ยง error เมื่อ table หายไปแล้ว PostgreSQL มี DDL แบบ transactional ดังนั้นการ drop rollback ได้ — วิธีที่ปลอดภัยที่สุดในการดูว่า `DROP` จะทำอะไร:
+
+```sql
+-- sql/drop-in-transaction.sql
+BEGIN;
+DROP TABLE legacy;
+SELECT to_regclass('legacy') AS inside_tx;
+ROLLBACK;
+SELECT to_regclass('legacy') AS after_rollback;
+```
+
+```text
+BEGIN
+DROP TABLE
+ inside_tx 
+-----------
+ 
+(1 row)
+
+ROLLBACK
+ after_rollback 
+----------------
+ legacy
+(1 row)
+```
+
+**ใน pgAdmin:** คุณ drop table ได้โดยคลิกขวาใน browser tree แล้วเลือก Delete/Drop แต่การรัน `DROP TABLE` ใน Query Tool เก็บการกระทำไว้ในประวัติสคริปต์ของคุณ
+
+ชื่อถูกแปลงเป็นตัวพิมพ์เล็กเว้นแต่ครอบด้วย double quote ดังนั้น `Widgets` กับ `"Widgets"` เป็นสอง table ที่ต่างกัน:
+
+```sql
+-- sql/case-folding.sql
+CREATE TABLE Widgets (Id int);
+CREATE TABLE "Widgets" ("Id" int);
+\dt *idgets
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+           List of tables
+ Schema |  Name   | Type  |  Owner   
+--------+---------+-------+----------
+ public | Widgets | table | postgres
+ public | widgets | table | postgres
+(2 rows)
+```
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ที่ถูกขอ "สคริปต์ seed ที่มี id ตายตัวเพื่อให้เทสต์คงที่" เขียนสิ่งนี้ อ่านแล้วดูดี:
+
+<SpotTheBug lang="sql" code={`-- seed.sql (AI comment: "seed a few products with fixed ids so tests are stable")
+CREATE TABLE products (
+  id    serial PRIMARY KEY,
   name  text NOT NULL,
   price numeric(10, 2) NOT NULL
 );
-```
 
-ถ้าต้องการลบ table พร้อม row ทั้งหมด ให้ใช้ `DROP TABLE` คำสั่งนี้มีผลทันทีและถาวร จึงต้องระวังพอ ๆ กับ `DELETE` แบบ `IF EXISTS` ช่วยเลี่ยง error เมื่อ table หายไปแล้ว
+INSERT INTO products (id, name, price) VALUES (1, 'Notebook', 4.50), (2, 'Pen', 1.20);
+
+-- later, from the application:
+INSERT INTO products (name, price) VALUES ('Stapler', 8.00);`}>
+
+bug จะโผล่ตอนแอปพลิเคชัน insert row แรกเท่านั้น `serial` ให้ sequence แก่ column แต่ id ที่ระบุเองใน seed ไม่เคยแตะมัน sequence จึงยังเริ่มที่ 1 และ id ตัวแรกที่ถูกสร้างชนกับตัวที่ seed ไว้:
 
 ```sql
-DROP TABLE IF EXISTS products;
+-- sql/seed-buggy.sql
+CREATE TABLE seeded (id serial PRIMARY KEY, name text NOT NULL);
+INSERT INTO seeded (id, name) VALUES (1, 'Notebook'), (2, 'Pen');
 ```
 
-**ใน pgAdmin:** คุณยัง drop table ได้โดยคลิกขวาที่ table ในแผนผัง browser แล้วเลือก Delete/Drop แต่การรัน `DROP TABLE` ใน Query Tool จะเก็บการกระทำนั้นไว้ในประวัติสคริปต์ของคุณ
+```sql
+-- @expect-error 23505
+INSERT INTO seeded (name) VALUES ('Stapler');
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "seeded_pkey"
+DETAIL:  Key (id)=(1) already exists.
+```
+
+แก้ได้สองวิธี วิธีที่ดีที่สุดคือไม่กำหนด id ด้วยมือเลย (identity column ตัวสร้างให้ id ออกมาเป็น 3 หลังตัวสร้าง insert สอง row ที่ seed):
+
+```sql
+-- sql/seed-fixed.sql
+CREATE TABLE seeded_fixed (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text NOT NULL);
+INSERT INTO seeded_fixed (name) VALUES ('Notebook'), ('Pen');
+INSERT INTO seeded_fixed (name) VALUES ('Stapler') RETURNING id;
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+ id 
+----
+  3
+(1 row)
+
+INSERT 0 1
+```
+
+ถ้าจำเป็นต้อง seed id ที่ระบุเอง ให้เลื่อน sequence ข้ามมันไปภายหลังด้วย `setval`:
+
+```sql
+-- sql/seed-resync.sql
+CREATE TABLE seeded_serial (id serial PRIMARY KEY, name text NOT NULL);
+INSERT INTO seeded_serial (id, name) VALUES (1, 'Notebook'), (2, 'Pen');
+SELECT setval(pg_get_serial_sequence('seeded_serial', 'id'), (SELECT max(id) FROM seeded_serial));
+INSERT INTO seeded_serial (name) VALUES ('Stapler') RETURNING id;
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+ setval 
+--------
+      2
+(1 row)
+
+ id 
+----
+  3
+(1 row)
+
+INSERT 0 1
+```
+
+</SpotTheBug>
+
+สุดท้าย ลบ role ฝึกหัดจากตัวอย่างเรื่องสิทธิ์:
+
+```sql
+-- sql/cleanup.sql
+REVOKE ALL ON legacy, products FROM writer;
+DROP ROLE writer;
+```
+
+```text
+REVOKE
+DROP ROLE
+```
+
+## Mental Model
+
+นิยามของ table คือสัญญาที่เซิร์ฟเวอร์บังคับใช้กับทุกการเขียน primary key คือตัวตนของ row และ identity column คือ sequence ที่ *column เป็นเจ้าของ* ซึ่งถูกนำออกจากระบบ transaction โดยตั้งใจ: มันแจกเลขที่ไม่ซ้ำ ไม่ใช่เลขที่ต่อเนื่อง และไม่เคยเรียกคืน ทุกเรื่องของ key อัตโนมัติมาจากตรงนี้: ช่องว่างหลัง rollback, การชนกันหลัง insert ด้วยมือ, และ sequence ที่คุณต้องซิงก์เองเมื่อเลี่ยงมัน
 
 ## เคล็ดลับและข้อควรระวัง
 
-- เลือก `GENERATED ALWAYS AS IDENTITY` มากกว่า `SERIAL` สำหรับ table ใหม่ เพราะเป็น syntax มาตรฐาน SQL เลี่ยงความแปลกประหลาดเรื่องความเป็นเจ้าของของ sequence ที่ `SERIAL` สร้างขึ้นเบื้องหลัง และอ่านได้ชัดเจนกว่า
-- ใช้ `bigint` แทนที่จะเป็น `integer` สำหรับ identity key บน table ที่คุณคาดว่าจะเติบโต `integer` ขนาดสี่ไบต์จะหมดที่ราว ๆ สองพันล้าน row และการสลับชนิดในภายหลังนั้นสร้างความปั่นป่วน
-- เพิ่ม `IF NOT EXISTS` ลงในสคริปต์สร้างที่อาจถูกรันซ้ำ ๆ แต่อย่าใส่ในการ migration แบบครั้งเดียวที่ table ซ้ำควรเป็น error ที่คุณสังเกตเห็น
-- `DROP TABLE` ลบทั้งโครงสร้างและทุก row โดยไม่มีการยืนยัน ตรวจสอบชื่อ table ให้ดี และควร drop ภายใน transaction ที่คุณ roll back ได้หากไม่แน่ใจ
-- ชื่อ column และ table จะถูกแปลงเป็นตัวพิมพ์เล็กเว้นแต่จะใส่ double-quote ดังนั้นจงเลือกชื่อตัวพิมพ์เล็กแบบ snake_case เพื่อหลีกเลี่ยงความประหลาดใจ
+- ใช้ `GENERATED ALWAYS AS IDENTITY` แทน `SERIAL` สำหรับ table ใหม่ เป็น syntax มาตรฐาน SQL เลี่ยงข้อแปลกเรื่องสิทธิ์ของ sequence แยกที่พิสูจน์ข้างบน และอ่านชัดกว่า
+- ใช้ `bigint` แทน `integer` สำหรับ identity key ของ table ที่คาดว่าจะโต `integer` 4 ไบต์หมดที่ 2,147,483,647 row (หรือเร็วกว่านั้น เพราะ sequence มีช่องว่าง) และการเปลี่ยน type ภายหลังกระทบมาก
+- เพิ่ม `IF NOT EXISTS` ให้สคริปต์สร้างที่อาจรันซ้ำ แต่เว้นไว้สำหรับ migration ครั้งเดียวที่ table ซ้ำควรเป็น error ที่คุณสังเกตเห็น
+- `DROP TABLE` ลบทั้งโครงสร้างและทุก row โดยไม่ถามยืนยัน ตรวจชื่อ table ซ้ำ และควร drop ใน transaction ที่ rollback ได้หากไม่แน่ใจ
+- ชื่อ column และ table ถูกแปลงเป็นตัวพิมพ์เล็กเว้นแต่ครอบด้วย double quote จึงเลือกชื่อตัวพิมพ์เล็กแบบ snake_case เพื่อเลี่ยงเซอร์ไพรส์
 
 <Callout title="IDENTITY คือค่าเริ่มต้นสมัยใหม่">
-เมื่อคุณมองหาคีย์ที่เพิ่มค่าอัตโนมัติ ให้เขียน `bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` แบบนี้แสดงเจตนาได้ชัดเจน เป็นไปตามมาตรฐาน SQL และเลี่ยงพฤติกรรมแบบเก่าของ `SERIAL` ได้ เก็บ `SERIAL` ไว้สำหรับอ่านโค้ดเก่า ไม่ใช่สำหรับเขียน table ใหม่
+เมื่อต้องการ key ที่เพิ่มค่าอัตโนมัติ ให้เขียน `bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY` มันสื่อเจตนาชัดเจน ตามมาตรฐาน SQL และเลี่ยงพฤติกรรมเก่าของ `SERIAL` เก็บ `SERIAL` ไว้อ่านโค้ดเก่า ไม่ใช่เขียน table ใหม่
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| ออกแบบ schema ให้ครบตั้งแต่ต้น | โครงสร้างชัดเจน มี migration discipline ตั้งแต่วันแรก | ใช้เวลาเก็บ requirement นานขึ้นก่อนเริ่มเขียนโค้ด |
-| เพิ่ม column ทีหลังตามที่เจอ requirement จริง | ยืดหยุ่น ปรับตามธุรกิจได้เร็ว | schema drift ต้องตามแก้ constraint และ migration ย้อนหลัง |
-| `bigint GENERATED ALWAYS AS IDENTITY` เป็น primary key | เรียงลำดับได้ตามเวลา insert ขนาดเล็ก index เร็ว | เดา id ถัดไปได้ เปิดเผยจำนวน row |
-| `uuid` เป็น primary key | ไม่ซ้ำกันได้ในระดับ global สร้างจาก client ได้โดยไม่ต้อง round trip ไปที่ server | ขนาดใหญ่กว่า เรียงลำดับตามเวลาไม่ได้ตามธรรมชาติ ทำให้ index กระจายตัว |
+| ออกแบบ schema เต็มรูปแบบล่วงหน้า | โครงสร้างชัดเจน มีวินัย migration ตั้งแต่วันแรก | ใช้เวลารวบรวม requirement นานก่อนเริ่มเขียนโค้ด |
+| เพิ่ม column ภายหลังเมื่อมี requirement จริง | ยืดหยุ่น ปรับตัวกับธุรกิจได้เร็ว | schema drift — ต้องมาเติม constraint และ migration ทีหลัง |
+| primary key แบบ `bigint GENERATED ALWAYS AS IDENTITY` | เรียงตามเวลา insert ได้ เล็ก สร้าง index เร็ว | id ถัดไปเดาได้ และเผยจำนวน row |
+| primary key แบบ `uuid` | ไม่ซ้ำทั่วโลก สร้างฝั่ง client ได้โดยไม่ต้องไปกลับเซิร์ฟเวอร์ | ใหญ่กว่า (16 ไบต์ เทียบ 8) v4 แบบสุ่มทำให้ index กระจาย (วัดผลในบทถัดไป) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **สร้าง table โดยไม่มี primary key** — ทุก table ควรมี primary key เสมอ ไม่งั้นจะ update/delete row เจาะจงได้ยากและ replication บางแบบก็ต้องมี primary key
-- **ใช้ `varchar(255)` กับทุก column แบบไม่คิด** — เลือกความยาวที่มีความหมายจริงตามกฎธุรกิจ หรือใช้ `text` ไปเลยถ้าไม่มีขีดจำกัดที่แท้จริง เพราะ `varchar(255)` ที่ copy กันมาไม่ได้ป้องกันอะไรและไม่ได้เร็วกว่า `text`
-- **ลืมใส่ `NOT NULL` ให้ column ที่ต้องมีค่าเสมอ** — ถ้า column อย่าง `name` หรือ `price` ไม่ควรว่างเปล่าได้ ต้องประกาศ `NOT NULL` ตั้งแต่ตอนสร้าง table ไม่ใช่ปล่อยให้แอปพลิเคชันเป็นคนคอยเช็คเอง
-
-> 💡 ตัวอย่างจากของจริง
->
-> **[Stripe](https://docs.stripe.com/api/expanding_objects)** — ใช้ id แบบ string ที่มี prefix บอกประเภท object เช่น `cus_...` สำหรับ customer หรือ `ch_...` สำหรับ charge แทนที่จะใช้ UUID ดิบ ๆ ทำให้ id ทั้ง unique และอ่านแล้วรู้ทันทีว่าเป็น object ประเภทไหน ช่วยเวลา debug log
->
-> **แพลตฟอร์มที่มีเนื้อหายืดหยุ่นสูง** — มักเก็บเนื้อหาที่มีโครงสร้างยืดหยุ่นสูง (เช่นโมเดลเอกสารแบบ block) ไว้ใน column แบบ JSONB ควบคู่กับ metadata อย่าง ownership และ permission ที่ยังคงเก็บแบบ relational ปกติเพื่อให้ query และบังคับ constraint ได้ตรงไปตรงมา
+- **"id แบบ identity/serial ต่อเนื่องกัน"** มันไม่ซ้ำ แต่ไม่ไร้ช่องว่าง: insert ที่ถูก rollback เผาค่าทิ้ง (พิสูจน์ข้างบน: 3, 5)
+- **"`IF NOT EXISTS` ทำให้ table ถูกต้อง"** มันแค่ข้ามการสร้างเมื่อ *ชื่อ* ซ้ำ ไม่ว่า column จะเป็นอะไร
+- **"table ที่ไม่มี primary key ก็ไม่เป็นไร"** ทำได้ตามกฎ (table แรกข้างบนรับ row ซ้ำและ row ที่เป็น NULL ทั้งแถว) แต่การ update หรือ delete row ใด row หนึ่งจะยาก และ logical replication ต้องใช้ replica identity
+- **"`varchar(255)` คือค่าเริ่มต้นที่ปลอดภัย"** ใน PostgreSQL `text` กับ `varchar(n)` เก็บแบบเดียวกัน 255 ที่คัดลอกมาไม่ป้องกันอะไร บทถัดไปครอบคลุมเรื่องนี้
+- **"`DROP TABLE` ย้อนกลับไม่ได้"** นอก transaction ย้อนไม่ได้ แต่ใน transaction rollback ได้ (พิสูจน์ข้างบน)
 
 export const quizCreating = [
   {
-    q: 'clause ใดที่ทำให้ PostgreSQL จัดหาค่า primary-key โดยอัตโนมัติด้วย syntax มาตรฐาน SQL?',
+    q: 'clause ใดทำให้ PostgreSQL ใส่ค่า primary key อัตโนมัติด้วย syntax มาตรฐาน SQL?',
     options: [
       'AUTO_INCREMENT',
       'GENERATED ALWAYS AS IDENTITY',
@@ -189,26 +525,51 @@ export const quizCreating = [
       'DEFAULT NEXTVAL',
     ],
     answer: 1,
+    explain: '`GENERATED ALWAYS AS IDENTITY` คือมาตรฐาน SQL ส่วน `AUTO_INCREMENT` เป็นของ MySQL และ `DEFAULT nextval(...)` คือสิ่งที่ `SERIAL` ขยายออกมา',
   },
   {
-    q: 'การเพิ่ม IF NOT EXISTS ลงในคำสั่ง CREATE TABLE ทำอะไร?',
+    q: 'การเพิ่ม IF NOT EXISTS ใน statement CREATE TABLE ทำอะไร?',
     options: [
       'drop table เก่าก่อน',
-      'ข้ามการสร้างโดยไม่เกิด error เมื่อ table มีอยู่แล้ว',
-      'สร้าง table ชั่วคราว',
+      'ข้ามการสร้างโดยไม่ error เมื่อ table มีอยู่แล้ว',
+      'สร้าง temporary table',
       'เปลี่ยนชื่อ table ที่มีอยู่',
     ],
     answer: 1,
+    explain: 'มันส่ง `NOTICE: relation "products" already exists, skipping` แล้วไม่ทำอะไร มันไม่ตรวจว่า column ของ table ที่มีอยู่ตรงกันหรือไม่',
   },
   {
-    q: 'DROP TABLE products; ทำอะไร?',
+    q: '`DROP TABLE products;` ทำอะไร?',
     options: [
-      'ล้าง row ออกแต่เก็บโครงสร้างไว้',
-      'ลบโครงสร้าง table พร้อมทุก row อย่างถาวร',
+      'ล้าง row แต่เก็บโครงสร้าง',
+      'ลบโครงสร้างและทุก row ของ table อย่างถาวร',
       'ซ่อน table จาก pgAdmin เท่านั้น',
       'สร้าง backup ก่อนลบ',
     ],
     answer: 1,
+    explain: 'มันลบทั้งโครงสร้างและ row เพราะ DDL เป็น transactional `BEGIN; DROP TABLE ...; ROLLBACK;` จึงย้อนกลับได้ (แสดงในบทเรียน) แต่การ drop ที่ commit แล้วถาวร',
+  },
+  {
+    q: 'table มี `id serial PRIMARY KEY` สคริปต์ seed insert row ด้วย id ที่ระบุเอง 1 และ 2 จะเกิดอะไรกับ `INSERT` ครั้งถัดไปที่ไม่ระบุ id?',
+    options: [
+      'ได้ id 3',
+      'ล้มเหลวด้วย duplicate key error บน id 1',
+      'PostgreSQL หาค่าสูงสุดแล้วต่อจาก 3',
+      'row ที่ seed ถูกเรียงเลขใหม่',
+    ],
+    answer: 1,
+    explain: 'sequence แยกจาก column และ id ที่ระบุเองไม่เคยแตะมัน ค่าแรกที่สร้างจึงเป็น 1 แก้ด้วย identity โดยไม่กำหนด id เอง หรือ `setval` หลัง seed',
+  },
+  {
+    q: 'คุณรัน `BEGIN; INSERT ... (identity column); ROLLBACK;` แล้ว insert อีกครั้ง ค่า identity เป็นอย่างไร?',
+    options: [
+      'ถูกใช้ซ้ำ จึงไม่มีช่องว่าง',
+      'ถูกใช้ไปโดย insert ที่ rollback จึงมีช่องว่างของ id',
+      'sequence ถูกรีเซ็ตเป็น 1',
+      'insert ครั้งที่สองล้มเหลว',
+    ],
+    answer: 1,
+    explain: 'sequence ไม่เป็น transactional: `nextval` ไม่ถูก rollback ในบทเรียน id 4 ถูกเผา และ row ถัดไปได้ 5',
   },
 ];
 
