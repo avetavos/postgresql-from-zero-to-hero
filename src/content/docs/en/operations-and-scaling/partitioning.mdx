@@ -1,6 +1,6 @@
 ---
 title: Partitioning
-description: Split one enormous logical table into many physical partitions with declarative PARTITION BY RANGE, LIST, and HASH, let the planner prune partitions, and learn when partitioning actually helps.
+description: Split one enormous logical table into many physical partitions with declarative PARTITION BY RANGE, LIST, and HASH, prove pruning with real plans, and measure what partitioning does and does not buy.
 sidebar:
   order: 4
 ---
@@ -10,20 +10,23 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-Some tables grow without limit. A table of events, log lines, or sensor readings can reach billions of rows, and at that size everything gets harder: indexes balloon, maintenance jobs run for hours, and deleting old data locks the table for ages. **Partitioning** addresses this by splitting one huge logical table into many smaller physical ones, while your queries still see a single table.
+Some tables grow without limit. A table of events, log lines, or sensor readings can reach billions of rows, and at that size everything gets harder: indexes balloon, maintenance jobs run for hours, and deleting old data is expensive. **Partitioning** addresses this by splitting one huge logical table into many smaller physical ones, while your queries still see a single table ([docs](https://www.postgresql.org/docs/18/ddl-partitioning.html)).
 
 PostgreSQL's **declarative partitioning** lets you define the split rule once. You write to and read from the parent table as usual, and the server routes each row to the right partition behind the scenes.
+
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The examples are `sql` fences run top to bottom in one empty database; the timings come from a 3-million-row table on this Mac and only their proportions will carry over to your machine.
 
 ## One logical table, many partitions
 
 You declare a parent table as partitioned and give it a **partition key** — the column whose value decides which partition a row belongs to. The parent holds no data itself; it is a routing layer over its child partitions.
 
 export const partDiagram = `flowchart TD
-  Parent[events - logical parent table] --> P1[events_2024_q1]
-  Parent --> P2[events_2024_q2]
-  Parent --> P3[events_2024_q3]
-  Parent --> P4[events_2024_q4]`;
+  Parent[events - logical parent table] --> P1[events_2025_q1]
+  Parent --> P2[events_2025_q2]
+  Parent --> P3[events_2025_q3]
+  Parent --> P4[events_2025_q4]`;
 
 <Mermaid code={partDiagram} title="One logical table routed across several partitions" />
 
@@ -40,95 +43,597 @@ There are three partitioning strategies, chosen by how the key maps to partition
 The most common case is range partitioning by time. You declare the parent with `PARTITION BY RANGE`, then create one child partition per period.
 
 ```sql
--- Parent table, partitioned by the created_at timestamp
+-- sql/setup.sql
 CREATE TABLE events (
-  id          bigint GENERATED ALWAYS AS IDENTITY,
-  created_at  timestamptz NOT NULL,
-  kind        text NOT NULL,
-  payload     jsonb
+  id         bigint GENERATED ALWAYS AS IDENTITY,
+  created_at timestamptz NOT NULL,
+  kind       text NOT NULL,
+  payload    jsonb
 ) PARTITION BY RANGE (created_at);
 
--- One partition per quarter; the bounds are inclusive lower, exclusive upper
-CREATE TABLE events_2024_q1 PARTITION OF events
-  FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
-
-CREATE TABLE events_2024_q2 PARTITION OF events
-  FOR VALUES FROM ('2024-04-01') TO ('2024-07-01');
+-- one partition per quarter; the lower bound is inclusive, the upper bound exclusive
+CREATE TABLE events_2025_q1 PARTITION OF events
+  FOR VALUES FROM ('2025-01-01') TO ('2025-04-01');
+CREATE TABLE events_2025_q2 PARTITION OF events
+  FOR VALUES FROM ('2025-04-01') TO ('2025-07-01');
 ```
 
-Inserting into `events` automatically lands the row in the matching partition.
+Inserting into `events` automatically lands each row in the matching partition. `tableoid` shows which one:
 
 ```sql
--- This row routes itself into events_2024_q1
+-- sql/route.sql
 INSERT INTO events (created_at, kind, payload)
-VALUES ('2024-02-14', 'signup', '{"plan": "pro"}');
+VALUES ('2025-02-14', 'signup', '{"plan": "pro"}'), ('2025-05-01', 'login', NULL);
+
+SELECT tableoid::regclass AS partition, id, created_at::date, kind FROM events ORDER BY id;
 ```
 
-A note on the partition key: it must be part of the primary key on a partitioned table, which is why the example uses `GENERATED ALWAYS AS IDENTITY` without a standalone `PRIMARY KEY` on `id` alone.
+```text
+INSERT 0 2
+   partition    | id | created_at |  kind  
+----------------+----+------------+--------
+ events_2025_q1 |  1 | 2025-02-14 | signup
+ events_2025_q2 |  2 | 2025-05-01 | login
+(2 rows)
+```
+
+A row that fits no partition is rejected, and the whole statement fails:
+
+```sql
+-- @expect-error 23514
+INSERT INTO events (created_at, kind) VALUES ('2025-08-01', 'late');
+```
+
+```text
+ERROR:  no partition of relation "events" found for row
+DETAIL:  Partition key of the failing row contains (created_at) = (2025-08-01 00:00:00+00).
+```
+
+### The partition key must be part of every unique key
+
+A primary key on a partitioned table has to include the partition key, because each partition can only enforce uniqueness inside itself ([docs](https://www.postgresql.org/docs/18/ddl-partitioning.html)). A primary key on `id` alone is refused:
+
+```sql
+-- @expect-error 0A000
+ALTER TABLE events ADD PRIMARY KEY (id);
+```
+
+```text
+ERROR:  unique constraint on partitioned table must include all partitioning columns
+DETAIL:  PRIMARY KEY constraint on table "events" lacks column "created_at" which is part of the partition key.
+```
+
+`(id, created_at)` works, and every partition gets its own index for it:
+
+```sql
+-- sql/primary-key.sql
+ALTER TABLE events ADD PRIMARY KEY (id, created_at);
+\d events_2025_q1
+```
+
+```text
+ALTER TABLE
+                                Table "public.events_2025_q1"
+   Column   |           Type           | Collation | Nullable |           Default            
+------------+--------------------------+-----------+----------+------------------------------
+ id         | bigint                   |           | not null | generated always as identity
+ created_at | timestamp with time zone |           | not null | 
+ kind       | text                     |           | not null | 
+ payload    | jsonb                    |           |          | 
+Partition of: events FOR VALUES FROM ('2025-01-01 00:00:00+00') TO ('2025-04-01 00:00:00+00')
+Indexes:
+    "events_2025_q1_pkey" PRIMARY KEY, btree (id, created_at)
+```
+
+The consequence to remember: uniqueness of `id` alone is no longer enforced by the database. The identity column still hands out distinct values, but nothing stops an application from inserting a duplicate `id` with a different `created_at`.
 
 ## List and hash partitioning
 
 `PARTITION BY LIST` assigns rows by exact key values — handy when a natural category exists.
 
 ```sql
+-- sql/list.sql
 CREATE TABLE customers (
-  id      bigint GENERATED ALWAYS AS IDENTITY,
-  region  text NOT NULL,
-  name    text NOT NULL
+  id     bigint GENERATED ALWAYS AS IDENTITY,
+  region text NOT NULL,
+  name   text NOT NULL
 ) PARTITION BY LIST (region);
 
-CREATE TABLE customers_emea PARTITION OF customers
-  FOR VALUES IN ('eu', 'me', 'africa');
+CREATE TABLE customers_emea PARTITION OF customers FOR VALUES IN ('eu', 'me', 'africa');
+CREATE TABLE customers_amer PARTITION OF customers FOR VALUES IN ('us', 'ca', 'latam');
 
-CREATE TABLE customers_amer PARTITION OF customers
-  FOR VALUES IN ('us', 'ca', 'latam');
+INSERT INTO customers (region, name) VALUES ('eu', 'Ada'), ('us', 'Linus'), ('latam', 'Grace');
+SELECT tableoid::regclass AS partition, region, name FROM customers ORDER BY id;
 ```
 
-`PARTITION BY HASH` spreads rows evenly across a fixed number of buckets when no range or list makes sense.
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 3
+   partition    | region | name  
+----------------+--------+-------
+ customers_emea | eu     | Ada
+ customers_amer | us     | Linus
+ customers_amer | latam  | Grace
+(3 rows)
+```
+
+`PARTITION BY HASH` spreads rows evenly across a fixed number of buckets when no range or list makes sense. All four remainders (0 to 3 for `MODULUS 4`) must exist, or some rows have nowhere to go (the bug at the end of the lesson):
 
 ```sql
-CREATE TABLE sessions (
-  id       bigint NOT NULL,
-  token    text NOT NULL
-) PARTITION BY HASH (id);
+-- sql/hash.sql
+CREATE TABLE sessions (id bigint NOT NULL, token text NOT NULL) PARTITION BY HASH (id);
+CREATE TABLE sessions_0 PARTITION OF sessions FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE sessions_1 PARTITION OF sessions FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+CREATE TABLE sessions_2 PARTITION OF sessions FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+CREATE TABLE sessions_3 PARTITION OF sessions FOR VALUES WITH (MODULUS 4, REMAINDER 3);
 
-CREATE TABLE sessions_0 PARTITION OF sessions
-  FOR VALUES WITH (MODULUS 4, REMAINDER 0);
-
-CREATE TABLE sessions_1 PARTITION OF sessions
-  FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+INSERT INTO sessions SELECT g, 'token-' || g FROM generate_series(1, 1000) g;
+SELECT tableoid::regclass AS partition, count(*) FROM sessions GROUP BY 1 ORDER BY 1;
 ```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 1000
+ partition  | count 
+------------+-------
+ sessions_0 |   259
+ sessions_1 |   234
+ sessions_2 |   276
+ sessions_3 |   231
+(4 rows)
+```
+
+1000 sessions land in four partitions of 231 to 276 rows: even, not identical.
 
 ## Partition pruning
 
-The real payoff is **partition pruning**: when a query's `WHERE` clause filters on the partition key, the planner skips every partition that cannot contain matching rows and scans only the relevant ones.
+The real payoff is **partition pruning**: when a query's `WHERE` clause filters on the partition key, the planner skips every partition that cannot contain matching rows. The first plan below asks for February and reads only Q1. The second filters on a column that is not the key, so it must read every partition. The third repeats the first with `enable_partition_pruning` switched off, a teaching switch that shows what pruning saves:
 
 ```sql
--- The planner reads only events_2024_q1, not the whole table
-EXPLAIN
+-- sql/pruning.sql
+EXPLAIN (COSTS OFF)
 SELECT count(*) FROM events
-WHERE created_at >= '2024-02-01' AND created_at < '2024-03-01';
+WHERE created_at >= '2025-02-01' AND created_at < '2025-03-01';
+
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM events WHERE kind = 'signup';
+
+-- teaching switch: pruning off, same query as the first one
+SET enable_partition_pruning = off;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM events
+WHERE created_at >= '2025-02-01' AND created_at < '2025-03-01';
+RESET enable_partition_pruning;
 ```
 
-The plan shows just the single quarter's partition being scanned. If you instead query without mentioning `created_at`, the planner has no way to narrow down and must scan every partition — which is slower than a well-indexed single table. Pruning is the whole point, and pruning needs the partition key in the `WHERE` clause.
+```text
+                                                                         QUERY PLAN                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Seq Scan on events_2025_q1 events
+         Filter: ((created_at >= '2025-02-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-03-01 00:00:00+00'::timestamp with time zone))
+(3 rows)
 
-## When partitioning helps
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Seq Scan on events_2025_q1 events_1
+               Filter: (kind = 'signup'::text)
+         ->  Seq Scan on events_2025_q2 events_2
+               Filter: (kind = 'signup'::text)
+(6 rows)
 
-Partitioning is not free: more tables to manage, a routing layer on every write, and queries that ignore the key can be slower. It pays off when:
+SET
+                                                                            QUERY PLAN                                                                            
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Seq Scan on events_2025_q1 events_1
+               Filter: ((created_at >= '2025-02-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-03-01 00:00:00+00'::timestamp with time zone))
+         ->  Seq Scan on events_2025_q2 events_2
+               Filter: ((created_at >= '2025-02-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-03-01 00:00:00+00'::timestamp with time zone))
+(6 rows)
 
-- A table is genuinely huge — think hundreds of millions of rows and up.
-- Most queries filter on a single dimension you can partition by, usually time.
-- You drop old data in bulk. Detaching or dropping a whole partition is near-instant, compared with a `DELETE` that scans and locks millions of rows.
+RESET
+```
 
-A few million rows with good indexes do not need partitioning. Adding it early just buys you complexity with no benefit.
+Pruning needs the partition key in the `WHERE` clause. It also works when the value is only known at run time, as with a prepared statement. Forcing a generic plan (the plan that does not know the parameters) shows it: `Subplans Removed: 1` means the executor dropped a partition after seeing the parameters.
+
+```sql
+-- sql/runtime-pruning.sql
+SET plan_cache_mode = force_generic_plan;  -- teaching switch: a plan that does not know the parameter values
+PREPARE by_range (timestamptz, timestamptz) AS
+  SELECT count(*) FROM events WHERE created_at >= $1 AND created_at < $2;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXECUTE by_range('2025-02-01', '2025-03-01');
+RESET plan_cache_mode;
+```
+
+```text
+SET
+PREPARE
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Append (actual rows=1.00 loops=1)
+         Subplans Removed: 1
+         ->  Seq Scan on events_2025_q1 events_1 (actual rows=1.00 loops=1)
+               Filter: ((created_at >= $1) AND (created_at < $2))
+(5 rows)
+
+RESET
+```
+
+## The default partition, and the trap in it
+
+A `DEFAULT` partition catches rows that fit nowhere else, which turns the "no partition found" error into silent storage. The catch: once it holds a row, you cannot create a partition whose range would cover that row:
+
+```sql
+-- sql/default.sql
+CREATE TABLE events_default PARTITION OF events DEFAULT;
+INSERT INTO events (created_at, kind) VALUES ('2025-08-01', 'late') RETURNING tableoid::regclass AS partition, id;
+```
+
+```text
+CREATE TABLE
+   partition    | id 
+----------------+----
+ events_default |  4
+(1 row)
+
+INSERT 0 1
+```
+
+The row for August landed in `events_default` (id 4, because the failed insert earlier used up id 3). Creating the Q3 partition is now refused:
+
+```sql
+-- @expect-error 23514
+CREATE TABLE events_2025_q3 PARTITION OF events
+  FOR VALUES FROM ('2025-07-01') TO ('2025-10-01');
+```
+
+```text
+ERROR:  updated partition constraint for default partition "events_default" would be violated by some row
+```
+
+The way out is to detach the default partition, create the new partition, move the rows across, and re-attach the default, all in one transaction. Note `OVERRIDING SYSTEM VALUE`: the `id` column is `GENERATED ALWAYS`, so copying rows with their existing ids needs it.
+
+```sql
+-- sql/default-fix.sql
+BEGIN;
+ALTER TABLE events DETACH PARTITION events_default;
+CREATE TABLE events_2025_q3 PARTITION OF events
+  FOR VALUES FROM ('2025-07-01') TO ('2025-10-01');
+INSERT INTO events OVERRIDING SYSTEM VALUE
+  SELECT * FROM events_default WHERE created_at >= '2025-07-01' AND created_at < '2025-10-01';
+DELETE FROM events_default WHERE created_at >= '2025-07-01' AND created_at < '2025-10-01';
+ALTER TABLE events ATTACH PARTITION events_default DEFAULT;
+COMMIT;
+
+SELECT tableoid::regclass AS partition, id, kind FROM events ORDER BY id;
+```
+
+```text
+BEGIN
+ALTER TABLE
+CREATE TABLE
+INSERT 0 1
+DELETE 1
+ALTER TABLE
+COMMIT
+   partition    | id |  kind  
+----------------+----+--------
+ events_2025_q1 |  1 | signup
+ events_2025_q2 |  2 | login
+ events_2025_q3 |  4 | late
+(3 rows)
+```
+
+## Indexes, attach and detach
+
+An index created on the parent is created on every partition, including partitions added later:
+
+```sql
+-- sql/partition-index.sql
+CREATE INDEX events_kind_idx ON events (kind);
+SELECT c.relname AS index_name, i.indrelid::regclass AS on_table
+FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+WHERE c.relname LIKE '%kind_idx' ORDER BY 2;
+SELECT * FROM pg_partition_tree('events');
+```
+
+```text
+CREATE INDEX
+       index_name        |    on_table    
+-------------------------+----------------
+ events_kind_idx         | events
+ events_2025_q1_kind_idx | events_2025_q1
+ events_2025_q2_kind_idx | events_2025_q2
+ events_default_kind_idx | events_default
+ events_2025_q3_kind_idx | events_2025_q3
+(5 rows)
+
+     relid      | parentrelid | isleaf | level 
+----------------+-------------+--------+-------
+ events         |             | f      |     0
+ events_2025_q1 | events      | t      |     1
+ events_2025_q2 | events      | t      |     1
+ events_default | events      | t      |     1
+ events_2025_q3 | events      | t      |     1
+(5 rows)
+```
+
+`ATTACH PARTITION` turns an existing table into a partition. PostgreSQL has to prove every row fits the bounds, which normally means scanning the table under a lock; a `CHECK` constraint that already implies the bounds lets it skip the scan. `DETACH PARTITION` reverses it:
+
+```sql
+-- sql/attach.sql
+CREATE TABLE events_2025_q4 (LIKE events INCLUDING DEFAULTS INCLUDING INDEXES);
+-- a CHECK constraint that matches the bounds lets ATTACH skip the validation scan
+ALTER TABLE events_2025_q4 ADD CONSTRAINT q4_bounds
+  CHECK (created_at >= '2025-10-01' AND created_at < '2026-01-01');
+ALTER TABLE events ATTACH PARTITION events_2025_q4
+  FOR VALUES FROM ('2025-10-01') TO ('2026-01-01');
+```
+
+```sql
+-- sql/detach.sql
+ALTER TABLE events DETACH PARTITION events_2025_q4;
+SELECT relname, relispartition FROM pg_class WHERE relname = 'events_2025_q4';
+```
+
+```text
+ALTER TABLE
+    relname     | relispartition 
+----------------+----------------
+ events_2025_q4 | f
+(1 row)
+```
+
+`DETACH PARTITION ... CONCURRENTLY` takes a weaker lock and does not block queries for long, but it has restrictions ([docs](https://www.postgresql.org/docs/18/sql-altertable.html)). One of them we just made: it refuses to run while the table has a default partition.
+
+```sql
+-- @expect-error 55000
+ALTER TABLE events DETACH PARTITION events_2025_q4 CONCURRENTLY;
+```
+
+```text
+ERROR:  cannot detach partitions concurrently when a default partition exists
+```
+
+## What partitioning buys, measured
+
+The Q4 partition above is tiny. Now a realistic size: `big_events` is partitioned by month and `flat_events` holds the same 3 million rows in one ordinary table, both with an index on `created_at`:
+
+```sql
+-- sql/big-events.sql
+CREATE TABLE big_events (
+  id         bigint GENERATED ALWAYS AS IDENTITY,
+  created_at timestamptz NOT NULL,
+  kind       text NOT NULL
+) PARTITION BY RANGE (created_at);
+
+SELECT format('CREATE TABLE big_events_2025_%s PARTITION OF big_events FOR VALUES FROM (%L) TO (%L)',
+              to_char(m, 'MM'), m, m + interval '1 month')
+FROM generate_series('2025-01-01'::timestamptz, '2025-12-01', interval '1 month') AS m \gexec
+
+CREATE TABLE flat_events (LIKE big_events INCLUDING DEFAULTS);   -- the same rows, one plain table
+
+INSERT INTO big_events (created_at, kind)
+SELECT '2025-01-01'::timestamptz + g * interval '10 seconds', 'click' FROM generate_series(0, 2999999) g;
+INSERT INTO flat_events SELECT * FROM big_events;
+CREATE INDEX ON big_events (created_at);
+CREATE INDEX ON flat_events (created_at);
+VACUUM ANALYZE big_events;
+VACUUM ANALYZE flat_events;
+SELECT pg_size_pretty(pg_total_relation_size('flat_events')) AS flat_total,
+       pg_size_pretty(pg_total_relation_size('big_events_2025_03')) AS one_month;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 3000000
+INSERT 0 3000000
+CREATE INDEX
+CREATE INDEX
+VACUUM
+VACUUM
+ flat_total | one_month 
+------------+-----------
+ 214 MB     | 19 MB
+(1 row)
+```
+
+**Queries by key:** counting one month.
+
+```sql
+-- sql/big-query.sql
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT count(*) FROM big_events WHERE created_at >= '2025-06-01' AND created_at < '2025-07-01';
+
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT count(*) FROM flat_events WHERE created_at >= '2025-06-01' AND created_at < '2025-07-01';
+```
+
+```text
+                                                                               QUERY PLAN                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=17.191..18.694 rows=1.00 loops=1)
+   ->  Gather (actual time=16.736..18.688 rows=2.00 loops=1)
+         Workers Planned: 1
+         Workers Launched: 1
+         ->  Partial Aggregate (actual time=16.040..16.040 rows=1.00 loops=2)
+               ->  Parallel Seq Scan on big_events_2025_06 big_events (actual time=0.099..11.747 rows=129600.00 loops=2)
+                     Filter: ((created_at >= '2025-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-07-01 00:00:00+00'::timestamp with time zone))
+ Planning Time: 0.595 ms
+ Execution Time: 18.723 ms
+(9 rows)
+
+                                                                                 QUERY PLAN                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=12.368..14.156 rows=1.00 loops=1)
+   ->  Gather (actual time=12.232..14.149 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate (actual time=10.935..10.935 rows=1.00 loops=3)
+               ->  Parallel Index Only Scan using flat_events_created_at_idx on flat_events (actual time=0.080..8.002 rows=86400.00 loops=3)
+                     Index Cond: ((created_at >= '2025-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-07-01 00:00:00+00'::timestamp with time zone))
+                     Heap Fetches: 0
+                     Index Searches: 1
+ Planning Time: 0.131 ms
+ Execution Time: 14.180 ms
+(11 rows)
+```
+
+Pruning does its job (one partition read), yet the partitioned table is not faster: about 19 ms against 14 ms, because the ordinary table's index already narrows the search to the same rows. Partitioning is not a general speed-up for queries; the documentation says query performance can improve "in certain situations", particularly when most of the heavily accessed rows are in a small number of partitions.
+
+**Retiring old data:** where it pays. Deleting March from the flat table versus detaching and dropping March's partition:
+
+```sql
+-- sql/drop-vs-delete.sql
+\timing on
+SELECT pg_current_wal_lsn() AS lsn0 \gset
+DELETE FROM flat_events WHERE created_at >= '2025-03-01' AND created_at < '2025-04-01';
+SELECT pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), :'lsn0')) AS wal_for_delete;
+VACUUM flat_events;
+
+SELECT pg_current_wal_lsn() AS lsn1 \gset
+ALTER TABLE big_events DETACH PARTITION big_events_2025_03 CONCURRENTLY;
+DROP TABLE big_events_2025_03;
+SELECT pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), :'lsn1')) AS wal_for_drop;
+\timing off
+```
+
+```text
+Timing is on.
+Time: 0.763 ms
+DELETE 267840
+Time: 91.629 ms
+ wal_for_delete 
+----------------
+ 14 MB
+(1 row)
+
+Time: 0.285 ms
+VACUUM
+Time: 42.519 ms
+Time: 0.238 ms
+ALTER TABLE
+Time: 2.380 ms
+DROP TABLE
+Time: 2.719 ms
+ wal_for_drop 
+--------------
+ 2143 kB
+(1 row)
+
+Time: 0.196 ms
+Timing is off.
+```
+
+The `DELETE` removes 267 840 rows in 92 ms, writes 14 MB of WAL, and leaves dead tuples that `VACUUM` then needs 43 ms to clean up (and, as the MVCC lesson showed, the file does not shrink). Detaching and dropping the partition took about 5 milliseconds in total, wrote a seventh as much WAL (2 MB against 14 MB), and returned the disk space at once. The gap grows with the size of what you remove.
+
+The documentation's rule of thumb for when to partition is that "the size of the table should exceed the physical memory of the database server" ([docs](https://www.postgresql.org/docs/18/ddl-partitioning.html)). A few million rows with good indexes do not need it.
+
+One more thing not to look for: `ALTER TABLE ... SPLIT PARTITION` and `MERGE PARTITIONS` do not exist in PostgreSQL 18.6:
+
+```sql
+-- @expect-error 42601
+ALTER TABLE big_events SPLIT PARTITION big_events_2025_04 INTO (
+  PARTITION big_events_2025_04a FOR VALUES FROM ('2025-04-01') TO ('2025-04-16'),
+  PARTITION big_events_2025_04b FOR VALUES FROM ('2025-04-16') TO ('2025-05-01'));
+```
+
+```text
+ERROR:  syntax error at or near "SPLIT"
+LINE 1: ALTER TABLE big_events SPLIT PARTITION big_events_2025_04 IN...
+                               ^
+```
+
+## Reading AI-generated code
+
+An assistant is asked for a partitioned sessions table, spreading rows over four hash partitions. It writes the parent and the first two partitions, and its comment claims all four exist:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "sessions are spread evenly across 4 hash partitions"
+CREATE TABLE user_sessions (id bigint NOT NULL, token text NOT NULL) PARTITION BY HASH (id);
+CREATE TABLE user_sessions_0 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE user_sessions_1 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 1);`}>
+
+`MODULUS 4` means four buckets, and only remainders 0 and 1 have a partition. PostgreSQL does not complain when the tables are created; it fails when a row hashes to a missing bucket, and the whole statement fails, not just that row:
+
+```sql
+-- sql/user-sessions.sql
+CREATE TABLE user_sessions (id bigint NOT NULL, token text NOT NULL) PARTITION BY HASH (id);
+CREATE TABLE user_sessions_0 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE user_sessions_1 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+```
+
+```sql
+-- @expect-error 23514
+INSERT INTO user_sessions SELECT g, 'x' FROM generate_series(1, 8) g;
+```
+
+```text
+ERROR:  no partition of relation "user_sessions" found for row
+DETAIL:  Partition key of the failing row contains (id) = (2).
+```
+
+The fix is to create every remainder. With all four in place the same insert succeeds and rows spread over the buckets:
+
+```sql
+-- sql/user-sessions-fixed.sql
+CREATE TABLE user_sessions_2 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+CREATE TABLE user_sessions_3 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+INSERT INTO user_sessions SELECT g, 'x' FROM generate_series(1, 8) g;
+SELECT tableoid::regclass AS partition, count(*) FROM user_sessions GROUP BY 1 ORDER BY 1;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 8
+    partition    | count 
+-----------------+-------
+ user_sessions_0 |     1
+ user_sessions_1 |     3
+ user_sessions_2 |     1
+ user_sessions_3 |     3
+(4 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A partitioned table is a filing cabinet with a label on each drawer. The parent is the label rule; the partitions are the drawers. Pruning is opening only the drawers whose label can match; a bulk delete of a whole drawer is taking it out of the cabinet instead of removing papers one by one. The rule that every unique key must contain the label column is the price of not searching all drawers to check for duplicates.
 
 ## Tips / gotchas
 
 - Choose the partition key to match your dominant query pattern. If you query by date, partition by date so pruning can kick in.
 - Pruning only happens when the partition key appears in the `WHERE` clause. A query that filters on something else scans all partitions.
-- Create future partitions ahead of time, or automate it. An insert with no matching partition fails unless you have a default partition.
-- Dropping old data by detaching or dropping a whole partition is dramatically faster and lighter than a row-by-row `DELETE`.
-- Index the partitions, not just the parent. An index defined on the partitioned parent is automatically created on each partition, which is the easy way to keep them consistent.
+- Create future partitions ahead of time, or automate it. An insert with no matching partition fails unless you have a default partition, and a default partition full of rows makes creating the missing partition hard.
+- Dropping old data by detaching or dropping a whole partition is far faster and lighter than a row-by-row `DELETE`.
+- Every unique or primary key must include the partition key; plan for that before you partition an existing table.
+- Hash partitions need every remainder; range partitions need their gaps covered.
 
 <Callout title="Same table, smaller problems">
 Partitioning does not make a table smaller — your data is just as big. It makes each *operation* smaller by ensuring queries, indexes, and bulk deletes touch only the slice they need. The skill is picking a partition key that matches how you actually query, so the planner can prune everything else away.
@@ -138,20 +643,17 @@ Partitioning does not make a table smaller — your data is just as big. It make
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Partitioning a large table | Faster maintenance (vacuum/index rebuild per partition), old data can be dropped as a group almost instantly | Queries must be designed around the partition key; more tables to manage |
+| Partitioning a large table | Retiring data in milliseconds instead of a 92 ms delete plus vacuum, less WAL, smaller per-partition indexes and maintenance | Queries must be designed around the partition key; unique keys must include it; more tables to manage; no automatic speed-up (19 ms vs 14 ms above) |
+| Default partition | Nothing is ever rejected | Blocks creating overlapping partitions until it is emptied; hides missing-partition bugs |
 | No partitioning (single table) | Simple query and schema, no partition key to think about | Maintenance keeps getting slower as the table grows; deleting old data means row-by-row `DELETE` |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Partitioning a table while it is still small, before it needs it** — this buys complexity with no benefit yet. Wait until the table is genuinely large (hundreds of millions of rows) before partitioning.
-- **Choosing a partition key that most queries do not filter on** — the planner cannot prune and ends up scanning every partition anyway. Pick a key that matches the real query pattern.
-- **Forgetting to create a default partition** — inserting a row that matches no partition fails immediately unless a default partition exists to catch it.
-
-> 💡 Real-world example
->
-> **Large social platforms** — partition or shard enormous tables like posts or events by time or by user ID, so dropping or archiving an old partition is a near-instant metadata-level operation instead of a row-by-row `DELETE`.
->
-> **Time-series/event logging platforms** — systems storing large volumes of logs or metrics commonly use range partitioning by day or month, so a retention policy can just drop a partition instead of a full-table scanning delete.
+- **"Partitioning makes queries faster."** Only when pruning removes work an index would not; the month count above was no faster.
+- **"The parent table stores the rows."** It stores none; `tableoid` shows the partition that does.
+- **"A primary key on id is still enforced."** It must include the partition key, so `id` alone is not unique across partitions.
+- **"A default partition is a safe catch-all."** It stops you creating the partition those rows belong in until you move them.
+- **"There is a SPLIT PARTITION command."** Not in 18.6 (syntax error above).
 
 export const quizPartitioning = [
   {
@@ -163,6 +665,7 @@ export const quizPartitioning = [
       'The size of the row in bytes',
     ],
     answer: 1,
+    explain: '`tableoid::regclass` in the lesson shows each row in the partition whose range or list contains its key.',
   },
   {
     q: 'Partition pruning lets the planner skip partitions only when...',
@@ -173,6 +676,7 @@ export const quizPartitioning = [
       'The query uses ORDER BY',
     ],
     answer: 1,
+    explain: 'The February query read only `events_2025_q1`; the query on `kind` read every partition.',
   },
   {
     q: 'For which workload is partitioning most clearly worthwhile?',
@@ -183,6 +687,29 @@ export const quizPartitioning = [
       'Any table, since partitioning is always faster',
     ],
     answer: 1,
+    explain: 'Dropping a month took about 5 milliseconds and 2 MB of WAL versus a 92 ms delete, 14 MB of WAL and a vacuum. The single-month count was not faster.',
+  },
+  {
+    q: 'You try ALTER TABLE events ADD PRIMARY KEY (id) on a table partitioned by created_at. What happens?',
+    options: [
+      'It succeeds and enforces uniqueness across all partitions',
+      'It fails: the key must include the partition key column',
+      'It succeeds but only checks the newest partition',
+      'It silently creates a non-unique index',
+    ],
+    answer: 1,
+    explain: 'The error is `unique constraint on partitioned table must include all partitioning columns` (SQLSTATE 0A000). Each partition can only enforce uniqueness inside itself.',
+  },
+  {
+    q: 'A HASH-partitioned table with MODULUS 4 has partitions only for remainders 0 and 1. What happens on INSERT of 8 rows?',
+    options: [
+      'Rows for missing remainders are dropped silently',
+      'They go to the parent table',
+      'The whole INSERT fails with no partition of relation found for row',
+      'PostgreSQL creates the missing partitions',
+    ],
+    answer: 2,
+    explain: 'The failing row was id 2, and none of the 8 rows were inserted (SQLSTATE 23514).',
   },
 ];
 

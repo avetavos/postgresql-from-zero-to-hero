@@ -1,6 +1,6 @@
 ---
 title: Partitioning
-description: แบ่ง table เชิงตรรกะขนาดมหึมาหนึ่ง table ออกเป็น partition ทางกายภาพจำนวนมากด้วย declarative PARTITION BY RANGE, LIST, และ HASH ให้ planner ทำ prune partition และเรียนรู้ว่า partitioning ช่วยได้จริงเมื่อใด
+description: แบ่ง table ตรรกะใหญ่ยักษ์เป็นหลาย partition ทางกายภาพด้วย PARTITION BY RANGE, LIST และ HASH แบบ declarative พิสูจน์ pruning ด้วย plan จริง และวัดว่า partitioning ให้และไม่ให้อะไร
 sidebar:
   order: 4
 ---
@@ -10,179 +10,706 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-table บาง table โตขึ้นไม่มีขีดจำกัด table ของ event, log line, หรือค่าจาก sensor สามารถถึงพันล้าน row ได้ และเมื่อขนาดเท่านั้นทุกอย่างก็ยากขึ้น: index พองตัว, งาน maintenance รันเป็นชั่วโมง, และการลบข้อมูลเก่าก็ lock table ไว้นานแสนนาน **Partitioning** จัดการเรื่องนี้ด้วยการแบ่ง table เชิงตรรกะขนาดมหึมาหนึ่ง table ออกเป็น table ทางกายภาพที่เล็กกว่าหลาย table โดยที่ query ของคุณยังเห็นเป็น table เดียวเหมือนเดิม
+บาง table โตไม่มีที่สิ้นสุด table ของ event, log หรือค่าจากเซนเซอร์อาจถึงหลายพันล้าน row และที่ขนาดนั้นทุกอย่างยากขึ้น: index บวม งานดูแลรักษารันเป็นชั่วโมง และการลบข้อมูลเก่าแพง **Partitioning** จัดการด้วยการแบ่ง table ตรรกะก้อนใหญ่เป็น table ทางกายภาพเล็กหลายอัน ในขณะที่ query ของคุณยังเห็นเป็น table เดียว ([docs](https://www.postgresql.org/docs/18/ddl-partitioning.html))
 
-**Declarative partitioning** ของ PostgreSQL ให้คุณกำหนดกฎการแบ่งเพียงครั้งเดียว คุณเขียนและอ่านจาก table parent ตามปกติ และ server จะ route แต่ละ row ไปยัง partition ที่ถูกต้องให้เองเบื้องหลัง
+**declarative partitioning** ของ PostgreSQL ให้คุณนิยามกฎการแบ่งครั้งเดียว คุณเขียนและอ่านที่ table แม่เหมือนเดิม และเซิร์ฟเวอร์ส่งแต่ละ row ไปยัง partition ที่ถูกต้องเบื้องหลัง
 
-## table เชิงตรรกะหนึ่ง partition จำนวนมาก
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) ตัวอย่างเป็น fence `sql` ที่รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ตัวเลขเวลามาจาก table 3 ล้าน row บน Mac เครื่องนี้ และมีแค่สัดส่วนที่ติดตัวไปยังเครื่องของคุณ
 
-คุณประกาศ table parent ให้เป็นแบบ partitioned แล้วกำหนด **partition key** ให้ — column ที่ค่าในนั้นตัดสินว่า row หนึ่งไปอยู่ partition ไหน ตัว parent เองไม่เก็บข้อมูลเลย แต่ทำหน้าที่เป็นชั้น routing อยู่เหนือ child partition
+## หนึ่ง table ตรรกะ หลาย partition
+
+คุณประกาศ table แม่เป็น partitioned และให้ **partition key** — column ที่ค่าของมันตัดสินว่า row ไหนอยู่ partition ไหน table แม่ไม่เก็บข้อมูลเอง มันเป็นชั้นส่งต่อเหนือ partition ลูก
 
 export const partDiagram = `flowchart TD
-  Parent[events - logical parent table] --> P1[events_2024_q1]
-  Parent --> P2[events_2024_q2]
-  Parent --> P3[events_2024_q3]
-  Parent --> P4[events_2024_q4]`;
+  Parent[events - logical parent table] --> P1[events_2025_q1]
+  Parent --> P2[events_2025_q2]
+  Parent --> P3[events_2025_q3]
+  Parent --> P4[events_2025_q4]`;
 
-<Mermaid code={partDiagram} title="table เชิงตรรกะหนึ่งที่ถูก route ข้ามหลาย partition" />
+<Mermaid code={partDiagram} title="หนึ่ง table ตรรกะที่ส่งต่อไปหลาย partition" />
 
-มีกลยุทธ์ partitioning สามแบบ เลือกตามวิธีที่ key แมปไปยัง partition
+มีสามกลยุทธ์ เลือกตามวิธีที่ key แมปไปยัง partition
 
-| กลยุทธ์   | row ถูกกำหนดโดย...                                  | เหมาะสำหรับ                                |
+| กลยุทธ์ | row ถูกกำหนดด้วย... | เหมาะกับ |
 |----------|--------------------------------------------------|-------------------------------------------|
-| RANGE    | ค่าที่ตกอยู่ในช่วงหนึ่ง เช่นช่วงวันที่             | ข้อมูล time-series ที่ partition ตามเดือน  |
-| LIST     | key ที่ตรงกับค่าหนึ่งในชุดค่าที่กำหนดตายตัว        | การแบ่งตาม region, status, หรือ tenant     |
-| HASH     | hash ของ key ที่กระจายอย่างสม่ำเสมอข้าม bucket    | การกระจายอย่างสม่ำเสมอเมื่อไม่มีช่วงตามธรรมชาติ |
+| RANGE    | ค่าที่ตกในช่วง เช่นช่วงวันที่ | ข้อมูล time-series แบ่งตามเดือน     |
+| LIST     | key ตรงกับหนึ่งในชุดค่าคงที่    | แบ่งตามภูมิภาค สถานะ หรือ tenant    |
+| HASH     | hash ของ key กระจายเท่า ๆ กันไปยัง bucket | กระจายเท่ากันเมื่อไม่มีช่วงตามธรรมชาติ  |
 
-## range partitioning table time-series
+## Range partitioning table time-series
 
-กรณีที่พบบ่อยที่สุดคือ range partitioning ตามเวลา คุณประกาศ parent ด้วย `PARTITION BY RANGE` แล้วสร้าง child partition หนึ่งตัวต่อหนึ่งช่วงเวลา
+กรณีที่พบบ่อยที่สุดคือ range partitioning ตามเวลา คุณประกาศ table แม่ด้วย `PARTITION BY RANGE` แล้วสร้าง partition ลูกหนึ่งอันต่อช่วง
 
 ```sql
--- Parent table, partitioned by the created_at timestamp
+-- sql/setup.sql
 CREATE TABLE events (
-  id          bigint GENERATED ALWAYS AS IDENTITY,
-  created_at  timestamptz NOT NULL,
-  kind        text NOT NULL,
-  payload     jsonb
+  id         bigint GENERATED ALWAYS AS IDENTITY,
+  created_at timestamptz NOT NULL,
+  kind       text NOT NULL,
+  payload    jsonb
 ) PARTITION BY RANGE (created_at);
 
--- One partition per quarter; the bounds are inclusive lower, exclusive upper
-CREATE TABLE events_2024_q1 PARTITION OF events
-  FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
-
-CREATE TABLE events_2024_q2 PARTITION OF events
-  FOR VALUES FROM ('2024-04-01') TO ('2024-07-01');
+-- one partition per quarter; the lower bound is inclusive, the upper bound exclusive
+CREATE TABLE events_2025_q1 PARTITION OF events
+  FOR VALUES FROM ('2025-01-01') TO ('2025-04-01');
+CREATE TABLE events_2025_q2 PARTITION OF events
+  FOR VALUES FROM ('2025-04-01') TO ('2025-07-01');
 ```
 
-การ insert เข้า `events` จะลง row ใน partition ที่ตรงกันโดยอัตโนมัติ
+การ insert เข้า `events` ส่งแต่ละ row ไป partition ที่ตรงกันอัตโนมัติ `tableoid` แสดงว่าอันไหน:
 
 ```sql
--- This row routes itself into events_2024_q1
+-- sql/route.sql
 INSERT INTO events (created_at, kind, payload)
-VALUES ('2024-02-14', 'signup', '{"plan": "pro"}');
+VALUES ('2025-02-14', 'signup', '{"plan": "pro"}'), ('2025-05-01', 'login', NULL);
+
+SELECT tableoid::regclass AS partition, id, created_at::date, kind FROM events ORDER BY id;
 ```
 
-ข้อสังเกตเกี่ยวกับ partition key: ต้องเป็นส่วนหนึ่งของ primary key บน table ที่ partition ไว้ จึงเป็นเหตุผลที่ตัวอย่างใช้ `GENERATED ALWAYS AS IDENTITY` โดยไม่มี `PRIMARY KEY` แบบเดี่ยวบน `id` เพียงตัวเดียว
+```text
+INSERT 0 2
+   partition    | id | created_at |  kind  
+----------------+----+------------+--------
+ events_2025_q1 |  1 | 2025-02-14 | signup
+ events_2025_q2 |  2 | 2025-05-01 | login
+(2 rows)
+```
 
-## list และ hash partitioning
-
-`PARTITION BY LIST` กำหนด row ด้วยค่า key ที่ตรงกันพอดี — สะดวกเมื่อมีหมวดหมู่ตามธรรมชาติอยู่
+row ที่ไม่เข้า partition ใดถูกปฏิเสธ และทั้ง statement ล้มเหลว:
 
 ```sql
+-- @expect-error 23514
+INSERT INTO events (created_at, kind) VALUES ('2025-08-01', 'late');
+```
+
+```text
+ERROR:  no partition of relation "events" found for row
+DETAIL:  Partition key of the failing row contains (created_at) = (2025-08-01 00:00:00+00).
+```
+
+### partition key ต้องเป็นส่วนหนึ่งของทุก unique key
+
+primary key บน partitioned table ต้องรวม partition key เพราะแต่ละ partition บังคับความ unique ได้แค่ภายในตัวเอง ([docs](https://www.postgresql.org/docs/18/ddl-partitioning.html)) primary key บน `id` อย่างเดียวถูกปฏิเสธ:
+
+```sql
+-- @expect-error 0A000
+ALTER TABLE events ADD PRIMARY KEY (id);
+```
+
+```text
+ERROR:  unique constraint on partitioned table must include all partitioning columns
+DETAIL:  PRIMARY KEY constraint on table "events" lacks column "created_at" which is part of the partition key.
+```
+
+`(id, created_at)` ใช้ได้ และทุก partition ได้ index ของตัวเอง:
+
+```sql
+-- sql/primary-key.sql
+ALTER TABLE events ADD PRIMARY KEY (id, created_at);
+\d events_2025_q1
+```
+
+```text
+ALTER TABLE
+                                Table "public.events_2025_q1"
+   Column   |           Type           | Collation | Nullable |           Default            
+------------+--------------------------+-----------+----------+------------------------------
+ id         | bigint                   |           | not null | generated always as identity
+ created_at | timestamp with time zone |           | not null | 
+ kind       | text                     |           | not null | 
+ payload    | jsonb                    |           |          | 
+Partition of: events FOR VALUES FROM ('2025-01-01 00:00:00+00') TO ('2025-04-01 00:00:00+00')
+Indexes:
+    "events_2025_q1_pkey" PRIMARY KEY, btree (id, created_at)
+```
+
+ผลที่ต้องจำ: ฐานข้อมูลไม่บังคับความ unique ของ `id` อย่างเดียวอีกแล้ว identity column ยังแจกค่าที่ต่างกัน แต่ไม่มีอะไรกันแอปไม่ให้ insert `id` ซ้ำด้วย `created_at` ที่ต่างกัน
+
+## List และ hash partitioning
+
+`PARTITION BY LIST` กำหนด row ตามค่า key ที่แน่นอน — สะดวกเมื่อมีหมวดหมู่ตามธรรมชาติ
+
+```sql
+-- sql/list.sql
 CREATE TABLE customers (
-  id      bigint GENERATED ALWAYS AS IDENTITY,
-  region  text NOT NULL,
-  name    text NOT NULL
+  id     bigint GENERATED ALWAYS AS IDENTITY,
+  region text NOT NULL,
+  name   text NOT NULL
 ) PARTITION BY LIST (region);
 
-CREATE TABLE customers_emea PARTITION OF customers
-  FOR VALUES IN ('eu', 'me', 'africa');
+CREATE TABLE customers_emea PARTITION OF customers FOR VALUES IN ('eu', 'me', 'africa');
+CREATE TABLE customers_amer PARTITION OF customers FOR VALUES IN ('us', 'ca', 'latam');
 
-CREATE TABLE customers_amer PARTITION OF customers
-  FOR VALUES IN ('us', 'ca', 'latam');
+INSERT INTO customers (region, name) VALUES ('eu', 'Ada'), ('us', 'Linus'), ('latam', 'Grace');
+SELECT tableoid::regclass AS partition, region, name FROM customers ORDER BY id;
 ```
 
-`PARTITION BY HASH` กระจาย row อย่างสม่ำเสมอข้าม bucket จำนวนที่กำหนดตายตัวเมื่อไม่มี range หรือ list ใดที่สมเหตุสมผล
-
-```sql
-CREATE TABLE sessions (
-  id       bigint NOT NULL,
-  token    text NOT NULL
-) PARTITION BY HASH (id);
-
-CREATE TABLE sessions_0 PARTITION OF sessions
-  FOR VALUES WITH (MODULUS 4, REMAINDER 0);
-
-CREATE TABLE sessions_1 PARTITION OF sessions
-  FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 3
+   partition    | region | name  
+----------------+--------+-------
+ customers_emea | eu     | Ada
+ customers_amer | us     | Linus
+ customers_amer | latam  | Grace
+(3 rows)
 ```
 
-## partition pruning
-
-ผลตอบแทนที่แท้จริงคือ **partition pruning**: เมื่อ clause `WHERE` ของ query กรองบน partition key planner จะข้าม partition ทุกตัวที่ไม่อาจมี row ที่ตรงกัน และ scan เฉพาะตัวที่เกี่ยวข้องเท่านั้น
+`PARTITION BY HASH` กระจาย row เท่า ๆ กันไปยังจำนวน bucket คงที่เมื่อไม่มี range หรือ list ที่สมเหตุสมผล ต้องมีครบทุก remainder (0 ถึง 3 สำหรับ `MODULUS 4`) ไม่งั้นบาง row ไม่มีที่ไป (bug ท้ายบทเรียน):
 
 ```sql
--- The planner reads only events_2024_q1, not the whole table
-EXPLAIN
+-- sql/hash.sql
+CREATE TABLE sessions (id bigint NOT NULL, token text NOT NULL) PARTITION BY HASH (id);
+CREATE TABLE sessions_0 PARTITION OF sessions FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE sessions_1 PARTITION OF sessions FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+CREATE TABLE sessions_2 PARTITION OF sessions FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+CREATE TABLE sessions_3 PARTITION OF sessions FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+
+INSERT INTO sessions SELECT g, 'token-' || g FROM generate_series(1, 1000) g;
+SELECT tableoid::regclass AS partition, count(*) FROM sessions GROUP BY 1 ORDER BY 1;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 1000
+ partition  | count 
+------------+-------
+ sessions_0 |   259
+ sessions_1 |   234
+ sessions_2 |   276
+ sessions_3 |   231
+(4 rows)
+```
+
+1000 session ตกใน 4 partition ที่ 231 ถึง 276 row: เท่ากันโดยประมาณ ไม่เท่ากันเป๊ะ
+
+## Partition pruning
+
+ประโยชน์จริงคือ **partition pruning**: เมื่อ `WHERE` ของ query กรองตาม partition key planner ข้ามทุก partition ที่ไม่มีทางมี row ที่ตรง plan แรกด้านล่างขอเดือนกุมภาพันธ์และอ่านแค่ Q1 plan ที่สองกรองตาม column ที่ไม่ใช่ key จึงต้องอ่านทุก partition plan ที่สามทำซ้ำอันแรกโดยปิด `enable_partition_pruning` สวิตช์เพื่อการสอนที่แสดงว่า pruning ประหยัดอะไร:
+
+```sql
+-- sql/pruning.sql
+EXPLAIN (COSTS OFF)
 SELECT count(*) FROM events
-WHERE created_at >= '2024-02-01' AND created_at < '2024-03-01';
+WHERE created_at >= '2025-02-01' AND created_at < '2025-03-01';
+
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM events WHERE kind = 'signup';
+
+-- teaching switch: pruning off, same query as the first one
+SET enable_partition_pruning = off;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM events
+WHERE created_at >= '2025-02-01' AND created_at < '2025-03-01';
+RESET enable_partition_pruning;
 ```
 
-แผนแสดงเพียง partition ของไตรมาสเดียวที่ถูก scan ถ้าคุณกลับไป query โดยไม่กล่าวถึง `created_at` planner ก็ไม่มีทางจำกัดให้แคบลงและต้อง scan ทุก partition — ซึ่งช้ากว่า table เดียวที่ทำ index ดี Pruning คือจุดประสงค์ทั้งหมด และ pruning ต้องการ partition key ใน clause `WHERE`
+```text
+                                                                         QUERY PLAN                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Seq Scan on events_2025_q1 events
+         Filter: ((created_at >= '2025-02-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-03-01 00:00:00+00'::timestamp with time zone))
+(3 rows)
 
-## partitioning ช่วยเมื่อใด
+                   QUERY PLAN                    
+-------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Seq Scan on events_2025_q1 events_1
+               Filter: (kind = 'signup'::text)
+         ->  Seq Scan on events_2025_q2 events_2
+               Filter: (kind = 'signup'::text)
+(6 rows)
 
-Partitioning ไม่ได้มาฟรี: มี table ให้จัดการมากขึ้น มีชั้น routing ในทุกการเขียน และ query ที่มองข้าม key อาจช้าลงได้ จะคุ้มค่าก็ต่อเมื่อ:
+SET
+                                                                            QUERY PLAN                                                                            
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Append
+         ->  Seq Scan on events_2025_q1 events_1
+               Filter: ((created_at >= '2025-02-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-03-01 00:00:00+00'::timestamp with time zone))
+         ->  Seq Scan on events_2025_q2 events_2
+               Filter: ((created_at >= '2025-02-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-03-01 00:00:00+00'::timestamp with time zone))
+(6 rows)
 
-- table ใหญ่จริง ๆ — คิดถึงหลายร้อยล้าน row ขึ้นไป
-- query ส่วนใหญ่กรองบนมิติเดียวที่คุณ partition ตามได้ ซึ่งโดยปกติคือเวลา
-- คุณทิ้งข้อมูลเก่าเป็นกลุ่มก้อน การ detach หรือ drop ทั้ง partition แทบจะทันที เทียบกับ `DELETE` ที่ scan และ lock หลายล้าน row
+RESET
+```
 
-ไม่กี่ล้าน row พร้อม index ที่ดีไม่ต้องการ partitioning การรีบใส่ partitioning เร็วเกินไปคือการซื้อความซับซ้อนมาเปล่า ๆ
+pruning ต้องมี partition key ใน `WHERE` มันยังใช้ได้เมื่อค่ารู้แค่ตอนรัน เช่น prepared statement การบังคับ generic plan (plan ที่ไม่รู้ค่า parameter) แสดงมัน: `Subplans Removed: 1` แปลว่า executor ทิ้ง partition หนึ่งหลังเห็น parameter
+
+```sql
+-- sql/runtime-pruning.sql
+SET plan_cache_mode = force_generic_plan;  -- teaching switch: a plan that does not know the parameter values
+PREPARE by_range (timestamptz, timestamptz) AS
+  SELECT count(*) FROM events WHERE created_at >= $1 AND created_at < $2;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXECUTE by_range('2025-02-01', '2025-03-01');
+RESET plan_cache_mode;
+```
+
+```text
+SET
+PREPARE
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Append (actual rows=1.00 loops=1)
+         Subplans Removed: 1
+         ->  Seq Scan on events_2025_q1 events_1 (actual rows=1.00 loops=1)
+               Filter: ((created_at >= $1) AND (created_at < $2))
+(5 rows)
+
+RESET
+```
+
+## Default partition และกับดักในนั้น
+
+partition `DEFAULT` รับ row ที่ไม่เข้าที่อื่น ซึ่งเปลี่ยน error "no partition found" เป็นการเก็บเงียบ ๆ ข้อควรระวัง: เมื่อมันเก็บ row แล้ว คุณสร้าง partition ที่ช่วงของมันครอบ row นั้นไม่ได้:
+
+```sql
+-- sql/default.sql
+CREATE TABLE events_default PARTITION OF events DEFAULT;
+INSERT INTO events (created_at, kind) VALUES ('2025-08-01', 'late') RETURNING tableoid::regclass AS partition, id;
+```
+
+```text
+CREATE TABLE
+   partition    | id 
+----------------+----
+ events_default |  4
+(1 row)
+
+INSERT 0 1
+```
+
+row เดือนสิงหาคมตกใน `events_default` (id 4 เพราะ insert ที่ล้มก่อนหน้าใช้ id 3 ไปแล้ว) การสร้าง partition Q3 ตอนนี้ถูกปฏิเสธ:
+
+```sql
+-- @expect-error 23514
+CREATE TABLE events_2025_q3 PARTITION OF events
+  FOR VALUES FROM ('2025-07-01') TO ('2025-10-01');
+```
+
+```text
+ERROR:  updated partition constraint for default partition "events_default" would be violated by some row
+```
+
+ทางออกคือ detach default partition สร้าง partition ใหม่ ย้าย row ข้าม และ attach default กลับ ทั้งหมดใน transaction เดียว สังเกต `OVERRIDING SYSTEM VALUE`: column `id` เป็น `GENERATED ALWAYS` การคัดลอก row พร้อม id เดิมจึงต้องใช้มัน
+
+```sql
+-- sql/default-fix.sql
+BEGIN;
+ALTER TABLE events DETACH PARTITION events_default;
+CREATE TABLE events_2025_q3 PARTITION OF events
+  FOR VALUES FROM ('2025-07-01') TO ('2025-10-01');
+INSERT INTO events OVERRIDING SYSTEM VALUE
+  SELECT * FROM events_default WHERE created_at >= '2025-07-01' AND created_at < '2025-10-01';
+DELETE FROM events_default WHERE created_at >= '2025-07-01' AND created_at < '2025-10-01';
+ALTER TABLE events ATTACH PARTITION events_default DEFAULT;
+COMMIT;
+
+SELECT tableoid::regclass AS partition, id, kind FROM events ORDER BY id;
+```
+
+```text
+BEGIN
+ALTER TABLE
+CREATE TABLE
+INSERT 0 1
+DELETE 1
+ALTER TABLE
+COMMIT
+   partition    | id |  kind  
+----------------+----+--------
+ events_2025_q1 |  1 | signup
+ events_2025_q2 |  2 | login
+ events_2025_q3 |  4 | late
+(3 rows)
+```
+
+## Index, attach และ detach
+
+index ที่สร้างบน table แม่ถูกสร้างบนทุก partition รวมถึง partition ที่เพิ่มทีหลัง:
+
+```sql
+-- sql/partition-index.sql
+CREATE INDEX events_kind_idx ON events (kind);
+SELECT c.relname AS index_name, i.indrelid::regclass AS on_table
+FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+WHERE c.relname LIKE '%kind_idx' ORDER BY 2;
+SELECT * FROM pg_partition_tree('events');
+```
+
+```text
+CREATE INDEX
+       index_name        |    on_table    
+-------------------------+----------------
+ events_kind_idx         | events
+ events_2025_q1_kind_idx | events_2025_q1
+ events_2025_q2_kind_idx | events_2025_q2
+ events_default_kind_idx | events_default
+ events_2025_q3_kind_idx | events_2025_q3
+(5 rows)
+
+     relid      | parentrelid | isleaf | level 
+----------------+-------------+--------+-------
+ events         |             | f      |     0
+ events_2025_q1 | events      | t      |     1
+ events_2025_q2 | events      | t      |     1
+ events_default | events      | t      |     1
+ events_2025_q3 | events      | t      |     1
+(5 rows)
+```
+
+`ATTACH PARTITION` เปลี่ยน table ที่มีอยู่เป็น partition PostgreSQL ต้องพิสูจน์ว่าทุก row เข้ากับขอบเขต ซึ่งปกติหมายถึงสแกน table ภายใต้ lock; `CHECK` constraint ที่บ่งบอกขอบเขตอยู่แล้วทำให้ข้ามการสแกนได้ `DETACH PARTITION` ย้อนกลับ:
+
+```sql
+-- sql/attach.sql
+CREATE TABLE events_2025_q4 (LIKE events INCLUDING DEFAULTS INCLUDING INDEXES);
+-- a CHECK constraint that matches the bounds lets ATTACH skip the validation scan
+ALTER TABLE events_2025_q4 ADD CONSTRAINT q4_bounds
+  CHECK (created_at >= '2025-10-01' AND created_at < '2026-01-01');
+ALTER TABLE events ATTACH PARTITION events_2025_q4
+  FOR VALUES FROM ('2025-10-01') TO ('2026-01-01');
+```
+
+```sql
+-- sql/detach.sql
+ALTER TABLE events DETACH PARTITION events_2025_q4;
+SELECT relname, relispartition FROM pg_class WHERE relname = 'events_2025_q4';
+```
+
+```text
+ALTER TABLE
+    relname     | relispartition 
+----------------+----------------
+ events_2025_q4 | f
+(1 row)
+```
+
+`DETACH PARTITION ... CONCURRENTLY` ถือ lock ที่อ่อนกว่าและไม่บล็อก query นาน แต่มีข้อจำกัด ([docs](https://www.postgresql.org/docs/18/sql-altertable.html)) หนึ่งในนั้นเราเพิ่งสร้าง: มันปฏิเสธที่จะรันขณะ table มี default partition
+
+```sql
+-- @expect-error 55000
+ALTER TABLE events DETACH PARTITION events_2025_q4 CONCURRENTLY;
+```
+
+```text
+ERROR:  cannot detach partitions concurrently when a default partition exists
+```
+
+## Partitioning ให้อะไร วัดจริง
+
+partition Q4 ข้างบนเล็กมาก ทีนี้ขนาดสมจริง: `big_events` แบ่งตามเดือน และ `flat_events` เก็บ 3 ล้าน row เดียวกันใน table ธรรมดาอันเดียว ทั้งคู่มี index บน `created_at`:
+
+```sql
+-- sql/big-events.sql
+CREATE TABLE big_events (
+  id         bigint GENERATED ALWAYS AS IDENTITY,
+  created_at timestamptz NOT NULL,
+  kind       text NOT NULL
+) PARTITION BY RANGE (created_at);
+
+SELECT format('CREATE TABLE big_events_2025_%s PARTITION OF big_events FOR VALUES FROM (%L) TO (%L)',
+              to_char(m, 'MM'), m, m + interval '1 month')
+FROM generate_series('2025-01-01'::timestamptz, '2025-12-01', interval '1 month') AS m \gexec
+
+CREATE TABLE flat_events (LIKE big_events INCLUDING DEFAULTS);   -- the same rows, one plain table
+
+INSERT INTO big_events (created_at, kind)
+SELECT '2025-01-01'::timestamptz + g * interval '10 seconds', 'click' FROM generate_series(0, 2999999) g;
+INSERT INTO flat_events SELECT * FROM big_events;
+CREATE INDEX ON big_events (created_at);
+CREATE INDEX ON flat_events (created_at);
+VACUUM ANALYZE big_events;
+VACUUM ANALYZE flat_events;
+SELECT pg_size_pretty(pg_total_relation_size('flat_events')) AS flat_total,
+       pg_size_pretty(pg_total_relation_size('big_events_2025_03')) AS one_month;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 3000000
+INSERT 0 3000000
+CREATE INDEX
+CREATE INDEX
+VACUUM
+VACUUM
+ flat_total | one_month 
+------------+-----------
+ 214 MB     | 19 MB
+(1 row)
+```
+
+**query ตาม key:** นับหนึ่งเดือน
+
+```sql
+-- sql/big-query.sql
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT count(*) FROM big_events WHERE created_at >= '2025-06-01' AND created_at < '2025-07-01';
+
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT count(*) FROM flat_events WHERE created_at >= '2025-06-01' AND created_at < '2025-07-01';
+```
+
+```text
+                                                                               QUERY PLAN                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=17.191..18.694 rows=1.00 loops=1)
+   ->  Gather (actual time=16.736..18.688 rows=2.00 loops=1)
+         Workers Planned: 1
+         Workers Launched: 1
+         ->  Partial Aggregate (actual time=16.040..16.040 rows=1.00 loops=2)
+               ->  Parallel Seq Scan on big_events_2025_06 big_events (actual time=0.099..11.747 rows=129600.00 loops=2)
+                     Filter: ((created_at >= '2025-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-07-01 00:00:00+00'::timestamp with time zone))
+ Planning Time: 0.595 ms
+ Execution Time: 18.723 ms
+(9 rows)
+
+                                                                                 QUERY PLAN                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=12.368..14.156 rows=1.00 loops=1)
+   ->  Gather (actual time=12.232..14.149 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate (actual time=10.935..10.935 rows=1.00 loops=3)
+               ->  Parallel Index Only Scan using flat_events_created_at_idx on flat_events (actual time=0.080..8.002 rows=86400.00 loops=3)
+                     Index Cond: ((created_at >= '2025-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2025-07-01 00:00:00+00'::timestamp with time zone))
+                     Heap Fetches: 0
+                     Index Searches: 1
+ Planning Time: 0.131 ms
+ Execution Time: 14.180 ms
+(11 rows)
+```
+
+pruning ทำหน้าที่ (อ่านหนึ่ง partition) แต่ table ที่แบ่งไม่เร็วกว่า: ราว 19 ms เทียบ 14 ms เพราะ index ของ table ธรรมดาแคบการค้นหาลงเหลือ row เดียวกันอยู่แล้ว partitioning ไม่ใช่การเร่งความเร็ว query ทั่วไป เอกสารบอกว่าประสิทธิภาพ query ปรับปรุงได้ "ในบางสถานการณ์" โดยเฉพาะเมื่อ row ที่เข้าถึงบ่อยส่วนใหญ่อยู่ในไม่กี่ partition
+
+**เลิกใช้ข้อมูลเก่า:** ที่ที่มันคุ้ม ลบเดือนมีนาคมจาก table แบน เทียบกับ detach แล้ว drop partition ของเดือนมีนาคม:
+
+```sql
+-- sql/drop-vs-delete.sql
+\timing on
+SELECT pg_current_wal_lsn() AS lsn0 \gset
+DELETE FROM flat_events WHERE created_at >= '2025-03-01' AND created_at < '2025-04-01';
+SELECT pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), :'lsn0')) AS wal_for_delete;
+VACUUM flat_events;
+
+SELECT pg_current_wal_lsn() AS lsn1 \gset
+ALTER TABLE big_events DETACH PARTITION big_events_2025_03 CONCURRENTLY;
+DROP TABLE big_events_2025_03;
+SELECT pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), :'lsn1')) AS wal_for_drop;
+\timing off
+```
+
+```text
+Timing is on.
+Time: 0.763 ms
+DELETE 267840
+Time: 91.629 ms
+ wal_for_delete 
+----------------
+ 14 MB
+(1 row)
+
+Time: 0.285 ms
+VACUUM
+Time: 42.519 ms
+Time: 0.238 ms
+ALTER TABLE
+Time: 2.380 ms
+DROP TABLE
+Time: 2.719 ms
+ wal_for_drop 
+--------------
+ 2143 kB
+(1 row)
+
+Time: 0.196 ms
+Timing is off.
+```
+
+`DELETE` ลบ 267 840 row ใน 92 ms เขียน WAL 14 MB และทิ้ง dead tuple ที่ `VACUUM` ต้องใช้ 43 ms เก็บกวาด (และตามที่บทเรียน MVCC แสดง ไฟล์ไม่หด) การ detach แล้ว drop partition ใช้รวมราว 5 มิลลิวินาที เขียน WAL น้อยกว่าเจ็ดเท่า (2 MB เทียบ 14 MB) และคืนพื้นที่ดิสก์ทันที ช่องว่างโตตามขนาดของสิ่งที่คุณลบ
+
+กฎเกณฑ์คร่าว ๆ ของเอกสารว่าเมื่อไรควร partition คือ "the size of the table should exceed the physical memory of the database server" ([docs](https://www.postgresql.org/docs/18/ddl-partitioning.html)) table ไม่กี่ล้าน row ที่มี index ดีไม่ต้องใช้
+
+อีกอย่างที่ไม่ต้องหา: `ALTER TABLE ... SPLIT PARTITION` และ `MERGE PARTITIONS` ไม่มีใน PostgreSQL 18.6:
+
+```sql
+-- @expect-error 42601
+ALTER TABLE big_events SPLIT PARTITION big_events_2025_04 INTO (
+  PARTITION big_events_2025_04a FOR VALUES FROM ('2025-04-01') TO ('2025-04-16'),
+  PARTITION big_events_2025_04b FOR VALUES FROM ('2025-04-16') TO ('2025-05-01'));
+```
+
+```text
+ERROR:  syntax error at or near "SPLIT"
+LINE 1: ALTER TABLE big_events SPLIT PARTITION big_events_2025_04 IN...
+                               ^
+```
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอ table sessions แบบ partitioned กระจาย row ไปสี่ hash partition มันเขียน table แม่และสอง partition แรก และคอมเมนต์อ้างว่ามีครบสี่:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "sessions are spread evenly across 4 hash partitions"
+CREATE TABLE user_sessions (id bigint NOT NULL, token text NOT NULL) PARTITION BY HASH (id);
+CREATE TABLE user_sessions_0 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE user_sessions_1 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 1);`}>
+
+`MODULUS 4` แปลว่าสี่ bucket และมี partition เฉพาะ remainder 0 และ 1 PostgreSQL ไม่ร้องเรียนตอนสร้าง table มันล้มเมื่อ row hash ไปยัง bucket ที่หายไป และทั้ง statement ล้ม ไม่ใช่แค่ row นั้น:
+
+```sql
+-- sql/user-sessions.sql
+CREATE TABLE user_sessions (id bigint NOT NULL, token text NOT NULL) PARTITION BY HASH (id);
+CREATE TABLE user_sessions_0 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE user_sessions_1 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+```
+
+```sql
+-- @expect-error 23514
+INSERT INTO user_sessions SELECT g, 'x' FROM generate_series(1, 8) g;
+```
+
+```text
+ERROR:  no partition of relation "user_sessions" found for row
+DETAIL:  Partition key of the failing row contains (id) = (2).
+```
+
+วิธีแก้คือสร้างทุก remainder เมื่อมีครบสี่ insert เดียวกันสำเร็จและ row กระจายไปตาม bucket:
+
+```sql
+-- sql/user-sessions-fixed.sql
+CREATE TABLE user_sessions_2 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+CREATE TABLE user_sessions_3 PARTITION OF user_sessions FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+INSERT INTO user_sessions SELECT g, 'x' FROM generate_series(1, 8) g;
+SELECT tableoid::regclass AS partition, count(*) FROM user_sessions GROUP BY 1 ORDER BY 1;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 8
+    partition    | count 
+-----------------+-------
+ user_sessions_0 |     1
+ user_sessions_1 |     3
+ user_sessions_2 |     1
+ user_sessions_3 |     3
+(4 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+partitioned table คือตู้เอกสารที่มีป้ายบนแต่ละลิ้นชัก table แม่คือกฎของป้าย partition คือลิ้นชัก pruning คือเปิดเฉพาะลิ้นชักที่ป้ายอาจตรง การลบทั้งลิ้นชักคือยกมันออกจากตู้แทนการดึงกระดาษทีละแผ่น กฎที่ทุก unique key ต้องมี column ของป้ายคือราคาของการไม่ต้องค้นทุกลิ้นชักเพื่อเช็คข้อมูลซ้ำ
 
 ## เคล็ดลับและข้อควรระวัง
 
-- เลือก partition key ให้ตรงกับ query pattern หลักของคุณ ถ้าคุณ query ตามวันที่ ก็ partition ตามวันที่เพื่อให้ pruning ทำงานได้
-- Pruning เกิดขึ้นเฉพาะเมื่อ partition key ปรากฏใน clause `WHERE` เท่านั้น query ที่กรองบนสิ่งอื่นจะ scan ทุก partition
-- สร้าง partition ในอนาคตไว้ล่วงหน้า หรือทำให้เป็นอัตโนมัติ การ insert ที่ไม่มี partition ตรงกันจะล้มเหลว เว้นแต่คุณจะมี default partition
-- การทิ้งข้อมูลเก่าด้วยการ detach หรือ drop ทั้ง partition เร็วและเบากว่า `DELETE` แบบทีละ row อย่างมหาศาล
-- ทำ index ที่ระดับ partition ไม่ใช่แค่ที่ parent ถ้าสร้าง index ไว้บน parent ที่ partition แล้ว PostgreSQL จะสร้างต่อลงไปในทุก partition ให้อัตโนมัติ เป็นวิธีง่าย ๆ ในการรักษาให้สอดคล้องกัน
+- เลือก partition key ให้ตรงกับรูปแบบ query หลัก ถ้า query ตามวันที่ ก็ partition ตามวันที่เพื่อให้ pruning ทำงาน
+- pruning เกิดเมื่อ partition key อยู่ใน `WHERE` เท่านั้น query ที่กรองตามอย่างอื่นสแกนทุก partition
+- สร้าง partition อนาคตล่วงหน้าหรือทำให้อัตโนมัติ insert ที่ไม่มี partition ตรงล้มเหลวถ้าไม่มี default partition และ default partition ที่เต็มไปด้วย row ทำให้การสร้าง partition ที่ขาดยาก
+- ทิ้งข้อมูลเก่าด้วยการ detach หรือ drop ทั้ง partition เร็วและเบากว่า `DELETE` ทีละ row มาก
+- ทุก unique หรือ primary key ต้องมี partition key วางแผนก่อน partition table ที่มีอยู่
+- hash partition ต้องมีทุก remainder; range partition ต้องครอบช่องว่าง
 
-<Callout title="table เดิม ปัญหาที่เล็กลง">
-Partitioning ไม่ได้ทำให้ table เล็กลง — ข้อมูลของคุณยังใหญ่เท่าเดิม แต่ทำให้แต่ละ *operation* เล็กลงด้วยการทำให้แน่ใจว่า query, index, และการ delete เป็นกลุ่มก้อนแตะเฉพาะส่วนที่ต้องการ ทักษะคือการเลือก partition key ที่ตรงกับวิธีที่คุณ query จริง ๆ เพื่อให้ planner ทำ prune ส่วนที่เหลือทิ้งไปได้
+<Callout title="table เดิม ปัญหาเล็กลง">
+partitioning ไม่ได้ทำให้ table เล็กลง ข้อมูลของคุณใหญ่เท่าเดิม มันทำให้แต่ละ *การทำงาน* เล็กลงโดยให้ query, index และการลบจำนวนมากแตะเฉพาะชิ้นที่ต้องการ ทักษะคือเลือก partition key ที่ตรงกับวิธี query จริง เพื่อให้ planner prune ที่เหลือทิ้งได้
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Partitioning table ขนาดใหญ่ | maintenance เร็วขึ้น (vacuum/rebuild index ต่อ partition), drop ข้อมูลเก่าเป็นกลุ่มก้อนได้เกือบทันที | query ต้องออกแบบให้ตรงกับ partition key, มี table ให้จัดการมากขึ้น |
-| ไม่ partition (table เดียว) | query และ schema เรียบง่าย ไม่ต้องคิดเรื่อง partition key | maintenance ช้าลงเรื่อย ๆ เมื่อ table โต, การลบข้อมูลเก่าต้อง `DELETE` ทีละ row |
+| Partitioning table ขนาดใหญ่ | เลิกใช้ข้อมูลในไม่กี่มิลลิวินาทีแทน delete 92 ms บวก vacuum, WAL น้อยลง, index และการดูแลต่อ partition เล็กลง | query ต้องออกแบบรอบ partition key; unique key ต้องรวมมัน; table ต้องจัดการมากขึ้น; ไม่เร็วขึ้นอัตโนมัติ (19 ms เทียบ 14 ms ข้างบน) |
+| Default partition | ไม่มีอะไรถูกปฏิเสธ | บล็อกการสร้าง partition ที่ทับซ้อนจนกว่าจะว่าง ซ่อน bug partition ที่ขาด |
+| ไม่ partition (table เดียว) | query และ schema เรียบง่าย ไม่มี partition key ให้คิด | การดูแลช้าลงเรื่อย ๆ เมื่อ table โต ลบข้อมูลเก่าต้อง `DELETE` ทีละ row |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **Partition table ตั้งแต่ยังเล็ก ทั้งที่ยังไม่ถึงขนาดที่ต้องการ** — ซื้อความซับซ้อนมาโดยไม่ได้ประโยชน์ รอจนกว่า table จะใหญ่จริง ๆ (หลายร้อยล้าน row) ก่อนค่อย partition
-- **เลือก partition key ที่ query ส่วนใหญ่ไม่ได้กรองด้วย** — planner ทำ prune ไม่ได้และต้อง scan ทุก partition อยู่ดี เลือก key ให้ตรงกับ query pattern จริง
-- **ลืมสร้าง default partition** — การ insert row ที่ไม่ตรงกับ partition ใดเลยจะล้มเหลวทันที ถ้าไม่มี default partition รองรับไว้
-
-> 💡 ตัวอย่างจากของจริง
->
-> **แพลตฟอร์มโซเชียลขนาดใหญ่มาก** — partition/shard table ขนาดมหึมาอย่าง post หรือ event ตามเวลา หรือ user ID เพื่อให้ drop หรือ archive partition เก่าเป็น operation ระดับ metadata ที่เร็วมาก แทนที่จะต้อง `DELETE` ทีละ row
->
-> **Time-series/event logging platform** — ระบบเก็บ log หรือ metric จำนวนมากมักใช้ range partitioning ตามวันหรือเดือน เพื่อให้ retention policy ทำได้ด้วยการ drop partition แทนการ delete แบบสแกนทั้ง table
+- **"partitioning ทำให้ query เร็วขึ้น"** เฉพาะเมื่อ pruning ตัดงานที่ index ตัดไม่ได้ การนับเดือนข้างบนไม่เร็วขึ้น
+- **"table แม่เก็บ row"** มันไม่เก็บอะไรเลย `tableoid` แสดง partition ที่เก็บ
+- **"primary key บน id ยังถูกบังคับ"** ต้องรวม partition key ดังนั้น `id` อย่างเดียวไม่ unique ข้าม partition
+- **"default partition คือที่รองรับปลอดภัย"** มันกันไม่ให้คุณสร้าง partition ที่ row เหล่านั้นควรอยู่จนกว่าจะย้าย
+- **"มีคำสั่ง SPLIT PARTITION"** ไม่มีใน 18.6 (syntax error ข้างบน)
 
 export const quizPartitioning = [
   {
-    q: 'อะไรเป็นตัวตัดสินว่า row หนึ่งถูกเก็บอยู่ใน partition ใด?',
+    q: 'อะไรตัดสินว่า row ถูกเก็บใน partition ไหน?',
     options: [
-      'ลำดับที่ row ถูก insert เข้ามา',
+      'ลำดับที่ row ถูก insert',
       'ค่าของ partition key',
-      'connection ใดที่ insert row นั้น',
+      'connection ที่ insert row',
       'ขนาดของ row เป็น byte',
     ],
     answer: 1,
+    explain: '`tableoid::regclass` ในบทเรียนแสดงแต่ละ row ใน partition ที่ range หรือ list ของมันครอบ key',
   },
   {
     q: 'partition pruning ให้ planner ข้าม partition ได้เฉพาะเมื่อ...',
     options: [
-      'table มี partition น้อยกว่าสี่ตัว',
-      'query กรองด้วย partition key ใน WHERE clause',
-      'คุณปิดใช้ index',
+      'table มี partition น้อยกว่าสี่',
+      'query กรองตาม partition key ใน WHERE',
+      'คุณปิด index',
       'query ใช้ ORDER BY',
     ],
     answer: 1,
+    explain: 'query เดือนกุมภาพันธ์อ่านแค่ `events_2025_q1` query บน `kind` อ่านทุก partition',
   },
   {
-    q: 'partitioning คุ้มค่าอย่างชัดเจนที่สุดสำหรับ workload แบบใด?',
+    q: 'workload ใดที่ partitioning คุ้มค่าชัดเจนที่สุด?',
     options: [
-      'table lookup เล็ก ๆ ไม่กี่ร้อย row',
-      'table time-series ขนาดใหญ่ที่ query ตามวันที่ ซึ่งข้อมูลเก่าถูกทิ้งเป็นกลุ่มก้อน',
-      'table ที่ถูกอ่านทีละ row ด้วย primary key เท่านั้นเสมอ',
-      'table ใด ๆ ก็ได้ เพราะ partitioning เร็วกว่าเสมอ',
+      'table lookup เล็กไม่กี่ร้อย row',
+      'table time-series ใหญ่ที่ query ตามวันที่และทิ้งข้อมูลเก่าเป็นก้อน',
+      'table ที่อ่านทีละ row ด้วย primary key เท่านั้น',
+      'table ใดก็ได้ เพราะ partitioning เร็วกว่าเสมอ',
     ],
     answer: 1,
+    explain: 'drop หนึ่งเดือนใช้ราว 5 มิลลิวินาทีและ WAL 2 MB เทียบกับ delete 92 ms, WAL 14 MB และ vacuum การนับหนึ่งเดือนไม่เร็วขึ้น',
+  },
+  {
+    q: 'คุณลอง ALTER TABLE events ADD PRIMARY KEY (id) บน table ที่ partition ตาม created_at จะเกิดอะไร?',
+    options: [
+      'สำเร็จและบังคับความ unique ข้ามทุก partition',
+      'ล้ม: key ต้องรวม column partition key',
+      'สำเร็จแต่ตรวจเฉพาะ partition ใหม่สุด',
+      'สร้าง index ที่ไม่ unique อย่างเงียบ ๆ',
+    ],
+    answer: 1,
+    explain: 'error คือ `unique constraint on partitioned table must include all partitioning columns` (SQLSTATE 0A000) แต่ละ partition บังคับความ unique ได้แค่ภายในตัวเอง',
+  },
+  {
+    q: 'table แบบ HASH partition ที่ MODULUS 4 มี partition เฉพาะ remainder 0 และ 1 เกิดอะไรเมื่อ INSERT 8 row?',
+    options: [
+      'row ของ remainder ที่หายถูกทิ้งเงียบ ๆ',
+      'ไปที่ table แม่',
+      'INSERT ทั้งก้อนล้มด้วย no partition of relation found for row',
+      'PostgreSQL สร้าง partition ที่หายให้',
+    ],
+    answer: 2,
+    explain: 'row ที่ล้มคือ id 2 และไม่มีสักแถวจาก 8 แถวถูก insert (SQLSTATE 23514)',
   },
 ];
 
