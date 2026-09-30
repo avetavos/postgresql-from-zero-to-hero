@@ -1,6 +1,6 @@
 ---
 title: psql และ pgAdmin
-description: เรียนรู้ meta-command ที่จำเป็นของ psql, ทัวร์ GUI ของ pgAdmin แบบบรรยาย, รู้จัก DBeaver ในฐานะทางเลือก จากนั้นเชื่อมต่อกับ PostgreSQL จาก driver ทั้งสี่ตัว
+description: เรียนรู้ meta-command สำคัญของ psql, ทัวร์ GUI ของ pgAdmin เป็นข้อความ, รู้จัก DBeaver เป็นทางเลือก แล้วเชื่อมต่อ PostgreSQL จากทั้งสี่ driver
 sidebar:
   order: 4
 ---
@@ -9,73 +9,286 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-ตอนนี้ที่ PostgreSQL รันอยู่แล้ว คุณต้องมีวิธีสื่อสารกับฐานข้อมูล มีประตูสามบานที่พบบ่อย: shell บน command-line อย่าง `psql`, เครื่องมือแบบกราฟิกอย่าง pgAdmin และโค้ดแอปพลิเคชันของคุณเองผ่าน driver บทเรียนนี้ครอบคลุมทั้งสามอย่างเพื่อให้คุณเลือกอันที่เหมาะกับช่วงเวลานั้น ๆ ได้
+ตอนนี้ PostgreSQL รันอยู่แล้ว คุณต้องมีวิธีคุยกับมัน มีประตูที่ใช้กันทั่วไปสามบาน: เชลล์ command-line `psql`, เครื่องมือกราฟิกอย่าง pgAdmin และโค้ดแอปพลิเคชันของคุณเองผ่าน driver บทเรียนนี้ครอบคลุมทั้งสามอย่าง เพื่อให้คุณเลือกอันที่เหมาะกับสถานการณ์ได้
+
+> ทุกอย่างด้านล่างรันกับ **PostgreSQL 18.6** (`postgres:18.6`, psql 18.6 ภายใน container, aarch64, Docker Desktop บน Mac, กันยายน 2026) ส่วน GUI (pgAdmin, DBeaver) อธิบายตามเอกสารของเครื่องมือและ **ไม่ได้** รันที่นี่
 
 ## พื้นฐาน psql
 
-`psql` คือ terminal client อย่างเป็นทางการ เมื่อเชื่อมต่อแล้ว คุณพิมพ์ SQL ได้โดยตรง แต่ของดีจริง ๆ คือ **meta-command** — คำสั่งสั้น ๆ ที่ขึ้นต้นด้วย backslash และตรวจสอบฐานข้อมูลให้คุณ ต่อไปนี้คือคำสั่งที่คุณจะใช้อยู่ตลอดเวลา
+`psql` คือ client บน terminal อย่างเป็นทางการ เมื่อเชื่อมต่อแล้วคุณพิมพ์ SQL ตรง ๆ ได้ แต่พลังจริงของมันคือ **meta-command** — คำสั่งสั้น ๆ ที่ขึ้นต้นด้วย backslash และตรวจสอบฐานข้อมูลให้คุณ ต่อไปนี้คือคำสั่งที่คุณจะใช้อยู่ตลอด
 
 | คำสั่ง | ทำอะไร |
 |---------|--------------|
-| `\l` | แสดงรายการฐานข้อมูลทั้งหมดใน server |
-| `\c dbname` | เชื่อมต่อกับฐานข้อมูลอื่น |
+| `\l` | แสดงรายการฐานข้อมูลทั้งหมดในเซิร์ฟเวอร์ |
+| `\c dbname` | เชื่อมต่อไปยังอีกฐานข้อมูลหนึ่ง |
 | `\dt` | แสดงรายการ table ในฐานข้อมูลปัจจุบัน |
-| `\d tablename` | อธิบาย column, type และ constraint ของ table |
+| `\d tablename` | อธิบาย column, type และ constraint ของ table (`\d+` เพิ่ม storage, stats target และอื่น ๆ) |
+| `\x` | สลับการแสดงผลแบบขยาย (หนึ่ง column ต่อหนึ่งบรรทัด) |
+| `\timing` | แสดงว่าแต่ละ statement ใช้เวลาเท่าไร |
+| `\watch` | รัน query ล่าสุดซ้ำทุกไม่กี่วินาที |
+| `\copy` | โหลดหรือส่งออกไฟล์จากเครื่อง client |
+| `\conninfo` | แสดงว่าคุณเชื่อมต่อกับอะไรอยู่ |
 | `\q` | ออกจาก psql |
 
-session แรกทั่วไปจะมีลักษณะแบบนี้ คุณเชื่อมต่อ มองไปรอบ ๆ รัน query แล้วออก
+เริ่มจากสำรวจเซิร์ฟเวอร์ใหม่ นี่คือ `\l` จริงจาก PostgreSQL 18.6 ใน Docker image: cluster ใหม่มี `postgres`, `template0` และ `template1` บวกฐานข้อมูล `appdb` ที่สร้างจาก `POSTGRES_DB` ในบทก่อน สังเกต column `Locale Provider`, `Locale` และ `ICU Rules` ที่บทเรียนเก่า ๆ ไม่มี และ locale ของ Docker image คือ `en_US.utf8`:
 
 ```text
-postgres=# \l
-                    List of databases
-   Name    |  Owner   | Encoding |   Collate   |  Ctype
------------+----------+----------+-------------+----------
- appdb     | postgres | UTF8     | en_US.UTF-8 | en_US.UTF-8
- postgres  | postgres | UTF8     | en_US.UTF-8 | en_US.UTF-8
-(2 rows)
+$ psql -U postgres -c "\l"
+                                                    List of databases
+   Name    |  Owner   | Encoding | Locale Provider |  Collate   |   Ctype    | Locale | ICU Rules |   Access privileges   
+-----------+----------+----------+-----------------+------------+------------+--------+-----------+-----------------------
+ appdb     | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | 
+ postgres  | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | 
+ template0 | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | =c/postgres          +
+           |          |          |                 |            |            |        |           | postgres=CTc/postgres
+ template1 | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | =c/postgres          +
+           |          |          |                 |            |            |        |           | postgres=CTc/postgres
+(4 rows)
 
-postgres=# \c appdb
-You are now connected to database "appdb" as user "postgres".
-appdb=# \dt
-Did not find any relations.
-appdb=# SELECT 1 + 1 AS answer;
- answer
+
+$ psql -U postgres -d appdb -c "\dt" -c "SELECT 1 + 1 AS answer"
+Did not find any tables.
+ answer 
 --------
       2
 (1 row)
-
-appdb=# \q
 ```
 
-การรัน SQL ก็แค่พิมพ์ statement แล้วปิดท้ายด้วยเครื่องหมายอัฒภาค meta-command ช่วยให้คุณไม่ต้องท่องจำ system query ที่อยู่เบื้องหลัง `\l`, `\dt` และผองเพื่อน — เพราะรัน query เหล่านั้นให้แล้วจัดรูปแบบผลลัพธ์มาให้เสร็จ
+การรัน SQL คือพิมพ์ statement แล้วปิดด้วย semicolon meta-command ช่วยให้คุณไม่ต้องจำ system query เบื้องหลัง `\l`, `\dt` และพวก — มันรัน query เหล่านั้นแล้วจัดรูปผลลัพธ์ให้ (`\dt` บนฐานข้อมูลเปล่าตอบว่า `Did not find any tables.`; ส่วน `\d name` กับ object ที่ไม่มีตอบว่า `Did not find any relations.`)
+
+### เซสชันจริงบนชุดข้อมูลของคอร์ส
+
+รันชุดข้อมูลมาตรฐานจากบทแรก แล้วลอง meta-command ที่สำคัญที่สุด ทุกบล็อกด้านล่างคือการรันจริง
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+`\dt` และ `\d+` แสดงรูปร่าง PostgreSQL 18 ยังแสดง constraint NOT NULL พร้อมชื่อใต้ `Not-null constraints:` ซึ่งเวอร์ชันเก่าไม่มี:
+
+```sql
+-- sql/psql-describe.sql
+\dt
+\d+ books
+```
+
+```text
+           List of tables
+ Schema |  Name   | Type  |  Owner   
+--------+---------+-------+----------
+ public | authors | table | postgres
+ public | books   | table | postgres
+ public | sales   | table | postgres
+(3 rows)
+
+                                                       Table "public.books"
+   Column    |  Type   | Collation | Nullable |           Default            | Storage  | Compression | Stats target | Description 
+-------------+---------+-----------+----------+------------------------------+----------+-------------+--------------+-------------
+ id          | bigint  |           | not null | generated always as identity | plain    |             |              | 
+ title       | text    |           | not null |                              | extended |             |              | 
+ author_id   | bigint  |           |          |                              | plain    |             |              | 
+ published   | integer |           |          |                              | plain    |             |              | 
+ copies_sold | integer |           | not null | 0                            | plain    |             |              | 
+Indexes:
+    "books_pkey" PRIMARY KEY, btree (id)
+Foreign-key constraints:
+    "books_author_id_fkey" FOREIGN KEY (author_id) REFERENCES authors(id)
+Referenced by:
+    TABLE "sales" CONSTRAINT "sales_book_id_fkey" FOREIGN KEY (book_id) REFERENCES books(id)
+Not-null constraints:
+    "books_id_not_null" NOT NULL "id"
+    "books_title_not_null" NOT NULL "title"
+    "books_copies_sold_not_null" NOT NULL "copies_sold"
+Access method: heap
+```
+
+`\x` สลับเป็นการแสดงผลแบบขยาย ทางออกเมื่อ table กว้างจนห่อบรรทัดอ่านไม่ออก:
+
+```sql
+-- sql/psql-expanded.sql
+\x on
+SELECT * FROM authors WHERE id = 1;
+\x off
+```
+
+```text
+Expanded display is on.
+-[ RECORD 1 ]----
+id   | 1
+name | Mara Linde
+born | 1968
+
+Expanded display is off.
+```
+
+`\timing` พิมพ์เวลาที่ผ่านไปฝั่ง client (Mac เครื่องนี้ table เล็กมาก จึงเป็นเสี้ยวมิลลิวินาที ตัวเลขของคุณจะต่างออกไป):
+
+```sql
+-- sql/psql-timing.sql
+\timing on
+SELECT count(*) FROM sales;
+\timing off
+```
+
+```text
+Timing is on.
+ count 
+-------
+     6
+(1 row)
+
+Time: 0.697 ms
+Timing is off.
+```
+
+`\watch` รัน query ซ้ำทุก `i` วินาที จำนวน `c` ครั้ง (ถ้าไม่ใส่ `c` จะรันไปเรื่อย ๆ จนกว่าคุณจะขัดจังหวะ):
+
+```sql
+-- sql/psql-watch.sql
+SELECT sum(copies) AS total FROM sales \watch i=1 c=2
+```
+
+```text
+Wed 30 Sep 2026 05:53:02 AM UTC (every 1s)
+
+ total 
+-------
+  2100
+(1 row)
+
+Wed 30 Sep 2026 05:53:03 AM UTC (every 1s)
+
+ total 
+-------
+  2100
+(1 row)
+```
+
+`\copy` รัน `COPY` ผ่านฝั่ง client ไฟล์จึงอยู่ในเครื่องที่รัน psql ไม่ใช่บนเซิร์ฟเวอร์ นั่นคือเหตุผลที่มันใช้ได้บนฐานข้อมูลแบบ managed ที่คุณไม่มี filesystem ของเซิร์ฟเวอร์ ตัวอย่างนี้ส่งออก `books` เป็น CSV แล้วโหลดเข้า table สำเนา:
+
+```sql
+-- sql/psql-copy.sql
+\copy books TO '/tmp/books.csv' WITH (FORMAT csv, HEADER)
+CREATE TABLE books_copy (LIKE books INCLUDING ALL);
+\copy books_copy (id, title, author_id, published, copies_sold) FROM '/tmp/books.csv' WITH (FORMAT csv, HEADER)
+SELECT count(*) FROM books_copy;
+```
+
+```text
+COPY 4
+CREATE TABLE
+COPY 4
+ count 
+-------
+     4
+(1 row)
+```
+
+ตัวแปรของ psql ขยายด้วย colon เป็นความสะดวกสำหรับสคริปต์ ไม่ใช่สิ่งทดแทนการ bind parameter ที่ driver ทำให้:
+
+```sql
+-- sql/psql-variables.sql
+\set min_year 2010
+SELECT title FROM books WHERE published >= :min_year ORDER BY published;
+```
+
+```text
+       title       
+-------------------
+ Tidal Notes
+ The Glass Orchard
+ Unlinked Draft
+(3 rows)
+```
+
+## สคริปต์: `-c`, `-f`, `-1` และ `ON_ERROR_STOP`
+
+การใช้งานแบบโต้ตอบเป็นแค่ครึ่งหนึ่งของ psql `-c` รันคำสั่งเดียว `-f` รันไฟล์ และ flag ที่กำหนดว่าจะเกิดอะไรเมื่อมีสิ่งล้มเหลวคือสิ่งที่สำคัญในสคริปต์ ใช้ migration เล็ก ๆ นี้ ซึ่งบรรทัดที่สามตั้งใจให้ล้มเหลว:
+
+```sql
+CREATE TABLE notes (id int PRIMARY KEY, body text);
+INSERT INTO notes VALUES (1, 'first');
+INSERT INTO notes VALUES (1, 'duplicate id');
+INSERT INTO notes VALUES (2, 'second');
+```
+
+สามโหมดทำงานต่างกัน transcript จริง:
+
+```text
+$ psql -U postgres -d appdb -f migrate.sql        # default: keeps going after an error
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+INSERT 0 1
+2 rows in notes
+
+$ psql -U postgres -d appdb -v ON_ERROR_STOP=1 -f migrate.sql        # stop at the first error
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+exit status 3
+1 rows in notes
+
+$ psql -U postgres -d appdb -1 -v ON_ERROR_STOP=1 -f migrate.sql        # -1: one transaction, all or nothing
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+exit status 3
+t
+```
+
+กฎที่ต้องจำ: โดยค่าเริ่มต้น psql ทำงานต่อและ exit status เป็น `0` แม้เกิด error; `-v ON_ERROR_STOP=1` หยุดที่ error แรกด้วย exit status `3`; การเพิ่ม `-1` (`--single-transaction`) ครอบไฟล์ด้วย `BEGIN`/`COMMIT` ความล้มเหลวจึงไม่ทิ้งอะไรไว้ ([psql reference](https://www.postgresql.org/docs/18/app-psql.html))
 
 ## ทัวร์ pgAdmin
 
-หากคุณชอบการคลิกมากกว่าการพิมพ์ **pgAdmin** คือเครื่องมือแบบกราฟิกอย่างเป็นทางการ และการตั้งค่า Docker จากบทเรียนก่อนหน้าก็มี pgAdmin รันอยู่ที่ `http://localhost:8080` แล้ว ต่อไปนี้คือวิธีหาทางไปรอบ ๆ
+ถ้าคุณชอบคลิกมากกว่าพิมพ์ **pgAdmin** คือเครื่องมือกราฟิกอย่างเป็นทางการ และการตั้งค่า Docker จากบทก่อนรันมันที่ `http://localhost:8080` ได้ (ไม่ได้รันที่นี่ ส่วนนี้ตาม [เอกสารของ pgAdmin](https://www.pgadmin.org/docs/)) นี่คือวิธีหาทางในนั้น
 
-เมื่อคุณเปิด pgAdmin ครั้งแรก ให้ล็อกอินด้วยอีเมลและรหัสผ่านที่คุณตั้งไว้ในไฟล์ compose ด้านซ้ายแสดง **browser tree** ที่มีกลุ่ม Servers อยู่ด้านบนสุด หากต้องการเชื่อมต่อกับฐานข้อมูลของคุณ ให้ทำตามขั้นตอนนี้:
+เมื่อเปิด pgAdmin ครั้งแรก ให้ล็อกอินด้วยอีเมลและรหัสผ่านที่ตั้งไว้ในไฟล์ compose ด้านซ้ายแสดง **browser tree** โดยมีกลุ่ม Servers อยู่บนสุด เพื่อเชื่อมต่อกับฐานข้อมูลของคุณ ให้คลิกขวาที่ Servers แล้วเลือกลงทะเบียน server ใหม่ ในกล่องโต้ตอบ ตั้งชื่อการเชื่อมต่อในแท็บ General จากนั้นสลับไปแท็บ Connection แล้วกรอก host, port, username และ password เพราะ pgAdmin รันใน container ของตัวเอง host จึงเป็นชื่อ service `postgres` ไม่ใช่ `localhost` ส่วน port ยังเป็น `5432` และ user คือ `postgres`
 
-1. คลิกขวาที่ Servers แล้วเลือกลงทะเบียน server ใหม่
-2. ในกล่องโต้ตอบ ตั้งชื่อการเชื่อมต่อในแท็บ General
-3. สลับไปยังแท็บ Connection แล้วกรอก host, port, username และ password
-4. เนื่องจาก pgAdmin รันใน container ของตัวเอง host จึงเป็นชื่อ service `postgres` แทนที่จะเป็น `localhost` ส่วน port ยังคงเป็น `5432` และ user คือ `postgres`
+เมื่อเชื่อมต่อแล้ว tree จะขยาย เปิด server ของคุณ แล้ว **Databases** แล้วฐานข้อมูล แล้ว **Schemas** แล้ว schema `public` และสุดท้าย **Tables** ลำดับชั้นนี้สะท้อนวิธีที่ PostgreSQL จัดระเบียบข้อมูลจริง ซึ่งบทถัดไปจะอธิบายละเอียด การคลิก object ใด ๆ จะแสดงรายละเอียดใน panel หลัก
 
-เมื่อเชื่อมต่อแล้ว tree จะขยายออก เปิด server ของคุณ จากนั้น **Databases** จากนั้นฐานข้อมูลหนึ่ง จากนั้น **Schemas** จากนั้น schema `public` และสุดท้าย **Tables** การซ้อนกันนี้สะท้อนวิธีที่ PostgreSQL จัดระเบียบข้อมูลจริง ๆ ซึ่งบทเรียนถัดไปจะอธิบายในรายละเอียด คลิก object ไหนก็ได้ แล้วรายละเอียดจะขึ้นใน panel หลัก
+เครื่องมือหลักคือ **Query Tool** เปิดจากแถบเครื่องมือหรือคลิกขวาที่ฐานข้อมูล มี SQL editor ให้พิมพ์ statement แล้วกดปุ่มรัน ผลลัพธ์แสดงเป็น grid ด้านล่าง และข้อความอย่างจำนวน row อยู่ในอีกแท็บ เพื่อดูเนื้อหา table โดยไม่ต้องเขียน SQL ให้คลิกขวาที่ table แล้วเลือกดู row ซึ่งเปิด grid เดียวกันที่เติม `SELECT` ไว้ให้แล้ว
 
-ตัวหลักคือ **Query Tool** ที่เปิดจาก toolbar หรือโดยการคลิกขวาที่ฐานข้อมูล ตัวนี้ให้ SQL editor ที่คุณพิมพ์ statement แล้วกดปุ่มรันได้เลย ผลลัพธ์ปรากฏใน grid ด้านล่าง และข้อความเช่นจำนวน row แสดงในแท็บแยกต่างหาก หากต้องการเรียกดูเนื้อหาของ table โดยไม่ต้องเขียน SQL ให้คลิกขวาที่ table แล้วเลือกดู row ของ table นั้น ซึ่งจะเปิด grid เดียวกันที่เติม `SELECT` ไว้ล่วงหน้า
+ถ้า pgAdmin รู้สึกหนัก **DBeaver** เป็นทางเลือกฟรียอดนิยม — แอปเดสก์ท็อปที่เชื่อมต่อ PostgreSQL และฐานข้อมูลอื่นอีกมากด้วยรูปแบบ tree-and-editor ที่คล้ายกัน แนวคิดใช้ต่อกันได้ตรง ๆ ต่างกันแค่เมนู
 
-หาก pgAdmin รู้สึกหนักเกินไป **DBeaver** เป็นทางเลือกฟรียอดนิยม — แอปพลิเคชันบนเดสก์ท็อปที่เชื่อมต่อกับ PostgreSQL และฐานข้อมูลอื่น ๆ อีกมากมายด้วยเลย์เอาต์แบบ tree-and-editor ที่คล้ายกัน แนวคิดถ่ายโอนกันได้โดยตรง เพียงเมนูเท่านั้นที่ต่างกัน
+## เชื่อมต่อจากแต่ละ driver
 
-## การเชื่อมต่อจาก driver แต่ละตัว
-
-ในโค้ดแอปพลิเคชันคุณเชื่อมต่อผ่าน **driver** — library ที่พูดภาษา protocol ของ PostgreSQL รายละเอียดการเชื่อมต่อเป็นชุดเดียวกับที่คุณใช้ข้างต้น เพียง syntax เท่านั้นที่เปลี่ยนไป ต่อไปนี้คือวิธีที่ driver แต่ละตัวเปิดการเชื่อมต่อ
+ในโค้ดแอปพลิเคชันคุณเชื่อมต่อผ่าน **driver** — ไลบรารีที่พูดโปรโตคอลของ PostgreSQL รายละเอียดการเชื่อมต่อเหมือนที่คุณใช้ข้างบน ต่างกันแค่ syntax แต่ละโปรแกรมด้านล่างอ่าน URL จากตัวแปรสภาพแวดล้อม `DATABASE_URL` (ห้าม commit) และรันจริงหนึ่งครั้งกับ container PostgreSQL 18.6 ชั่วคราว
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/connect.sql
     -- psql takes the connection string on the command line:
-    -- psql "postgresql://postgres:secret@localhost:5432/appdb"
+    --   psql "postgresql://postgres:<password>@localhost:5432/appdb"
     SELECT current_database();
     ```
   </TabItem>
@@ -83,87 +296,174 @@ appdb=# \q
     ```js
     import { Pool } from 'pg';
 
-    const pool = new Pool({
-      connectionString: 'postgresql://postgres:secret@localhost:5432/appdb',
-    });
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-    const res = await pool.query('SELECT current_database()');
+    const res = await pool.query('SELECT current_database(), current_user');
     console.log(res.rows[0]);
+    await pool.end();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
+    import os
     import psycopg
 
-    conn = psycopg.connect(
-        "postgresql://postgres:secret@localhost:5432/appdb"
-    )
-    cur = conn.cursor()
-    cur.execute("SELECT current_database()")
-    print(cur.fetchone())
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT current_database(), current_user")
+        print(cur.fetchone())
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    conn, err := pgx.Connect(ctx,
-        "postgresql://postgres:secret@localhost:5432/appdb")
-    if err != nil {
-        return err
+    package main
+
+    import (
+    	"context"
+    	"fmt"
+    	"os"
+
+    	"github.com/jackc/pgx/v5"
+    )
+
+    func main() {
+    	ctx := context.Background()
+    	conn, err := pgx.Connect(ctx, os.Getenv("DATABASE_URL"))
+    	if err != nil {
+    		fmt.Println(err)
+    		os.Exit(1)
+    	}
+    	defer conn.Close(ctx)
+
+    	var db, user string
+    	if err := conn.QueryRow(ctx, "SELECT current_database(), current_user").Scan(&db, &user); err != nil {
+    		fmt.Println(err)
+    		os.Exit(1)
+    	}
+    	fmt.Println(db, user)
     }
-    defer conn.Close(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect("postgresql://postgres:secret@localhost:5432/appdb")
-        .await?;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::main]
+    async fn main() -> Result<(), sqlx::Error> {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&std::env::var("DATABASE_URL").unwrap())
+            .await?;
+
+        let row: (String, String) = sqlx::query_as("SELECT current_database()::text, current_user::text")
+            .fetch_one(&pool)
+            .await?;
+        println!("{:?}", row);
+        Ok(())
+    }
     ```
   </TabItem>
 </Tabs>
 
-สังเกตว่า driver ทุกตัวรับ connection string `postgresql://user:password@host:port/database` แบบเดียวกัน เรียนรู้รูปแบบนั้นเพียงรูปแบบเดียวแล้วคุณก็เชื่อมต่อจากที่ไหนก็ได้
+output จริงของแต่ละตัว (ระบุ version ในแต่ละบรรทัด):
 
-**ใน pgAdmin:** รายละเอียดการเชื่อมต่อเดียวกันนี้อยู่ในกล่องโต้ตอบลงทะเบียน server แทนที่จะเป็น string — host, port, user, password และ database ต่างมีช่องของตัวเอง
+```text
+$ DATABASE_URL=postgresql://postgres:<password>@localhost:5432/appdb node app.mjs        # pg 8.23.0, Node 24.13.0
+{ current_database: 'appdb', current_user: 'postgres' }
+
+$ python app.py        # psycopg 3.3.6, Python 3.12.2
+('appdb', 'postgres')
+
+$ go run .        # pgx v5.11.0, Go 1.27.1
+appdb postgres
+
+$ cargo run        # sqlx 0.9.0, Rust 1.98.1
+("appdb", "postgres")
+```
+
+สังเกตว่า driver ทุกตัวรับ connection string รูปแบบเดียวกัน `postgresql://user:password@host:port/database` เรียนรู้รูปแบบเดียวนี้แล้วคุณเชื่อมต่อได้จากทุกที่
+
+**ใน pgAdmin:** รายละเอียดการเชื่อมต่อเดียวกันอยู่ในกล่องลงทะเบียน server แทนที่จะเป็น string — host, port, user, password และฐานข้อมูลแต่ละอย่างมีช่องของตัวเอง
+
+## Reading AI-generated code
+
+เมื่อขอให้ผู้ช่วย AI เขียนสคริปต์ deploy ที่รัน migration แล้วรายงานความสำเร็จ มันเขียนแบบนี้ อ่านแล้วดูถูกต้อง และอันตราย:
+
+<SpotTheBug lang="bash" code={`#!/usr/bin/env bash
+# AI comment: "apply the migration, then report success"
+psql -U postgres -d appdb -f migrate.sql
+echo "migrations applied"`}>
+
+กับ `migrate.sql` ข้างบน (statement ที่สามล้มเหลว) การรันสคริปต์จะพิมพ์ error จากนั้นพิมพ์ `migrations applied` และ exit ด้วย status **0**:
+
+```text
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+INSERT 0 1
+migrations applied
+deploy.sh exit status 0
+```
+
+โดยค่าเริ่มต้น psql ไม่หยุดเมื่อเจอ error และไม่ทำให้สคริปต์ล้มเหลว: row ที่ซ้ำถูกข้าม แต่ทุกอย่างหลังจากนั้นยังรันต่อ งาน CI เห็น build เป็นสีเขียว และฐานข้อมูลถูก migrate ไปครึ่งเดียว วิธีแก้คือ `-v ON_ERROR_STOP=1` เพื่อให้ error แรกหยุดการรัน, `-1` เพื่อไม่ทิ้งอะไรค้าง, `set -e` เพื่อให้เชลล์สคริปต์หยุด และ `-X` เพื่อไม่ให้ `~/.psqlrc` ที่หลงเหลืออยู่เปลี่ยนพฤติกรรม การรันเดิมตอนนี้ล้มเหลวด้วย status 3 และ transaction ถูก rollback (table `notes` ไม่มีอยู่หลังจากนั้น):
+
+```bash
+# scripts/deploy.sh
+set -euo pipefail
+psql -X -U postgres -d appdb -v ON_ERROR_STOP=1 -1 -f migrate.sql
+echo "migrations applied"
+```
+
+```text
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+deploy2.sh exit status 3
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+psql เป็น client บางเบาที่ส่งข้อความไปยังเซิร์ฟเวอร์และพิมพ์สิ่งที่ตอบกลับ meta-command (backslash) ทำงานฝั่ง client และไม่เคยไปถึงเซิร์ฟเวอร์ ส่วนอย่างอื่น (SQL) ไปถึง นั่นอธิบายว่าทำไม `\copy` อ่านไฟล์ในเครื่องคุณ ทำไม `\watch` เป็นลูปของ psql ไม่ใช่ฟีเจอร์ของฐานข้อมูล และทำไมสคริปต์ต้องมี `ON_ERROR_STOP`: client ไม่ใช่เซิร์ฟเวอร์ที่ตัดสินว่าจะทำต่อหรือไม่
 
 ## เคล็ดลับและข้อควรระวัง
 
-- connection string เป็นไปตามรูปแบบ `postgresql://user:password@host:port/database` แต่ละส่วนเป็น optional เมื่อมีค่า default ใช้แทน
-- จากภายใน container อื่น (เช่น pgAdmin) host คือชื่อ service ไม่ใช่ `localhost` ส่วนจากเครื่องของคุณเองให้ใช้ `localhost`
-- ใช้ `psql` สำหรับการตรวจสอบอย่างรวดเร็วและการเขียน script, GUI อย่าง pgAdmin หรือ DBeaver สำหรับการเรียกดูและสำรวจ และ driver สำหรับสิ่งใด ๆ ที่แอปพลิเคชันของคุณทำซ้ำ ๆ
-- อย่า hard-code รหัสผ่านในโค้ดที่ commit ไป อ่าน connection string จากตัวแปร environment ในโปรเจกต์จริง
-- กลุ่ม meta-command `\d` เป็นวิธีที่เร็วที่สุดในการจำรูปทรงที่แน่นอนของ table โดยไม่ต้องออกจาก shell
+- connection string มีรูปแบบ `postgresql://user:password@host:port/database` แต่ละส่วนเป็นทางเลือกเมื่อมีค่าเริ่มต้นรองรับ
+- จากภายใน container อื่น (เช่น pgAdmin) host คือชื่อ service ไม่ใช่ `localhost` ส่วนจากเครื่องของคุณเองคือ `localhost`
+- ใช้ `psql` สำหรับตรวจสอบเร็ว ๆ และเขียนสคริปต์ ใช้ GUI อย่าง pgAdmin หรือ DBeaver สำหรับเรียกดูและสำรวจ และใช้ driver สำหรับทุกอย่างที่แอปพลิเคชันของคุณทำซ้ำ ๆ
+- ห้าม hard-code รหัสผ่านในโค้ดที่ commit อ่าน connection string จากตัวแปรสภาพแวดล้อม (เหมือนโปรแกรม driver ด้านบน) หรือไฟล์ `~/.pgpass` `<password>` ด้านบนไม่ใช่ค่าจริง
+- กลุ่ม meta-command `\d` คือวิธีที่เร็วที่สุดในการจำรูปร่างที่แน่นอนของ table โดยไม่ต้องออกจากเชลล์
+- ในสคริปต์ ใส่ `-X -v ON_ERROR_STOP=1` เสมอ และเพิ่ม `-1` สำหรับ migration
 
 <Callout title="สามประตู ฐานข้อมูลเดียว">
-psql, pgAdmin และ driver ของแอปพลิเคชันคุณ ล้วนเชื่อมต่อกับ PostgreSQL server ตัวเดียวกันด้วย credential เดียวกัน เลือกประตูที่เหมาะกับงาน — shell เพื่อความเร็ว, GUI เพื่อการสำรวจ, driver สำหรับแอปของคุณ — และจงรู้ไว้ว่าฐานข้อมูลที่อยู่ข้างใต้ไม่สนใจว่าคุณเดินผ่านบานไหนเข้ามา
+psql, pgAdmin และ driver ของแอปพลิเคชันคุณ เชื่อมต่อกับเซิร์ฟเวอร์ PostgreSQL ตัวเดียวกันด้วยข้อมูลรับรองเดียวกัน เลือกประตูที่เหมาะกับงาน — เชลล์เพื่อความเร็ว GUI เพื่อสำรวจ driver สำหรับแอปของคุณ — และรู้ไว้ว่าฐานข้อมูลข้างใต้ไม่สนใจว่าคุณเดินผ่านประตูไหน
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `psql` CLI | เร็ว, script ได้, overhead ต่ำ | ต้องจำ meta-command และ syntax |
-| pgAdmin GUI | เห็นโครงสร้างข้อมูลชัดเจน เหมาะกับมือใหม่ | หนักกว่า และต้องมีเครื่อง desktop เปิด browser |
-| Driver ในโค้ดแอป | คือของจริงที่ production ใช้รันทุกวัน | ต้องเขียนโค้ดเพิ่มแค่เพื่อ query อย่างเดียวไม่คุ้ม |
+| `psql` CLI | เร็ว เขียนสคริปต์ได้ overhead ต่ำ | ต้องจำ meta-command และ syntax |
+| pgAdmin GUI | เห็นโครงสร้างข้อมูลชัดเจน เป็นมิตรกับผู้เริ่มต้น | หนักกว่า และต้องมีเครื่องเดสก์ท็อปที่เปิดเบราว์เซอร์ |
+| driver ในโค้ดแอปพลิเคชัน | สิ่งที่ production รันจริงทุกวัน | การเขียนโค้ดเพิ่มเพียงเพื่อรัน query เดียวไม่คุ้ม |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **พึ่ง GUI อย่างเดียวแล้วไม่เคยเรียน meta-command** — เวลาต้อง SSH เข้า production ที่ไม่มี GUI ให้ใช้ คุณจะติดขัดทันทีถ้าไม่คุ้นกับ `\dt`, `\d` และผองเพื่อน
-- **ลืมว่า pgAdmin/DBeaver เชื่อมด้วยชื่อ host ของ container network ไม่ใช่ `localhost`** — จากเครื่อง host คุณใช้ `localhost` ได้ แต่จาก container อื่นต้องใช้ชื่อ service เช่น `postgres` ตามที่ compose ตั้งไว้
-- **copy-paste SQL ข้ามเครื่องมือโดยไม่เช็คสถานะ transaction** — psql กับ GUI บางตัวจัดการ autocommit ต่างกัน การ copy query ที่มี `BEGIN`/`COMMIT` ข้ามเครื่องมืออาจทำให้ transaction ค้างโดยไม่รู้ตัว
-
-> 💡 ตัวอย่างจากของจริง
->
-> **ทีม backend ส่วนใหญ่** — ใช้ `psql` สำหรับ debug production อย่างรวดเร็วผ่าน SSH เพราะ server จริงมักไม่มี GUI ให้ใช้
->
-> **นักวิเคราะห์ข้อมูล (data analyst)** — ใช้ pgAdmin หรือ DBeaver เป็นหลักสำหรับงานสำรวจข้อมูลแบบ exploratory เพราะเห็นโครงสร้าง table และผลลัพธ์เป็น grid ได้ทันที ไม่ต้องจำ syntax
+- **"ใช้ GUI อย่างเดียวก็พอ"** วินาทีที่คุณ SSH เข้าเครื่อง production ที่ไม่มี GUI คุณจะติดถ้าไม่มี `\dt`, `\d` และพวก
+- **"สคริปต์พิมพ์ `migrations applied` แปลว่าสำเร็จ"** ไม่จริงถ้าไม่มี `ON_ERROR_STOP`: psql exit `0` หลัง error เป็นค่าเริ่มต้น (พิสูจน์ด้านบน)
+- **"pgAdmin และ DBeaver เชื่อมต่อผ่าน `localhost`"** จากเครื่อง host ใช่ แต่จาก container อื่นต้องใช้ชื่อ service เช่น `postgres` ตามที่ตั้งใน compose
+- **"`\copy` กับ `COPY` เหมือนกัน"** `COPY` อ่านและเขียนไฟล์บน *เซิร์ฟเวอร์* ส่วน `\copy` ใช้ไฟล์บน *client*
+- **"คัดลอก SQL ข้ามเครื่องมือไม่เป็นไร"** psql และ GUI บางตัวจัดการ autocommit ต่างกัน `BEGIN` ที่คัดลอกมาโดยไม่มี `COMMIT` อาจทิ้ง transaction ค้างไว้
 
 export const quizPsqlPgadmin = [
   {
-    q: 'meta-command ของ psql ตัวใดแสดงรายการ table ในฐานข้อมูลปัจจุบัน?',
+    q: 'meta-command ใดของ psql แสดงรายการ table ในฐานข้อมูลปัจจุบัน?',
     options: ['\\l', '\\dt', '\\c', '\\q'],
     answer: 1,
+    explain: '`\\dt` แสดง table; `\\l` แสดงฐานข้อมูล, `\\c` เชื่อมต่อฐานข้อมูลอื่น, `\\q` ออก',
   },
   {
     q: 'รูปแบบมาตรฐานของ connection string ของ PostgreSQL คืออะไร?',
@@ -174,11 +474,30 @@ export const quizPsqlPgadmin = [
       'connect host=... only',
     ],
     answer: 0,
+    explain: 'psql, Node `pg`, psycopg, pgx และ sqlx ล้วนรับ `postgresql://user:password@host:port/database` ในบทเรียน',
   },
   {
-    q: 'จาก container ของ pgAdmin คุณควรใช้ชื่อ host ใดในการเข้าถึง service ฐานข้อมูล?',
-    options: ['localhost', 'ชื่อ service ซึ่งคือ postgres', '127.0.0.1', 'pgadmin'],
+    q: 'จาก container ของ pgAdmin ควรใช้ชื่อ host อะไรเพื่อเข้าถึง service ฐานข้อมูล?',
+    options: ['localhost', 'ชื่อ service คือ postgres', '127.0.0.1', 'pgadmin'],
     answer: 1,
+    explain: 'ภายใน container `localhost` คือตัว container เอง บน compose network service เรียกหากันด้วยชื่อ service',
+  },
+  {
+    q: 'สคริปต์ deploy รัน `psql -f migrate.sql` และมี statement หนึ่งในไฟล์ล้มเหลว exit status ของ psql คืออะไร?',
+    options: ['3', '1', '0', '2'],
+    answer: 2,
+    explain: 'โดยค่าเริ่มต้น psql ทำงานต่อหลัง error และ exit 0 เมื่อใส่ `-v ON_ERROR_STOP=1` มันหยุดและ exit 3 (พิสูจน์ในบทเรียน)',
+  },
+  {
+    q: 'การเพิ่ม `-1` (`--single-transaction`) ให้ `psql -f file.sql` เปลี่ยนอะไร?',
+    options: [
+      'รันเฉพาะ statement แรก',
+      'ครอบไฟล์ด้วย transaction เดียว ความล้มเหลวจึงไม่ทิ้งอะไรที่ apply แล้ว',
+      'ทำให้การเชื่อมต่อเป็น read-only',
+      'รันไฟล์หนึ่งครั้งต่อฐานข้อมูล',
+    ],
+    answer: 1,
+    explain: 'psql ส่ง `BEGIN` ก่อนไฟล์และ `COMMIT` หลังไฟล์ เมื่อรวมกับ ON_ERROR_STOP migration ที่ล้มเหลวจะถูก rollback ทั้งหมด',
   },
 ];
 

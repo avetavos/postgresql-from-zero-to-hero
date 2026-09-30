@@ -9,8 +9,11 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 Now that PostgreSQL is running, you need a way to talk to it. There are three common doors in: the `psql` command-line shell, a graphical tool like pgAdmin, and your own application code through a driver. This lesson covers all three so you can pick whichever fits the moment.
+
+> Everything below was run against **PostgreSQL 18.6** (`postgres:18.6`, psql 18.6 inside the container, aarch64, Docker Desktop on a Mac, September 2026). The GUI section (pgAdmin, DBeaver) is described from the tools' documentation and was **not** run here.
 
 ## psql basics
 
@@ -21,38 +24,252 @@ Now that PostgreSQL is running, you need a way to talk to it. There are three co
 | `\l` | List all databases in the server |
 | `\c dbname` | Connect to a different database |
 | `\dt` | List tables in the current database |
-| `\d tablename` | Describe a table's columns, types, and constraints |
+| `\d tablename` | Describe a table's columns, types, and constraints (`\d+` adds storage, stats target, and more) |
+| `\x` | Toggle expanded (one column per line) output |
+| `\timing` | Print how long each statement took |
+| `\watch` | Re-run the last query every few seconds |
+| `\copy` | Load or export a file from the client machine |
+| `\conninfo` | Show what you are connected to |
 | `\q` | Quit psql |
 
-A typical first session looks like this. You connect, look around, run a query, and leave.
+First look around a fresh server. This is the real `\l` from PostgreSQL 18.6 in the Docker image: since a new cluster has `postgres`, `template0` and `template1`, plus the `appdb` database created by `POSTGRES_DB` in the previous lesson. Note the `Locale Provider`, `Locale` and `ICU Rules` columns that older tutorials do not have, and that the Docker image's locale is `en_US.utf8`:
 
 ```text
-postgres=# \l
-                    List of databases
-   Name    |  Owner   | Encoding |   Collate   |  Ctype
------------+----------+----------+-------------+----------
- appdb     | postgres | UTF8     | en_US.UTF-8 | en_US.UTF-8
- postgres  | postgres | UTF8     | en_US.UTF-8 | en_US.UTF-8
-(2 rows)
+$ psql -U postgres -c "\l"
+                                                    List of databases
+   Name    |  Owner   | Encoding | Locale Provider |  Collate   |   Ctype    | Locale | ICU Rules |   Access privileges   
+-----------+----------+----------+-----------------+------------+------------+--------+-----------+-----------------------
+ appdb     | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | 
+ postgres  | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | 
+ template0 | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | =c/postgres          +
+           |          |          |                 |            |            |        |           | postgres=CTc/postgres
+ template1 | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | =c/postgres          +
+           |          |          |                 |            |            |        |           | postgres=CTc/postgres
+(4 rows)
 
-postgres=# \c appdb
-You are now connected to database "appdb" as user "postgres".
-appdb=# \dt
-Did not find any relations.
-appdb=# SELECT 1 + 1 AS answer;
- answer
+
+$ psql -U postgres -d appdb -c "\dt" -c "SELECT 1 + 1 AS answer"
+Did not find any tables.
+ answer 
 --------
       2
 (1 row)
-
-appdb=# \q
 ```
 
-Running SQL is just typing the statement and ending it with a semicolon. The meta-commands save you from memorizing the system queries behind `\l`, `\dt`, and friends — they run those queries for you and format the result.
+Running SQL is just typing the statement and ending it with a semicolon. The meta-commands save you from memorizing the system queries behind `\l`, `\dt`, and friends — they run those queries for you and format the result. (`\dt` on an empty database says `Did not find any tables.`; `\d name` on a missing object says `Did not find any relations.`)
+
+### A working session on the course dataset
+
+Run the canonical dataset from the first lesson, then try the meta-commands that matter most. Each block below is a real run.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+`\dt` and `\d+` show shape. PostgreSQL 18 also lists NOT NULL constraints by name under `Not-null constraints:`, which older versions did not:
+
+```sql
+-- sql/psql-describe.sql
+\dt
+\d+ books
+```
+
+```text
+           List of tables
+ Schema |  Name   | Type  |  Owner   
+--------+---------+-------+----------
+ public | authors | table | postgres
+ public | books   | table | postgres
+ public | sales   | table | postgres
+(3 rows)
+
+                                                       Table "public.books"
+   Column    |  Type   | Collation | Nullable |           Default            | Storage  | Compression | Stats target | Description 
+-------------+---------+-----------+----------+------------------------------+----------+-------------+--------------+-------------
+ id          | bigint  |           | not null | generated always as identity | plain    |             |              | 
+ title       | text    |           | not null |                              | extended |             |              | 
+ author_id   | bigint  |           |          |                              | plain    |             |              | 
+ published   | integer |           |          |                              | plain    |             |              | 
+ copies_sold | integer |           | not null | 0                            | plain    |             |              | 
+Indexes:
+    "books_pkey" PRIMARY KEY, btree (id)
+Foreign-key constraints:
+    "books_author_id_fkey" FOREIGN KEY (author_id) REFERENCES authors(id)
+Referenced by:
+    TABLE "sales" CONSTRAINT "sales_book_id_fkey" FOREIGN KEY (book_id) REFERENCES books(id)
+Not-null constraints:
+    "books_id_not_null" NOT NULL "id"
+    "books_title_not_null" NOT NULL "title"
+    "books_copies_sold_not_null" NOT NULL "copies_sold"
+Access method: heap
+```
+
+`\x` switches to expanded display, the way out of a wide table that wraps unreadably:
+
+```sql
+-- sql/psql-expanded.sql
+\x on
+SELECT * FROM authors WHERE id = 1;
+\x off
+```
+
+```text
+Expanded display is on.
+-[ RECORD 1 ]----
+id   | 1
+name | Mara Linde
+born | 1968
+
+Expanded display is off.
+```
+
+`\timing` prints the client-side elapsed time (this Mac, tiny table, so a fraction of a millisecond; your numbers will differ):
+
+```sql
+-- sql/psql-timing.sql
+\timing on
+SELECT count(*) FROM sales;
+\timing off
+```
+
+```text
+Timing is on.
+ count 
+-------
+     6
+(1 row)
+
+Time: 0.697 ms
+Timing is off.
+```
+
+`\watch` re-runs the query every `i` seconds, `c` times (without `c`, until you interrupt it):
+
+```sql
+-- sql/psql-watch.sql
+SELECT sum(copies) AS total FROM sales \watch i=1 c=2
+```
+
+```text
+Wed 30 Sep 2026 05:53:02 AM UTC (every 1s)
+
+ total 
+-------
+  2100
+(1 row)
+
+Wed 30 Sep 2026 05:53:03 AM UTC (every 1s)
+
+ total 
+-------
+  2100
+(1 row)
+```
+
+`\copy` runs `COPY` through the client, so the file lives on the machine where psql runs, not on the server. That is why it works on a managed database where you have no server filesystem. Here it exports `books` to CSV and loads it into a copy of the table:
+
+```sql
+-- sql/psql-copy.sql
+\copy books TO '/tmp/books.csv' WITH (FORMAT csv, HEADER)
+CREATE TABLE books_copy (LIKE books INCLUDING ALL);
+\copy books_copy (id, title, author_id, published, copies_sold) FROM '/tmp/books.csv' WITH (FORMAT csv, HEADER)
+SELECT count(*) FROM books_copy;
+```
+
+```text
+COPY 4
+CREATE TABLE
+COPY 4
+ count 
+-------
+     4
+(1 row)
+```
+
+psql variables expand with a colon. This is a convenience for scripts, not a substitute for the parameter binding a driver does:
+
+```sql
+-- sql/psql-variables.sql
+\set min_year 2010
+SELECT title FROM books WHERE published >= :min_year ORDER BY published;
+```
+
+```text
+       title       
+-------------------
+ Tidal Notes
+ The Glass Orchard
+ Unlinked Draft
+(3 rows)
+```
+
+## Scripts: `-c`, `-f`, `-1`, and `ON_ERROR_STOP`
+
+Interactive use is half of psql. `-c` runs one command, `-f` runs a file, and the flags that decide what happens when something fails are the ones that matter in scripts. Given this small migration where the third line fails on purpose:
+
+```sql
+CREATE TABLE notes (id int PRIMARY KEY, body text);
+INSERT INTO notes VALUES (1, 'first');
+INSERT INTO notes VALUES (1, 'duplicate id');
+INSERT INTO notes VALUES (2, 'second');
+```
+
+the three modes behave differently, real transcript:
+
+```text
+$ psql -U postgres -d appdb -f migrate.sql        # default: keeps going after an error
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+INSERT 0 1
+2 rows in notes
+
+$ psql -U postgres -d appdb -v ON_ERROR_STOP=1 -f migrate.sql        # stop at the first error
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+exit status 3
+1 rows in notes
+
+$ psql -U postgres -d appdb -1 -v ON_ERROR_STOP=1 -f migrate.sql        # -1: one transaction, all or nothing
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+exit status 3
+t
+```
+
+The rule to remember: by default psql keeps going and its exit status is `0` even after errors; `-v ON_ERROR_STOP=1` stops at the first error with exit status `3`; adding `-1` (`--single-transaction`) wraps the file in `BEGIN`/`COMMIT`, so a failure leaves nothing behind ([psql reference](https://www.postgresql.org/docs/18/app-psql.html)).
 
 ## A tour of pgAdmin
 
-If you prefer clicking to typing, **pgAdmin** is the official graphical tool, and the Docker setup from the previous lesson already has it running at `http://localhost:8080`. Here is how to find your way around.
+If you prefer clicking to typing, **pgAdmin** is the official graphical tool, and the Docker setup from the previous lesson can run it at `http://localhost:8080`. (Not run here; this section follows the [pgAdmin documentation](https://www.pgadmin.org/docs/).) Here is how to find your way around.
 
 When you first open pgAdmin, log in with the email and password you set in the compose file. The left side shows a **browser tree** with a Servers group at the top. To connect to your database, right-click Servers and choose to register a new server. In the dialog, give the connection a name on the General tab, then switch to the Connection tab and fill in the host, port, username, and password. Because pgAdmin runs in its own container, the host is the service name `postgres` rather than `localhost`; the port stays `5432` and the user is `postgres`.
 
@@ -64,13 +281,14 @@ If pgAdmin feels heavy, **DBeaver** is a popular free alternative — a desktop 
 
 ## Connecting from each driver
 
-In application code you connect through a **driver** — a library that speaks PostgreSQL's protocol. The connection details are the same ones you used above; only the syntax changes. Here is how each driver opens a connection.
+In application code you connect through a **driver** — a library that speaks PostgreSQL's protocol. The connection details are the same ones you used above; only the syntax changes. Each program below reads the URL from the `DATABASE_URL` environment variable (never commit it) and was run once against a throw-away PostgreSQL 18.6 container.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/connect.sql
     -- psql takes the connection string on the command line:
-    -- psql "postgresql://postgres:secret@localhost:5432/appdb"
+    --   psql "postgresql://postgres:<password>@localhost:5432/appdb"
     SELECT current_database();
     ```
   </TabItem>
@@ -78,57 +296,147 @@ In application code you connect through a **driver** — a library that speaks P
     ```js
     import { Pool } from 'pg';
 
-    const pool = new Pool({
-      connectionString: 'postgresql://postgres:secret@localhost:5432/appdb',
-    });
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-    const res = await pool.query('SELECT current_database()');
+    const res = await pool.query('SELECT current_database(), current_user');
     console.log(res.rows[0]);
+    await pool.end();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
+    import os
     import psycopg
 
-    conn = psycopg.connect(
-        "postgresql://postgres:secret@localhost:5432/appdb"
-    )
-    cur = conn.cursor()
-    cur.execute("SELECT current_database()")
-    print(cur.fetchone())
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT current_database(), current_user")
+        print(cur.fetchone())
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    conn, err := pgx.Connect(ctx,
-        "postgresql://postgres:secret@localhost:5432/appdb")
-    if err != nil {
-        return err
+    package main
+
+    import (
+    	"context"
+    	"fmt"
+    	"os"
+
+    	"github.com/jackc/pgx/v5"
+    )
+
+    func main() {
+    	ctx := context.Background()
+    	conn, err := pgx.Connect(ctx, os.Getenv("DATABASE_URL"))
+    	if err != nil {
+    		fmt.Println(err)
+    		os.Exit(1)
+    	}
+    	defer conn.Close(ctx)
+
+    	var db, user string
+    	if err := conn.QueryRow(ctx, "SELECT current_database(), current_user").Scan(&db, &user); err != nil {
+    		fmt.Println(err)
+    		os.Exit(1)
+    	}
+    	fmt.Println(db, user)
     }
-    defer conn.Close(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect("postgresql://postgres:secret@localhost:5432/appdb")
-        .await?;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::main]
+    async fn main() -> Result<(), sqlx::Error> {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&std::env::var("DATABASE_URL").unwrap())
+            .await?;
+
+        let row: (String, String) = sqlx::query_as("SELECT current_database()::text, current_user::text")
+            .fetch_one(&pool)
+            .await?;
+        println!("{:?}", row);
+        Ok(())
+    }
     ```
   </TabItem>
 </Tabs>
 
+Real output of each (versions stamped on each line):
+
+```text
+$ DATABASE_URL=postgresql://postgres:<password>@localhost:5432/appdb node app.mjs        # pg 8.23.0, Node 24.13.0
+{ current_database: 'appdb', current_user: 'postgres' }
+
+$ python app.py        # psycopg 3.3.6, Python 3.12.2
+('appdb', 'postgres')
+
+$ go run .        # pgx v5.11.0, Go 1.27.1
+appdb postgres
+
+$ cargo run        # sqlx 0.9.0, Rust 1.98.1
+("appdb", "postgres")
+```
+
 Notice that every driver accepts the same `postgresql://user:password@host:port/database` connection string. Learn that one format and you can connect from anywhere.
 
 **In pgAdmin:** the same connection details live in the register-server dialog instead of a string — host, port, user, password, and database each have their own field.
+
+## Reading AI-generated code
+
+An assistant asked for a deploy script that applies a migration and reports success writes this. It reads correctly and it is dangerous:
+
+<SpotTheBug lang="bash" code={`#!/usr/bin/env bash
+# AI comment: "apply the migration, then report success"
+psql -U postgres -d appdb -f migrate.sql
+echo "migrations applied"`}>
+
+With `migrate.sql` from above (the third statement fails), running the script prints the error, then `migrations applied`, and exits with status **0**:
+
+```text
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+INSERT 0 1
+migrations applied
+deploy.sh exit status 0
+```
+
+By default psql does not stop on an error and does not fail the script: the duplicate row was skipped but everything after it still ran, a CI job sees a green build, and the database is half-migrated. The fix is `-v ON_ERROR_STOP=1` so the first error stops the run, `-1` so nothing is left behind, `set -e` so the shell script stops, and `-X` so a stray `~/.psqlrc` cannot change behaviour. The same run now fails with status 3 and the transaction is rolled back (the `notes` table does not exist afterwards):
+
+```bash
+# scripts/deploy.sh
+set -euo pipefail
+psql -X -U postgres -d appdb -v ON_ERROR_STOP=1 -1 -f migrate.sql
+echo "migrations applied"
+```
+
+```text
+CREATE TABLE
+INSERT 0 1
+psql:migrate.sql:3: ERROR:  duplicate key value violates unique constraint "notes_pkey"
+DETAIL:  Key (id)=(1) already exists.
+deploy2.sh exit status 3
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+psql is a thin client that sends text to the server and prints what comes back; meta-commands (backslash) are client-side and never reach the server, while everything else (SQL) is. That explains why `\copy` reads your local file, why `\watch` is psql's loop and not a database feature, and why scripts need `ON_ERROR_STOP`: the client, not the server, decides whether to continue.
 
 ## Tips / gotchas
 
 - A connection string follows the shape `postgresql://user:password@host:port/database`. Each part is optional once a default applies.
 - From inside another container (like pgAdmin), the host is the service name, not `localhost`; from your own machine it is `localhost`.
 - Use `psql` for quick checks and scripting, a GUI like pgAdmin or DBeaver for browsing and exploration, and a driver for anything your application does repeatedly.
-- Never hard-code passwords in committed code. Read connection strings from environment variables in real projects.
+- Never hard-code passwords in committed code. Read connection strings from environment variables (as the driver programs above do) or a `~/.pgpass` file; the placeholder `<password>` above is not a real value.
 - The `\d` family of meta-commands is the fastest way to remember a table's exact shape without leaving the shell.
+- In scripts, always `-X -v ON_ERROR_STOP=1`; add `-1` for migrations.
 
 <Callout title="Three doors, one database">
 psql, pgAdmin, and your application driver all connect to the very same PostgreSQL server with the very same credentials. Choose the door that suits the task — the shell for speed, the GUI for exploring, the driver for your app — and know that the database underneath does not care which one you walked through.
@@ -142,23 +450,20 @@ psql, pgAdmin, and your application driver all connect to the very same PostgreS
 | pgAdmin GUI | Clear view of data structure, friendly for beginners | Heavier, and needs a desktop machine with a browser open |
 | A driver in application code | The real thing production runs every day | Writing extra code just to run one query is not worth it |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Relying on a GUI alone and never learning the meta-commands** — the moment you SSH into a production box with no GUI available, you are stuck without `\dt`, `\d`, and friends.
-- **Forgetting pgAdmin/DBeaver connect using the container network's hostname, not `localhost`** — from the host machine you can use `localhost`, but from another container you need the service name, such as `postgres`, as set in compose.
-- **Copy-pasting SQL between tools without checking transaction state** — psql and some GUIs handle autocommit differently. Copying a query containing `BEGIN`/`COMMIT` between tools can leave a transaction hanging without you noticing.
-
-> 💡 Real-world example
->
-> **Most backend teams** — use `psql` for quick production debugging over SSH, since a real server usually has no GUI available.
->
-> **Data analysts** — mainly use pgAdmin or DBeaver for exploratory data work, since they can see table structure and results as a grid instantly, without memorizing syntax.
+- **"A GUI is enough."** The moment you SSH into a production box with no GUI available, you are stuck without `\dt`, `\d`, and friends.
+- **"If the script printed `migrations applied`, it worked."** Not without `ON_ERROR_STOP`: psql exits `0` after errors by default (proved above).
+- **"pgAdmin and DBeaver connect through `localhost`."** From the host machine yes, but from another container you need the service name, such as `postgres`, as set in compose.
+- **"`\copy` and `COPY` are the same."** `COPY` reads and writes files on the *server*; `\copy` uses files on the *client*.
+- **"Copying SQL between tools is harmless."** psql and some GUIs handle autocommit differently; a copied `BEGIN` without `COMMIT` can leave a transaction hanging.
 
 export const quizPsqlPgadmin = [
   {
     q: 'Which psql meta-command lists the tables in the current database?',
     options: ['\\l', '\\dt', '\\c', '\\q'],
     answer: 1,
+    explain: '`\\dt` lists tables; `\\l` lists databases, `\\c` connects to another database, `\\q` quits.',
   },
   {
     q: 'What is the standard shape of a PostgreSQL connection string?',
@@ -169,11 +474,30 @@ export const quizPsqlPgadmin = [
       'connect host=... only',
     ],
     answer: 0,
+    explain: 'psql, Node `pg`, psycopg, pgx and sqlx all accepted `postgresql://user:password@host:port/database` in the lesson.',
   },
   {
     q: 'From the pgAdmin container, what host name should you use to reach the database service?',
     options: ['localhost', 'The service name, postgres', '127.0.0.1', 'pgadmin'],
     answer: 1,
+    explain: 'Inside a container `localhost` is the container itself. On the compose network, services reach each other by service name.',
+  },
+  {
+    q: 'A deploy script runs `psql -f migrate.sql` and one statement in the file fails. What is the exit status of psql?',
+    options: ['3', '1', '0', '2'],
+    answer: 2,
+    explain: 'By default psql continues after an error and exits 0. With `-v ON_ERROR_STOP=1` it stops and exits 3 (proved in the lesson).',
+  },
+  {
+    q: 'What does adding `-1` (`--single-transaction`) to `psql -f file.sql` change?',
+    options: [
+      'It runs only the first statement',
+      'It wraps the file in one transaction so a failure leaves nothing applied',
+      'It makes the connection read-only',
+      'It runs the file once per database',
+    ],
+    answer: 1,
+    explain: 'psql sends `BEGIN` before the file and `COMMIT` after it. Combined with ON_ERROR_STOP a failing migration is rolled back completely.',
   },
 ];
 
