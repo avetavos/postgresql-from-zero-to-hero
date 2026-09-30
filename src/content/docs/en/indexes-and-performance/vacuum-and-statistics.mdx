@@ -1,6 +1,6 @@
 ---
-title: VACUUM and statistics
-description: MVCC leaves dead tuples behind — VACUUM reclaims them, ANALYZE refreshes planner statistics, autovacuum does both, bloat is what happens without it, and VACUUM FULL rewrites the table under a lock.
+title: VACUUM, ANALYZE and Statistics
+description: Watch MVCC dead tuples appear and disappear on 200,000 rows, read real VACUUM VERBOSE output, see what plain VACUUM, VACUUM FULL and a forgotten transaction do to disk and locks, and fix a bad plan with ANALYZE.
 sidebar:
   order: 5
 ---
@@ -10,186 +10,659 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-Indexes and good plans are only half the performance story. The other half is keeping the table itself healthy. PostgreSQL has an unusual way of handling updates and deletes, and if you understand it you will understand why two background tasks — `VACUUM` and `ANALYZE` — are essential to keeping queries fast.
+PostgreSQL never overwrites a row in place. An `UPDATE` writes a new version of the row and leaves the old one behind; a `DELETE` just marks the row as deleted. Those leftovers are **dead tuples**. `VACUUM` reclaims them, and `ANALYZE` refreshes the statistics the planner uses to choose plans. Both usually run automatically (autovacuum), but you need to understand them to explain bloat, slow queries after bulk loads, and lock surprises.
+
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The `sql` fences run top to bottom in one empty database; multi-session transcripts are real runs of two or three `psql` processes started together. Timings are from this Mac.
+
+export const vacuumFlow = `flowchart LR
+  U["UPDATE or DELETE"] --> D["Old version stays behind: a dead tuple"]
+  D --> V["VACUUM: the space becomes reusable"]
+  D --> F["VACUUM FULL: live rows are copied to a new file"]
+  V --> R["Later inserts and updates reuse it"]
+  F --> S["The file shrinks, ACCESS EXCLUSIVE lock held meanwhile"]`;
+
+<Mermaid code={vacuumFlow} title="What happens to an old row version" />
+
+## The dataset
+
+200 000 support tickets, each row about 150 bytes. Autovacuum is switched **off for this table only** (a storage parameter) so that nothing cleans up behind our back while we look; on a real table you leave it on, and a later section shows it firing. The `pgstattuple` extension (part of PostgreSQL's contrib set) gives exact tuple counts.
+
+```sql
+-- sql/setup.sql
+CREATE EXTENSION IF NOT EXISTS pgstattuple;
+
+CREATE TABLE tickets (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  status     text NOT NULL,
+  payload    text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+) WITH (autovacuum_enabled = off);  -- off for THIS table only, so the demos are repeatable
+INSERT INTO tickets (status, payload)
+SELECT CASE WHEN g % 10 = 0 THEN 'closed' ELSE 'open' END, repeat('x', 100)
+FROM generate_series(1, 200000) AS g;
+ANALYZE tickets;
+SELECT count(*) AS rows, pg_size_pretty(pg_relation_size('tickets')) AS heap_size FROM tickets;
+```
+
+```text
+CREATE EXTENSION
+CREATE TABLE
+INSERT 0 200000
+ANALYZE
+  rows  | heap_size 
+--------+-----------
+ 200000 | 30 MB
+(1 row)
+```
 
 ## MVCC leaves dead tuples behind
 
-PostgreSQL uses **MVCC**, multi-version concurrency control, so that readers never block writers. The consequence is that an `UPDATE` does not overwrite a row in place, and a `DELETE` does not immediately erase it. Instead:
+Update 180 000 of the rows (the open tickets):
 
-- An `UPDATE` writes a *new* version of the row and marks the old version as no longer current.
-- A `DELETE` marks the row as gone but leaves its bytes on disk.
+```sql
+-- sql/dead-tuples.sql
+UPDATE tickets SET updated_at = now() WHERE status = 'open';
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup, pg_size_pretty(pg_relation_size('tickets')) AS heap_size
+FROM pg_stat_user_tables WHERE relname = 'tickets';
+```
 
-Those leftover, no-longer-visible row versions are called **dead tuples**. They are invisible to your queries, but they still occupy space and still have to be skipped over during scans.
+```text
+UPDATE 180000
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
 
-export const vacuumFlow = `flowchart LR
-  A[Row version v1] -->|UPDATE| B[Row version v2 live]
-  A -->|marked obsolete| D[Dead tuple]
-  D -->|VACUUM| R[Space reclaimed and reusable]
-  B --> Q[Visible to queries]`;
+ n_live_tup | n_dead_tup | heap_size 
+------------+------------+-----------
+     400000 |     180000 | 57 MB
+(1 row)
+```
 
-<Mermaid code={vacuumFlow} title="An update creates a dead tuple that VACUUM later reclaims" />
+The table doubled from 30 MB to 57 MB: the 180 000 old versions are still there next to the 180 000 new ones. (`n_live_tup` reads 400 000 because the statistics count new versions as they are written and are only an estimate until `VACUUM` or `ANALYZE` corrects them.) `pgstattuple` counts them exactly:
+
+```sql
+-- sql/pgstattuple.sql
+SELECT tuple_count AS live_tuples, dead_tuple_count AS dead_tuples,
+       round(dead_tuple_percent::numeric, 1) AS dead_pct, round(free_percent::numeric, 1) AS free_pct
+FROM pgstattuple('tickets');
+```
+
+```text
+ live_tuples | dead_tuples | dead_pct | free_pct 
+-------------+-------------+----------+----------
+      200000 |      180000 |     45.7 |      0.7
+(1 row)
+```
+
+**45.7 % of the table is dead tuples**: this is *bloat*. Every sequential scan now reads twice the pages, and each index has entries pointing at both versions ([docs](https://www.postgresql.org/docs/18/routine-vacuuming.html)).
 
 ## VACUUM reclaims, ANALYZE informs
 
-Two maintenance operations clean up after MVCC:
-
-- **`VACUUM`** scans a table and marks the space used by dead tuples as free for reuse, so future inserts and updates can fill it instead of growing the file. A plain `VACUUM` makes the space reusable *within* the table and only returns disk to the operating system when the empty pages are at the very end of the file (it then truncates them).
-- **`ANALYZE`** samples the table and updates the **planner statistics** — row counts, value distributions, how many distinct values a column has. These are the numbers the planner relies on to choose between a seq scan and an index scan, as you saw in the EXPLAIN lesson.
-
-You can run them by hand, together or separately:
+`VACUUM` scans the table, finds tuples that no running transaction can still see, and marks their space reusable. It also updates the visibility map, which index-only scans rely on. `VERBOSE` shows what it did (`PROCESS_TOAST false` skips the empty TOAST table so the output stays readable):
 
 ```sql
--- reclaim dead-tuple space in one table
-VACUUM books;
-
--- refresh statistics so the planner estimates well
-ANALYZE books;
-
--- do both at once
-VACUUM ANALYZE books;
+-- sql/vacuum-verbose.sql
+VACUUM (VERBOSE, PROCESS_TOAST false) tickets;
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup, pg_size_pretty(pg_relation_size('tickets')) AS heap_size, vacuum_count
+FROM pg_stat_user_tables WHERE relname = 'tickets';
 ```
 
-From application code it is the same statement through any driver.
+```text
+INFO:  vacuuming "b2_vacuum_and_statistics.public.tickets"
+INFO:  finished vacuuming "b2_vacuum_and_statistics.public.tickets": index scans: 1
+pages: 0 removed, 7308 remain, 7308 scanned (100.00% of total), 0 eagerly scanned
+tuples: 180000 removed, 200000 remain, 0 are dead but not yet removable
+removable cutoff: 323782, which was 0 XIDs old when operation ended
+new relfrozenxid: 323779, which is 1 XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 7308 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan needed: 3847 pages from table (52.64% of total) had 180000 dead item identifiers removed
+index "tickets_pkey": pages: 1099 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 0.445 MB/s
+buffer usage: 19626 hits, 0 reads, 3 dirtied
+WAL usage: 16099 records, 3 full page images, 2100354 bytes, 0 buffers full
+system usage: CPU: user: 0.04 s, system: 0.01 s, elapsed: 0.05 s
+VACUUM
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_live_tup | n_dead_tup | heap_size | vacuum_count 
+------------+------------+-----------+--------------
+     200000 |          0 | 57 MB     |            1
+(1 row)
+```
+
+Read the important lines: `tuples: 180000 removed, 200000 remain, 0 are dead but not yet removable`; the 180 000 dead item pointers were also removed from the primary-key index (`index scan needed ... 180000 dead item identifiers removed`); `visibility map: 7308 pages set all-visible`. And the table is still **57 MB**: plain `VACUUM` makes space *reusable*, it does not shrink the file. That is by design, and the next update round proves the space is reused:
+
+```sql
+-- sql/space-reuse.sql
+-- another full round of updates: the freed space is reused, the file does not grow
+UPDATE tickets SET updated_at = now() WHERE status = 'open';
+SELECT pg_size_pretty(pg_relation_size('tickets')) AS heap_after_second_update;
+SELECT tuple_count AS live_tuples, dead_tuple_count AS dead_tuples, round(free_percent::numeric, 1) AS free_pct
+FROM pgstattuple('tickets');
+```
+
+```text
+UPDATE 180000
+ heap_after_second_update 
+--------------------------
+ 57 MB
+(1 row)
+
+ live_tuples | dead_tuples | free_pct 
+-------------+-------------+----------
+      200000 |      180000 |      0.7
+(1 row)
+```
+
+Same 57 MB after another 180 000 updates (and 180 000 dead tuples again, waiting for the next vacuum). This steady state is what a healthy table looks like: a file about twice the live data, where vacuum keeps recycling the free half.
+
+`ANALYZE` does a different job: it samples the table and stores column statistics that the planner reads. You can run both at once, and every driver does it the same way (`VACUUM` cannot run inside a transaction block, so use autocommit):
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    VACUUM ANALYZE books;
+    -- sql/vacuum-analyze.sql
+    VACUUM (ANALYZE) tickets;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await pool.query('VACUUM ANALYZE books');
+    await pool.query('VACUUM (ANALYZE) tickets');
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    # VACUUM cannot run inside a transaction block,
-    # so use autocommit for this statement
-    old = conn.autocommit
-    conn.autocommit = True
-    cur.execute("VACUUM ANALYZE books")
-    conn.autocommit = old
+    cur.execute("VACUUM (ANALYZE) tickets")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := conn.Exec(ctx, "VACUUM ANALYZE books")
+    _, err := conn.Exec(ctx, "VACUUM (ANALYZE) tickets")
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    sqlx::query("VACUUM ANALYZE books")
+    sqlx::query("VACUUM (ANALYZE) tickets")
         .execute(&pool)
         .await?;
     ```
   </TabItem>
 </Tabs>
 
-A note for drivers: `VACUUM` cannot run inside a transaction block, so issue it on a connection in autocommit mode rather than wrapped in `BEGIN ... COMMIT`.
+The four drivers ran that statement once on a fresh copy of the updated table and read `pg_class` back. Before it, `relallvisible` was 0; afterwards it was 7308 pages (every page of the table):
 
-## Autovacuum does this for you
+```text
+$ (each driver ran VACUUM (ANALYZE) once on a fresh copy of the updated table, then read pg_class: relallvisible, reltuples)
+before:                 relallvisible = 0, reltuples = 200000
+Node.js (pg 8.23.0):    { relallvisible: 7308, reltuples: '200000' }
+Python (psycopg 3.3.6): (7308, 200000)
+Go (pgx v5.11.0):       7308 200000
+Rust (sqlx 0.9.0):      7308 200000
+```
 
-You rarely run `VACUUM` by hand, because PostgreSQL ships with **autovacuum** — a background process that watches how many rows each table has changed and automatically runs `VACUUM` and `ANALYZE` when the churn crosses a threshold. It is on by default, and you should leave it on.
+### ANALYZE and the planner
 
-Autovacuum keeps dead tuples from piling up and keeps statistics fresh without any effort on your part. When people complain that "Postgres got slow over time", the cause is very often autovacuum being disabled or unable to keep up.
-
-## Bloat
-
-When dead tuples accumulate faster than they are reclaimed — because autovacuum is off, too slow, or a long-running transaction is holding old versions visible — the table grows larger than the live data justifies. This is **bloat**. A bloated table has more pages to read for the same number of live rows, so even a seq scan or index scan does extra I/O. Bloat affects indexes too.
-
-You can see the rough state of a table with:
+Statistics matter as much as dead space. Here a table gets a bulk load and a query is planned before and after `ANALYZE`. 90 % of the 300 000 rows have `sensor = 1`:
 
 ```sql
-SELECT relname, n_live_tup, n_dead_tup, last_autovacuum
-FROM pg_stat_user_tables
-WHERE relname = 'books';
+-- sql/analyze-plan.sql
+CREATE TABLE readings (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, sensor int NOT NULL, value int NOT NULL) WITH (autovacuum_enabled = off);
+CREATE INDEX readings_sensor_idx ON readings (sensor);
+-- 300 000 rows, but sensor 1 has 90 % of them
+INSERT INTO readings (sensor, value)
+SELECT CASE WHEN g % 10 = 0 THEN 2 + g % 500 ELSE 1 END, g FROM generate_series(1, 300000) g;
+-- no ANALYZE yet: the planner has only default guesses
+EXPLAIN SELECT * FROM readings WHERE sensor = 1;
+ANALYZE readings;
+EXPLAIN SELECT * FROM readings WHERE sensor = 1;
+EXPLAIN SELECT * FROM readings WHERE sensor = 77;
 ```
 
 ```text
- relname | n_live_tup | n_dead_tup |        last_autovacuum
----------+------------+------------+-------------------------------
- books   |      48213 |       1502 | 2026-06-25 09:14:02.118431+00
+CREATE TABLE
+CREATE INDEX
+INSERT 0 300000
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on readings  (cost=21.12..1723.00 rows=1654 width=12)
+   Recheck Cond: (sensor = 1)
+   ->  Bitmap Index Scan on readings_sensor_idx  (cost=0.00..20.70 rows=1654 width=0)
+         Index Cond: (sensor = 1)
+(4 rows)
+
+ANALYZE
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Seq Scan on readings  (cost=0.00..5372.00 rows=269900 width=12)
+   Filter: (sensor = 1)
+(2 rows)
+
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Index Scan using readings_sensor_idx on readings  (cost=0.30..5.69 rows=1 width=12)
+   Index Cond: (sensor = 77)
+(2 rows)
 ```
 
-A healthy `n_dead_tup` is small relative to `n_live_tup`; a large value that never falls means vacuuming is not keeping up.
+Without statistics the planner guessed `rows=1654` for `sensor = 1` (a default selectivity) and chose an index-driven bitmap scan; the truth is 270 000 rows. After `ANALYZE` it estimates `rows=270430` and switches to a `Seq Scan`, which is right when nine rows in ten qualify. A rare sensor (`sensor = 77`) still gets the index. What `ANALYZE` stored:
+
+```sql
+-- sql/pg-stats.sql
+SELECT attname, n_distinct, (most_common_vals::text::text[])[1] AS most_common, round(most_common_freqs[1]::numeric, 3) AS its_frequency
+FROM pg_stats WHERE tablename = 'readings' AND attname = 'sensor';
+SELECT reltuples::int AS reltuples, relpages FROM pg_class WHERE relname = 'readings';
+```
+
+```text
+ attname | n_distinct | most_common | its_frequency 
+---------+------------+-------------+---------------
+ sensor  |         51 | 1           |         0.900
+(1 row)
+
+ reltuples | relpages 
+-----------+----------
+    300000 |     1622
+(1 row)
+```
+
+`most_common_vals` and `most_common_freqs` are the statistics that let the planner tell a 90 % value from a rare one. The sample size is governed by `default_statistics_target` (100 by default, shown below); raise it per column with `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS` when a skewed column is misestimated.
+
+## Autovacuum does this for you
+
+The autovacuum launcher wakes up regularly and vacuums or analyzes tables that changed enough. The settings, from this server:
+
+```sql
+-- sql/autovacuum-settings.sql
+SELECT name, setting, unit
+FROM pg_settings
+WHERE name IN ('autovacuum', 'autovacuum_naptime', 'autovacuum_vacuum_threshold', 'autovacuum_vacuum_scale_factor',
+               'autovacuum_vacuum_max_threshold', 'autovacuum_vacuum_insert_threshold', 'autovacuum_vacuum_insert_scale_factor',
+               'autovacuum_analyze_threshold', 'autovacuum_analyze_scale_factor', 'autovacuum_vacuum_cost_delay',
+               'autovacuum_vacuum_cost_limit', 'autovacuum_freeze_max_age', 'default_statistics_target')
+ORDER BY name;
+```
+
+```text
+                 name                  |  setting  | unit 
+---------------------------------------+-----------+------
+ autovacuum                            | on        | 
+ autovacuum_analyze_scale_factor       | 0.1       | 
+ autovacuum_analyze_threshold          | 50        | 
+ autovacuum_freeze_max_age             | 200000000 | 
+ autovacuum_naptime                    | 60        | s
+ autovacuum_vacuum_cost_delay          | 2         | ms
+ autovacuum_vacuum_cost_limit          | -1        | 
+ autovacuum_vacuum_insert_scale_factor | 0.2       | 
+ autovacuum_vacuum_insert_threshold    | 1000      | 
+ autovacuum_vacuum_max_threshold       | 100000000 | 
+ autovacuum_vacuum_scale_factor        | 0.2       | 
+ autovacuum_vacuum_threshold           | 50        | 
+ default_statistics_target             | 100       | 
+(13 rows)
+```
+
+A table is vacuumed when its dead tuples exceed `autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor * reltuples` (50 + 20 % of the rows). PostgreSQL 18's `autovacuum_vacuum_max_threshold` (default 100 000 000) puts a ceiling on that formula, so a billion-row table no longer waits for 200 million dead tuples ([release notes](https://www.postgresql.org/docs/18/release-18.html), [docs](https://www.postgresql.org/docs/18/runtime-config-vacuum.html)). Inserts trigger their own vacuum through `autovacuum_vacuum_insert_*` and `ANALYZE` has its own thresholds (50 + 10 %):
+
+```sql
+-- sql/autovacuum-threshold.sql
+-- vacuum threshold = autovacuum_vacuum_threshold + scale_factor * reltuples (capped by the PG 18 max threshold)
+SELECT c.relname, c.reltuples::int AS reltuples,
+       (50 + 0.2 * c.reltuples)::int AS dead_tuples_needed_to_trigger
+FROM pg_class c WHERE c.relname IN ('tickets', 'readings');
+```
+
+```text
+ relname  | reltuples | dead_tuples_needed_to_trigger 
+----------+-----------+-------------------------------
+ tickets  |    200000 |                         40050
+ readings |    300000 |                         60050
+(2 rows)
+```
+
+Here it fires for real, on a table with autovacuum left on. 40 000 updated rows are above the 20 050 threshold; the launcher noticed within 15 seconds (`autovacuum_naptime` is 60 s, and the launcher checks each database on that schedule, so a first check can take anywhere up to a minute):
+
+```text
+-- one session, autovacuum left ON for this table
+CREATE TABLE auto_t (id int PRIMARY KEY, v int NOT NULL);
+INSERT INTO auto_t SELECT g, 0 FROM generate_series(1, 100000) g;
+ANALYZE auto_t;
+UPDATE auto_t SET v = 1 WHERE id <= 40000;   -- 40 000 > 50 + 0.2 * 100 000 = 20 050
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup, last_autovacuum, autovacuum_count FROM pg_stat_user_tables WHERE relname = 'auto_t';
+-- psql output, right after the UPDATE
+ n_live_tup | n_dead_tup | last_autovacuum | autovacuum_count 
+------------+------------+-----------------+------------------
+     200000 |      40000 |                 |                0
+(1 row)
+
+-- the same query, polled every 5 s: the first poll that showed autovacuum_count = 1 was 15 s later
+ n_live_tup | n_dead_tup | ran | autovacuum_count | analyzed 
+------------+------------+-----+------------------+----------
+     100000 |          0 | t   |                1 | t
+(1 row)
+```
+
+You can override the thresholds for one hot table with storage parameters instead of changing the whole server:
+
+```sql
+-- sql/per-table-autovacuum.sql
+ALTER TABLE readings SET (autovacuum_enabled = on, autovacuum_vacuum_scale_factor = 0.02);
+SELECT relname, reloptions FROM pg_class WHERE relname = 'readings';
+```
+
+```text
+ALTER TABLE
+ relname  |                         reloptions                          
+----------+-------------------------------------------------------------
+ readings | {autovacuum_enabled=on,autovacuum_vacuum_scale_factor=0.02}
+(1 row)
+```
+
+## Bloat
+
+**Bloat** is space occupied by dead tuples or free space that a table cannot give back. It costs disk, cache and scan time. `pgstattuple` (above) measures it exactly but reads the whole table; the cheap estimate is comparing `pg_relation_size` with `n_live_tup * average row width`. Bloat has three usual causes: autovacuum that cannot keep up with a hot table, a long transaction holding back cleanup (below), and one huge delete.
+
+### Plain VACUUM only returns trailing pages
+
+Plain `VACUUM` can hand space back to the operating system only when the *last* pages of the file are completely empty; free space in the middle stays in the file for reuse. Two tables of 100 000 rows, 8 MB each: delete everything but 10 rows from the end of one, and every second row from the other:
+
+```sql
+-- sql/truncation.sql
+CREATE TABLE trunc_end (id int, pad text) WITH (autovacuum_enabled = off);
+INSERT INTO trunc_end SELECT g, repeat('x', 50) FROM generate_series(1, 100000) g;
+SELECT pg_size_pretty(pg_relation_size('trunc_end')) AS before;
+DELETE FROM trunc_end WHERE id > 10;
+VACUUM trunc_end;
+SELECT pg_size_pretty(pg_relation_size('trunc_end')) AS after_vacuum_trailing_delete;
+
+CREATE TABLE trunc_mid (id int, pad text) WITH (autovacuum_enabled = off);
+INSERT INTO trunc_mid SELECT g, repeat('x', 50) FROM generate_series(1, 100000) g;
+DELETE FROM trunc_mid WHERE id % 2 = 0;
+VACUUM trunc_mid;
+SELECT pg_size_pretty(pg_relation_size('trunc_mid')) AS after_vacuum_middle_delete;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+ before  
+---------
+ 8248 kB
+(1 row)
+
+DELETE 99990
+VACUUM
+ after_vacuum_trailing_delete 
+------------------------------
+ 8192 bytes
+(1 row)
+
+CREATE TABLE
+INSERT 0 100000
+DELETE 50000
+VACUUM
+ after_vacuum_middle_delete 
+----------------------------
+ 8248 kB
+(1 row)
+```
+
+The first shrank to 8 kB, the second is still 8 MB although half its rows are gone.
 
 ## VACUUM FULL rewrites the table
 
-Plain `VACUUM` makes space reusable but does not shrink the file. To actually return disk to the operating system and compact a badly bloated table, there is `VACUUM FULL`, which rewrites the entire table into a fresh, tightly packed file.
+`VACUUM FULL` builds a brand-new copy of the table containing only live rows, then swaps it in. It returns all the free space, and it has a price:
 
 ```sql
-VACUUM FULL books;
+-- sql/vacuum-full.sql
+SELECT pg_relation_filenode('tickets') AS filenode_before, pg_size_pretty(pg_relation_size('tickets')) AS heap_before;
+VACUUM FULL tickets;
+SELECT pg_relation_filenode('tickets') AS filenode_after, pg_size_pretty(pg_relation_size('tickets')) AS heap_after;
 ```
 
-The catch is severe: `VACUUM FULL` takes an **exclusive lock** on the table for the whole rewrite, blocking every read and write until it finishes. On a large table that can mean significant downtime. Use it only for one-off recovery from serious bloat, during a maintenance window — never as routine housekeeping. Routine cleanup is autovacuum's job.
+```text
+ filenode_before | heap_before 
+-----------------+-------------
+           28461 | 57 MB
+(1 row)
 
-**In pgAdmin:** right-click a table and choose Maintenance to run `VACUUM`, `ANALYZE`, or `VACUUM FULL` from a dialog, with checkboxes for the options. The same Maintenance dialog can reindex a bloated index.
+VACUUM
+ filenode_after | heap_after 
+----------------+------------
+          28473 | 30 MB
+(1 row)
+```
+
+The heap went from 57 MB to 30 MB and got a new file (`filenode` 28411 to 28423). While it runs it holds an `ACCESS EXCLUSIVE` lock: nothing can read or write the table. Here is a 1 500 000-row table with half of its rows deleted (202 MB before). Session A runs `VACUUM FULL`; session B tries a `SELECT count(*)` 0.15 s later; session C looks at `pg_locks` while it happens:
+
+```text
+-- session A: script
+\timing on
+VACUUM FULL big_t;
+-- session A: psql output
+Timing is on.
+VACUUM
+Time: 474.164 ms
+
+-- session B (starts 0.15 s later): script
+\o /dev/null
+SELECT pg_sleep(0.15);
+\o
+\timing on
+SELECT count(*) FROM big_t;
+-- session B: psql output
+Timing is on.
+ count  
+--------
+ 750000
+(1 row)
+
+Time: 340.612 ms
+
+-- session C (starts 0.25 s in, while A is still rewriting): script
+\o /dev/null
+SELECT pg_sleep(0.25);
+\o
+SELECT l.mode, l.granted, a.state, left(a.query, 30) AS query, a.wait_event_type, a.wait_event
+FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+WHERE l.relation = 'big_t'::regclass ORDER BY l.granted DESC, l.pid;
+-- session C: psql output
+        mode         | granted | state  |            query            | wait_event_type |   wait_event   
+---------------------+---------+--------+-----------------------------+-----------------+----------------
+ AccessExclusiveLock | t       | active | VACUUM FULL big_t;          | IO              | DataFileExtend
+ AccessShareLock     | f       | active | SELECT count(*) FROM big_t; | Lock            | relation
+(2 rows)
+```
+
+B's plain `SELECT` waited **341 ms** for A's 474 ms rewrite, and C caught it red-handed: A holds `AccessExclusiveLock`, B's `AccessShareLock` is `granted = f`, waiting on a `Lock`. On a busy production table `VACUUM FULL` is an outage. Reach for it only on a table you can take offline; the online alternatives are extensions such as `pg_repack`.
+
+## A forgotten transaction blocks cleanup
+
+`VACUUM` can only remove a dead tuple that *no* transaction can still see. An open transaction that has a snapshot (any `REPEATABLE READ` transaction, or an old `READ COMMITTED` statement) makes every version created after it started "not yet removable", even if that client is idle. Session A opens a transaction, reads, and goes for a three-second coffee; session B updates 180 000 rows and vacuums twice:
+
+```text
+-- session A: script (a client that opened a transaction and went for a coffee)
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) AS a_sees FROM tickets;
+\! sleep 3
+COMMIT;
+-- session A: psql output
+BEGIN
+ a_sees 
+--------
+ 200000
+(1 row)
+
+COMMIT
+
+-- session B (starts 0.5 s later): script
+UPDATE tickets SET updated_at = now() WHERE status = 'open';
+SELECT state, left(query, 32) AS last_query, backend_xmin IS NOT NULL AS holds_snapshot
+FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();
+VACUUM (VERBOSE, PROCESS_TOAST false) tickets;   -- while A is still open
+\! sleep 3.5
+VACUUM (VERBOSE, PROCESS_TOAST false) tickets;   -- after A committed
+-- session B: psql output (the lines that matter)
+UPDATE 180000
+        state        |            last_query            | holds_snapshot 
+---------------------+----------------------------------+----------------
+ idle in transaction | SELECT count(*) AS a_sees FROM t | t
+(1 row)
+
+tuples: 0 removed, 379996 remain, 180000 are dead but not yet removable
+removable cutoff: 323711, which was 1 XIDs old when operation ended
+...
+tuples: 180000 removed, 190541 remain, 0 are dead but not yet removable
+removable cutoff: 323712, which was 0 XIDs old when operation ended
+```
+
+`pg_stat_activity` shows A as `idle in transaction` with a snapshot (`backend_xmin`). The first `VACUUM` scanned everything and removed **nothing**: `180000 are dead but not yet removable`. After A committed, the same `VACUUM` removed all 180 000. Multiply three seconds by a connection-pool leak or a stuck batch job and you get a table that grows without bound while autovacuum runs and achieves nothing. The defence is to keep transactions short and to set `idle_in_transaction_session_timeout`.
+
+## Reading AI-generated code
+
+An assistant writes a purge migration that also wants the space back, and wraps everything in one transaction "so it is atomic":
+
+<SpotTheBug lang="sql" code={`-- AI comment: "purge closed tickets, then reclaim the space, all in one migration"
+BEGIN;
+DELETE FROM tickets WHERE status = 'closed';
+VACUUM tickets;
+COMMIT;`}>
+
+`VACUUM` cannot run inside a transaction block, so the migration fails at the second statement, after the `DELETE` (which is rolled back):
+
+```sql
+-- @expect-error 25001
+BEGIN;
+DELETE FROM tickets WHERE status = 'closed';
+VACUUM tickets;
+COMMIT;
+```
+
+```text
+BEGIN
+DELETE 20000
+ROLLBACK
+ERROR:  VACUUM cannot run inside a transaction block
+```
+
+It fails loudly, which is the good outcome; the risk is a migration runner that swallows the error, or a `DELETE` that commits while the vacuum never runs. Commit the transactional part, then vacuum as its own statement. Even then, remember the space is only *reusable*, not returned to the operating system:
+
+```sql
+-- sql/stb-fixed.sql
+BEGIN;
+DELETE FROM tickets WHERE status = 'closed';
+COMMIT;
+VACUUM tickets;
+```
+
+```text
+BEGIN
+DELETE 20000
+COMMIT
+VACUUM
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Every `UPDATE` is an `INSERT` of a new version plus a "this one is old" mark on the previous version, and every `DELETE` is the mark alone. Old versions stay because other transactions may still need them. `VACUUM` is the garbage collector: it can free a version only when the oldest snapshot in the system no longer needs it, which is why a single idle-in-transaction session can stall cleanup everywhere it can see. Freed space goes back to the table's own free list, so files stay the size of the peak. `ANALYZE` is a separate thing, the census the planner reads. Autovacuum runs both on a schedule proportional to how much a table has changed.
 
 ## Tips / gotchas
 
-- Keep autovacuum enabled. Disabling it is the most common cause of a database that slowly degrades into bloat and bad plans.
-- Run `ANALYZE` (or `VACUUM ANALYZE`) manually after a large bulk load, import, or migration. Autovacuum may not fire immediately, and stale statistics right after a big change lead the planner astray.
-- Plain `VACUUM` is non-blocking and safe to run anytime; `VACUUM FULL` is blocking and disruptive — reserve it for maintenance windows.
-- A long-running transaction prevents vacuum from cleaning up tuples it might still need to see. Watch for forgotten open transactions when bloat grows despite healthy autovacuum.
-- Monitor `n_dead_tup` and `last_autovacuum` in `pg_stat_user_tables` to confirm vacuuming is actually keeping pace with your write volume.
+- Do not disable autovacuum. If a hot table bloats, make its thresholds lower (per-table storage parameters), not the server's off.
+- Plain `VACUUM` does not shrink files except for empty trailing pages; `VACUUM FULL` does, and blocks everything meanwhile.
+- Run `ANALYZE` (or a plain `VACUUM (ANALYZE)`) after bulk loads or large deletes; do not wait for autovacuum before the first heavy query.
+- Watch for `idle in transaction` sessions and old snapshots (`backend_xmin` in `pg_stat_activity`); set `idle_in_transaction_session_timeout`.
+- `VACUUM` cannot run in a transaction block (`25001`).
+- `pg_stat_user_tables` (`n_dead_tup`, `last_autovacuum`, `autovacuum_count`) is the first place to look; stats can lag by a moment, `pg_stat_force_next_flush()` flushes your own session's counters.
 
-<Callout title="Let the database keep itself healthy">
-MVCC trades in-place updates for non-blocking reads, and the price is dead tuples that must be cleaned up. Autovacuum pays that price for you: it reclaims space and refreshes statistics in the background. Leave it on, `ANALYZE` after big loads, and save `VACUUM FULL` for emergencies — that is almost the entire maintenance story.
+<Callout title="Vacuum is maintenance, not a fix">
+If a table needs frequent `VACUUM FULL` to stay small, the real problem is upstream: updates too wide, autovacuum too lax for this table, or a long transaction. Fix the cause, then let autovacuum keep the file at a steady size.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Plain `VACUUM` | Does not block reads or writes; safe to run anytime | Makes space reusable inside the table; returns disk to the OS only by truncating empty pages at the end of the file |
-| `VACUUM FULL` | Rewrites the table compactly and actually returns disk to the OS | Takes an exclusive lock that blocks both reads and writes for the whole run |
-| Autovacuum (automatic) | Runs continuously in the background with almost no upkeep | Cannot be tuned as precisely as a manual run; may fall behind during very heavy bulk loads |
-| Manual vacuum | You control exactly when it runs — good right after a bulk load | More operational burden — someone has to watch for it and trigger it |
+| Autovacuum (default) | Reclaims space and refreshes statistics with no attention | Needs tuning on very hot or very large tables; blocked by long transactions |
+| Manual `VACUUM` | Runs now, e.g. after a big delete; takes only a light lock | Does not shrink the file (only trailing pages) |
+| `VACUUM FULL` | Returns all free space to the OS | `ACCESS EXCLUSIVE` lock (B waited 341 ms of a 474 ms rewrite) and a full rewrite |
+| Lower per-table thresholds | Vacuums a hot table sooner | More vacuum work and I/O |
+| Higher `default_statistics_target` | Better estimates on skewed data | Larger `pg_statistic`, slower `ANALYZE` and planning |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Treating `VACUUM FULL` as routine maintenance** — `VACUUM FULL` takes an exclusive lock that blocks every read and write. Reserve it for recovering from severe bloat during a maintenance window, not for daily use.
-- **Disabling or tuning autovacuum too conservatively** — thresholds that are too loose, or autovacuum turned off entirely, let dead tuples accumulate unnoticed until they become bloat that is hard to fix later.
-- **Skipping `ANALYZE` after a large bulk load** — after loading a lot of data, an import, or a migration, the old statistics go stale immediately. If autovacuum has not caught up yet, the planner gets bad estimates and picks a poor plan. Run `ANALYZE` by hand right after these operations.
-
-> 💡 Real-world example
->
-> **High-write SaaS platforms** — teams running PostgreSQL under a heavy write load treat autovacuum lag and the dead-tuple ratio as a core operational metric, because uncontrolled table bloat is one of the top causes of PostgreSQL performance degrading in production.
->
-> **DBA teams using `pg_stat_user_tables`** — many teams set automatic alerts on `n_dead_tup` and `last_autovacuum` so they know ahead of time, before queries actually slow down, instead of waiting for user complaints.
+- **"VACUUM makes the table smaller."** Plain VACUUM made it reusable: 57 MB stayed 57 MB, and the second update round fit in the same file.
+- **"Autovacuum will clean this up, so a long-open transaction is harmless."** The first VACUUM removed nothing while A was open: `180000 are dead but not yet removable`.
+- **"VACUUM FULL is just a stronger VACUUM."** It is a rewrite under an exclusive lock: a reader waited 341 ms.
+- **"ANALYZE only matters for big tables."** It changed the plan for a 300 000-row table from a bitmap scan to a seq scan.
+- **"`n_live_tup` is exact."** It read 400 000 for a 200 000-row table until the vacuum corrected it.
 
 export const quizVacuum = [
   {
-    q: 'Why does an UPDATE leave a dead tuple behind in PostgreSQL?',
+    q: 'After 180,000 UPDATEs on a 200,000-row table, what has PostgreSQL done with the old row versions?',
     options: [
-      'Because of a bug',
-      'Because MVCC writes a new row version and marks the old one obsolete rather than overwriting in place',
-      'Because indexes require it',
-      'Because the row is locked',
+      'Overwritten them in place',
+      'Kept them as dead tuples until VACUUM reclaims them (the table grew from 30 MB to 57 MB)',
+      'Deleted them immediately',
+      'Moved them to a separate history table',
     ],
     answer: 1,
+    explain: 'MVCC writes a new version and leaves the old one. pgstattuple counted 180,000 dead tuples (45.7 %).',
   },
   {
-    q: 'What does ANALYZE do that VACUUM does not?',
+    q: 'What does a plain `VACUUM` do to the size of the table file?',
     options: [
-      'It reclaims dead-tuple space',
-      'It updates the planner statistics used to choose scan strategies',
-      'It rewrites the table file',
-      'It locks the table',
+      'Shrinks it to the live data size',
+      'Usually nothing: it marks space reusable and only truncates empty pages at the end',
+      'Doubles it',
+      'Rewrites it into a new file',
     ],
     answer: 1,
+    explain: 'The table stayed 57 MB and the next update round reused the space. Deleting trailing rows shrank a table to 8 kB; deleting every second row left it at 8 MB.',
   },
   {
-    q: 'Why should VACUUM FULL be reserved for maintenance windows?',
+    q: 'A `VACUUM (VERBOSE)` reports `180000 are dead but not yet removable`. What is the most likely cause?',
     options: [
-      'It runs slowly but does not block anyone',
-      'It takes an exclusive lock that blocks all reads and writes while it rewrites the table',
-      'It deletes the index',
+      'The table has no index',
+      'A transaction with an older snapshot is still open (for example idle in transaction)',
+      'autovacuum is disabled',
+      'The table is too small',
+    ],
+    answer: 1,
+    explain: 'Dead tuples newer than the oldest snapshot cannot be removed. After the idle transaction committed, the same VACUUM removed all 180000.',
+  },
+  {
+    q: 'What is the main danger of running VACUUM FULL on a production table?',
+    options: [
+      'It deletes live rows',
+      'It takes an ACCESS EXCLUSIVE lock, so readers and writers wait for the whole rewrite',
       'It disables autovacuum',
+      'It corrupts statistics',
     ],
     answer: 1,
+    explain: 'pg_locks showed AccessExclusiveLock granted to VACUUM FULL and a waiting AccessShareLock for a plain SELECT (341 ms delay in the lesson).',
+  },
+  {
+    q: 'Why did the planner switch from a bitmap scan to a Seq Scan for `sensor = 1` after ANALYZE?',
+    options: [
+      'ANALYZE created an index',
+      'It learned from the statistics that 90 % of the rows match, so reading the whole table is cheaper',
+      'ANALYZE deleted rows',
+      'The Seq Scan was forced with SET',
+    ],
+    answer: 1,
+    explain: 'pg_stats shows most_common_vals starting with 1 at frequency 0.900. The estimate went from rows=1654 to rows=270430.',
   },
 ];
 

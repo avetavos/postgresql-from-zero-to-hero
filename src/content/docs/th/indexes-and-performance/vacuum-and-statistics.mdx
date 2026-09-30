@@ -1,6 +1,6 @@
 ---
-title: VACUUM และ statistics
-description: MVCC ทิ้ง dead tuple ไว้ข้างหลัง — VACUUM คืนพื้นที่เหล่านั้น, ANALYZE รีเฟรช planner statistics, autovacuum ทำทั้งสองอย่าง, bloat คือสิ่งที่เกิดขึ้นเมื่อไม่ทำ และ VACUUM FULL เขียน table ใหม่ภายใต้การ lock
+title: VACUUM, ANALYZE และสถิติ
+description: ดู dead tuple ของ MVCC ปรากฏและหายไปบน 200,000 row อ่านผล VACUUM VERBOSE จริง ดูว่า VACUUM ธรรมดา VACUUM FULL และ transaction ที่ถูกลืมทำอะไรกับดิสก์และ lock และแก้ plan ที่แย่ด้วย ANALYZE
 sidebar:
   order: 5
 ---
@@ -10,186 +10,659 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-index และแผนที่ดีเป็นเพียงครึ่งหนึ่งของเรื่องประสิทธิภาพ อีกครึ่งหนึ่งคือการรักษาตัว table เองให้แข็งแรง PostgreSQL มีวิธีจัดการการ update และ delete ที่ไม่ธรรมดา และถ้าคุณเข้าใจกลไกนี้ คุณก็จะเข้าใจว่าทำไมงานเบื้องหลังสองอย่าง — `VACUUM` และ `ANALYZE` — จึงจำเป็นต่อการรักษา query ให้เร็ว
+PostgreSQL ไม่เคยเขียนทับ row ที่เดิม `UPDATE` เขียน row เวอร์ชันใหม่และทิ้งเวอร์ชันเก่าไว้ `DELETE` แค่ทำเครื่องหมายว่า row ถูกลบ ของที่เหลือเหล่านั้นคือ **dead tuple** `VACUUM` เก็บกู้มัน และ `ANALYZE` รีเฟรชสถิติที่ planner ใช้เลือก plan ทั้งสองมักรันอัตโนมัติ (autovacuum) แต่คุณต้องเข้าใจมันเพื่ออธิบาย bloat, query ช้าหลัง bulk load และความประหลาดใจเรื่อง lock
 
-## MVCC ทิ้ง dead tuple ไว้ข้างหลัง
-
-PostgreSQL ใช้ **MVCC** หรือ multi-version concurrency control เพื่อให้ผู้อ่านไม่เคยบล็อกผู้เขียน ผลที่ตามมาคือ `UPDATE` ไม่ได้เขียนทับ row ที่ตำแหน่งเดิม และ `DELETE` ก็ไม่ได้ลบ row ทิ้งทันที แต่กลับเป็นว่า:
-
-- `UPDATE` เขียนเวอร์ชัน *ใหม่* ของ row ขึ้นมา และทำเครื่องหมายเวอร์ชันเก่าว่าไม่ใช่เวอร์ชันปัจจุบันอีกต่อไป
-- `DELETE` ทำเครื่องหมาย row ว่าหายไปแล้ว แต่ยังทิ้งไบต์ของ row นั้นไว้บนดิสก์
-
-เวอร์ชัน row ที่หลงเหลือและมองไม่เห็นแล้วเหล่านั้นเรียกว่า **dead tuple** — query ของคุณมองไม่เห็น แต่ยังกินพื้นที่อยู่ และ scan ก็ยังต้องข้ามผ่านทุกครั้ง
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว บันทึกหลาย session เป็นการรันจริงของโปรเซส `psql` สองหรือสามตัวที่เริ่มพร้อมกัน ตัวเลขเวลามาจาก Mac เครื่องนี้
 
 export const vacuumFlow = `flowchart LR
-  A[Row version v1] -->|UPDATE| B[Row version v2 live]
-  A -->|marked obsolete| D[Dead tuple]
-  D -->|VACUUM| R[Space reclaimed and reusable]
-  B --> Q[Visible to queries]`;
+  U["UPDATE or DELETE"] --> D["Old version stays behind: a dead tuple"]
+  D --> V["VACUUM: the space becomes reusable"]
+  D --> F["VACUUM FULL: live rows are copied to a new file"]
+  V --> R["Later inserts and updates reuse it"]
+  F --> S["The file shrinks, ACCESS EXCLUSIVE lock held meanwhile"]`;
 
-<Mermaid code={vacuumFlow} title="การ update สร้าง dead tuple ที่ VACUUM จะมาคืนพื้นที่ในภายหลัง" />
+<Mermaid code={vacuumFlow} title="เกิดอะไรกับ row เวอร์ชันเก่า" />
 
-## VACUUM คืนพื้นที่ ANALYZE แจ้งข้อมูล
+## ชุดข้อมูล
 
-งานบำรุงรักษาสองอย่างทำความสะอาดหลัง MVCC:
-
-- **`VACUUM`** สแกน table และทำเครื่องหมายพื้นที่ที่ dead tuple ใช้อยู่ว่าว่างพร้อมนำกลับมาใช้ใหม่ได้ เพื่อให้การ insert และ update ในอนาคตเข้ามาเติมเต็มแทนที่จะทำให้ไฟล์ขยายตัว `VACUUM` แบบธรรมดาทำให้พื้นที่กลับมาใช้ใหม่ได้ *ภายใน* table และจะคืนดิสก์ให้ระบบปฏิบัติการเฉพาะเมื่อหน้าว่างอยู่ท้ายไฟล์พอดี (แล้วตัดหน้าเหล่านั้นทิ้ง)
-- **`ANALYZE`** สุ่มตัวอย่างจาก table และปรับปรุง **planner statistics** — จำนวน row, การกระจายของค่า, column หนึ่งมีค่าที่แตกต่างกันกี่ค่า ตัวเลขเหล่านี้คือสิ่งที่ planner พึ่งพาในการเลือกระหว่าง seq scan กับ index scan ดังที่คุณเห็นในบทเรียน EXPLAIN
-
-คุณสั่งรันเองด้วยมือก็ได้ ทั้งพร้อมกันหรือแยกกัน:
+ticket ซัพพอร์ต 200 000 รายการ แต่ละ row ราว 150 byte autovacuum ถูกปิด **เฉพาะ table นี้** (storage parameter) เพื่อไม่ให้อะไรมาเก็บกวาดลับหลังขณะที่เราดู ใน table จริงให้เปิดไว้ และหัวข้อถัดไปแสดงมันทำงานจริง extension `pgstattuple` (อยู่ในชุด contrib ของ PostgreSQL) ให้จำนวน tuple ที่แม่นยำ
 
 ```sql
--- reclaim dead-tuple space in one table
-VACUUM books;
+-- sql/setup.sql
+CREATE EXTENSION IF NOT EXISTS pgstattuple;
 
--- refresh statistics so the planner estimates well
-ANALYZE books;
-
--- do both at once
-VACUUM ANALYZE books;
+CREATE TABLE tickets (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  status     text NOT NULL,
+  payload    text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+) WITH (autovacuum_enabled = off);  -- off for THIS table only, so the demos are repeatable
+INSERT INTO tickets (status, payload)
+SELECT CASE WHEN g % 10 = 0 THEN 'closed' ELSE 'open' END, repeat('x', 100)
+FROM generate_series(1, 200000) AS g;
+ANALYZE tickets;
+SELECT count(*) AS rows, pg_size_pretty(pg_relation_size('tickets')) AS heap_size FROM tickets;
 ```
 
-จากโค้ดแอปพลิเคชันก็เป็นคำสั่งเดียวกันผ่าน driver ใด ๆ
+```text
+CREATE EXTENSION
+CREATE TABLE
+INSERT 0 200000
+ANALYZE
+  rows  | heap_size 
+--------+-----------
+ 200000 | 30 MB
+(1 row)
+```
+
+## MVCC ทิ้ง dead tuple ไว้
+
+update 180 000 row (ticket ที่ยังเปิด):
+
+```sql
+-- sql/dead-tuples.sql
+UPDATE tickets SET updated_at = now() WHERE status = 'open';
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup, pg_size_pretty(pg_relation_size('tickets')) AS heap_size
+FROM pg_stat_user_tables WHERE relname = 'tickets';
+```
+
+```text
+UPDATE 180000
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_live_tup | n_dead_tup | heap_size 
+------------+------------+-----------
+     400000 |     180000 | 57 MB
+(1 row)
+```
+
+table เพิ่มเป็นสองเท่าจาก 30 MB เป็น 57 MB: เวอร์ชันเก่า 180 000 ตัวยังอยู่ข้างเวอร์ชันใหม่ 180 000 ตัว (`n_live_tup` แสดง 400 000 เพราะสถิตินับเวอร์ชันใหม่ตอนเขียนและเป็นเพียงค่าประมาณจนกว่า `VACUUM` หรือ `ANALYZE` จะแก้) `pgstattuple` นับได้ตรง ๆ:
+
+```sql
+-- sql/pgstattuple.sql
+SELECT tuple_count AS live_tuples, dead_tuple_count AS dead_tuples,
+       round(dead_tuple_percent::numeric, 1) AS dead_pct, round(free_percent::numeric, 1) AS free_pct
+FROM pgstattuple('tickets');
+```
+
+```text
+ live_tuples | dead_tuples | dead_pct | free_pct 
+-------------+-------------+----------+----------
+      200000 |      180000 |     45.7 |      0.7
+(1 row)
+```
+
+**45.7 % ของ table เป็น dead tuple**: นี่คือ *bloat* ทุก sequential scan ตอนนี้อ่าน page เป็นสองเท่า และแต่ละ index มี entry ชี้ทั้งสองเวอร์ชัน ([docs](https://www.postgresql.org/docs/18/routine-vacuuming.html))
+
+## VACUUM เก็บกู้ ANALYZE แจ้งข้อมูล
+
+`VACUUM` scan table หา tuple ที่ไม่มี transaction ที่กำลังรันเห็นอีก และทำเครื่องหมายพื้นที่ให้ใช้ซ้ำได้ มันยังอัปเดต visibility map ซึ่ง index-only scan พึ่งพา `VERBOSE` แสดงสิ่งที่มันทำ (`PROCESS_TOAST false` ข้าม TOAST table ที่ว่างเพื่อให้ output อ่านง่าย):
+
+```sql
+-- sql/vacuum-verbose.sql
+VACUUM (VERBOSE, PROCESS_TOAST false) tickets;
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup, pg_size_pretty(pg_relation_size('tickets')) AS heap_size, vacuum_count
+FROM pg_stat_user_tables WHERE relname = 'tickets';
+```
+
+```text
+INFO:  vacuuming "b2_vacuum_and_statistics.public.tickets"
+INFO:  finished vacuuming "b2_vacuum_and_statistics.public.tickets": index scans: 1
+pages: 0 removed, 7308 remain, 7308 scanned (100.00% of total), 0 eagerly scanned
+tuples: 180000 removed, 200000 remain, 0 are dead but not yet removable
+removable cutoff: 323782, which was 0 XIDs old when operation ended
+new relfrozenxid: 323779, which is 1 XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+visibility map: 7308 pages set all-visible, 0 pages set all-frozen (0 were all-visible)
+index scan needed: 3847 pages from table (52.64% of total) had 180000 dead item identifiers removed
+index "tickets_pkey": pages: 1099 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 0.445 MB/s
+buffer usage: 19626 hits, 0 reads, 3 dirtied
+WAL usage: 16099 records, 3 full page images, 2100354 bytes, 0 buffers full
+system usage: CPU: user: 0.04 s, system: 0.01 s, elapsed: 0.05 s
+VACUUM
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_live_tup | n_dead_tup | heap_size | vacuum_count 
+------------+------------+-----------+--------------
+     200000 |          0 | 57 MB     |            1
+(1 row)
+```
+
+อ่านบรรทัดสำคัญ: `tuples: 180000 removed, 200000 remain, 0 are dead but not yet removable`; item pointer ที่ตาย 180 000 ตัวถูกลบจาก index ของ primary key ด้วย (`index scan needed ... 180000 dead item identifiers removed`); `visibility map: 7308 pages set all-visible` และ table ยังคง **57 MB**: `VACUUM` ธรรมดาทำให้พื้นที่ *ใช้ซ้ำได้* ไม่ได้ทำให้ไฟล์เล็กลง นั่นคือการออกแบบ และรอบ update ถัดไปพิสูจน์ว่าพื้นที่ถูกใช้ซ้ำ:
+
+```sql
+-- sql/space-reuse.sql
+-- another full round of updates: the freed space is reused, the file does not grow
+UPDATE tickets SET updated_at = now() WHERE status = 'open';
+SELECT pg_size_pretty(pg_relation_size('tickets')) AS heap_after_second_update;
+SELECT tuple_count AS live_tuples, dead_tuple_count AS dead_tuples, round(free_percent::numeric, 1) AS free_pct
+FROM pgstattuple('tickets');
+```
+
+```text
+UPDATE 180000
+ heap_after_second_update 
+--------------------------
+ 57 MB
+(1 row)
+
+ live_tuples | dead_tuples | free_pct 
+-------------+-------------+----------
+      200000 |      180000 |      0.7
+(1 row)
+```
+
+57 MB เท่าเดิมหลัง update อีก 180 000 ครั้ง (และมี dead tuple 180 000 อีกครั้งรอ vacuum รอบถัดไป) สภาวะคงที่นี้คือหน้าตาของ table ที่สุขภาพดี: ไฟล์ราวสองเท่าของข้อมูลที่ยังมีชีวิต ที่ vacuum รีไซเคิลครึ่งว่างอยู่ตลอด
+
+`ANALYZE` ทำงานต่างออกไป: มัน sample table และเก็บสถิติ column ที่ planner อ่าน ทำทั้งสองพร้อมกันได้ และทุก driver ทำแบบเดียวกัน (`VACUUM` รันใน transaction block ไม่ได้ จึงใช้ autocommit):
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    VACUUM ANALYZE books;
+    -- sql/vacuum-analyze.sql
+    VACUUM (ANALYZE) tickets;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await pool.query('VACUUM ANALYZE books');
+    await pool.query('VACUUM (ANALYZE) tickets');
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    # VACUUM cannot run inside a transaction block,
-    # so use autocommit for this statement
-    old = conn.autocommit
-    conn.autocommit = True
-    cur.execute("VACUUM ANALYZE books")
-    conn.autocommit = old
+    cur.execute("VACUUM (ANALYZE) tickets")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := conn.Exec(ctx, "VACUUM ANALYZE books")
+    _, err := conn.Exec(ctx, "VACUUM (ANALYZE) tickets")
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    sqlx::query("VACUUM ANALYZE books")
+    sqlx::query("VACUUM (ANALYZE) tickets")
         .execute(&pool)
         .await?;
     ```
   </TabItem>
 </Tabs>
 
-ข้อสังเกตสำหรับ driver: `VACUUM` ไม่สามารถรันภายใน transaction block ได้ ดังนั้นต้องสั่งบน connection ที่อยู่ในโหมด autocommit แทนที่จะห่อไว้ใน `BEGIN ... COMMIT`
+ทั้งสี่ driver รัน statement นั้นหนึ่งครั้งกับสำเนาใหม่ของ table ที่ update แล้ว และอ่าน `pg_class` กลับ ก่อนหน้านั้น `relallvisible` เป็น 0; หลังจากนั้น 7308 page (ทุก page ของ table):
 
-## autovacuum ทำสิ่งนี้ให้คุณ
+```text
+$ (each driver ran VACUUM (ANALYZE) once on a fresh copy of the updated table, then read pg_class: relallvisible, reltuples)
+before:                 relallvisible = 0, reltuples = 200000
+Node.js (pg 8.23.0):    { relallvisible: 7308, reltuples: '200000' }
+Python (psycopg 3.3.6): (7308, 200000)
+Go (pgx v5.11.0):       7308 200000
+Rust (sqlx 0.9.0):      7308 200000
+```
 
-คุณแทบจะไม่ต้องรัน `VACUUM` ด้วยมือเลย เพราะ PostgreSQL มาพร้อมกับ **autovacuum** — กระบวนการเบื้องหลังที่คอยจับตาดูว่าแต่ละ table มี row เปลี่ยนแปลงไปกี่ row และรัน `VACUUM` และ `ANALYZE` โดยอัตโนมัติเมื่อความปั่นป่วน (churn) ข้ามค่า threshold ค่าเริ่มต้นคือเปิดไว้ และคุณก็ควรปล่อยให้เปิดไว้แบบนั้น
+### ANALYZE และ planner
 
-autovacuum ป้องกันไม่ให้ dead tuple กองพะเนินและรักษา statistics ให้สดใหม่โดยที่คุณไม่ต้องลงแรงเลย เมื่อคนบ่นว่า "Postgres ช้าลงเมื่อเวลาผ่านไป" สาเหตุมักจะเป็นเพราะ autovacuum ถูกปิดไว้หรือตามไม่ทัน
-
-## bloat
-
-เมื่อ dead tuple สะสมเร็วกว่าที่ถูกคืนพื้นที่ — เพราะ autovacuum ถูกปิด, ช้าเกินไป หรือมี transaction ที่รันยาวคอยถือเวอร์ชันเก่าให้ยังมองเห็นได้ — table จะขยายตัวใหญ่กว่าที่ข้อมูลที่มีชีวิตจริงสมควรจะเป็น นี่คือ **bloat** table ที่บวม (bloated) มีหน้าให้อ่านมากขึ้นสำหรับจำนวน row ที่มีชีวิตเท่าเดิม ดังนั้นแม้แต่ seq scan หรือ index scan ก็ต้องทำ I/O เพิ่มขึ้น bloat ส่งผลต่อ index ด้วย
-
-คุณสามารถดูสถานะคร่าว ๆ ของ table ได้ด้วย:
+สถิติสำคัญพอ ๆ กับพื้นที่ตาย ตรงนี้ table ได้ bulk load และ query ถูกวาง plan ก่อนและหลัง `ANALYZE` 90 % ของ 300 000 row มี `sensor = 1`:
 
 ```sql
-SELECT relname, n_live_tup, n_dead_tup, last_autovacuum
-FROM pg_stat_user_tables
-WHERE relname = 'books';
+-- sql/analyze-plan.sql
+CREATE TABLE readings (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, sensor int NOT NULL, value int NOT NULL) WITH (autovacuum_enabled = off);
+CREATE INDEX readings_sensor_idx ON readings (sensor);
+-- 300 000 rows, but sensor 1 has 90 % of them
+INSERT INTO readings (sensor, value)
+SELECT CASE WHEN g % 10 = 0 THEN 2 + g % 500 ELSE 1 END, g FROM generate_series(1, 300000) g;
+-- no ANALYZE yet: the planner has only default guesses
+EXPLAIN SELECT * FROM readings WHERE sensor = 1;
+ANALYZE readings;
+EXPLAIN SELECT * FROM readings WHERE sensor = 1;
+EXPLAIN SELECT * FROM readings WHERE sensor = 77;
 ```
 
 ```text
- relname | n_live_tup | n_dead_tup |        last_autovacuum
----------+------------+------------+-------------------------------
- books   |      48213 |       1502 | 2026-06-25 09:14:02.118431+00
+CREATE TABLE
+CREATE INDEX
+INSERT 0 300000
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on readings  (cost=21.12..1723.00 rows=1654 width=12)
+   Recheck Cond: (sensor = 1)
+   ->  Bitmap Index Scan on readings_sensor_idx  (cost=0.00..20.70 rows=1654 width=0)
+         Index Cond: (sensor = 1)
+(4 rows)
+
+ANALYZE
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Seq Scan on readings  (cost=0.00..5372.00 rows=269900 width=12)
+   Filter: (sensor = 1)
+(2 rows)
+
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Index Scan using readings_sensor_idx on readings  (cost=0.30..5.69 rows=1 width=12)
+   Index Cond: (sensor = 77)
+(2 rows)
 ```
 
-`n_dead_tup` ที่แข็งแรงคือค่าที่เล็กเมื่อเทียบกับ `n_live_tup`; ค่าที่ใหญ่และไม่เคยลดลงเลยหมายความว่าการ vacuum ตามไม่ทัน
+เมื่อไม่มีสถิติ planner เดา `rows=1654` สำหรับ `sensor = 1` (selectivity ค่าเริ่มต้น) และเลือก bitmap scan ที่ขับด้วย index; ความจริงคือ 270 000 row หลัง `ANALYZE` มันประมาณ `rows=270430` และเปลี่ยนเป็น `Seq Scan` ซึ่งถูกต้องเมื่อเก้าใน 10 row เข้าเงื่อนไข sensor ที่หายาก (`sensor = 77`) ยังได้ index สิ่งที่ `ANALYZE` เก็บไว้:
+
+```sql
+-- sql/pg-stats.sql
+SELECT attname, n_distinct, (most_common_vals::text::text[])[1] AS most_common, round(most_common_freqs[1]::numeric, 3) AS its_frequency
+FROM pg_stats WHERE tablename = 'readings' AND attname = 'sensor';
+SELECT reltuples::int AS reltuples, relpages FROM pg_class WHERE relname = 'readings';
+```
+
+```text
+ attname | n_distinct | most_common | its_frequency 
+---------+------------+-------------+---------------
+ sensor  |         51 | 1           |         0.900
+(1 row)
+
+ reltuples | relpages 
+-----------+----------
+    300000 |     1622
+(1 row)
+```
+
+`most_common_vals` และ `most_common_freqs` คือสถิติที่ให้ planner แยกค่า 90 % ออกจากค่าที่หายาก ขนาด sample ควบคุมโดย `default_statistics_target` (ค่าเริ่มต้น 100 แสดงด้านล่าง) เพิ่มต่อ column ด้วย `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS` เมื่อ column ที่เอียงถูกประมาณผิด
+
+## Autovacuum ทำสิ่งนี้ให้
+
+autovacuum launcher ตื่นเป็นระยะและ vacuum หรือ analyze table ที่เปลี่ยนมากพอ การตั้งค่าจาก server นี้:
+
+```sql
+-- sql/autovacuum-settings.sql
+SELECT name, setting, unit
+FROM pg_settings
+WHERE name IN ('autovacuum', 'autovacuum_naptime', 'autovacuum_vacuum_threshold', 'autovacuum_vacuum_scale_factor',
+               'autovacuum_vacuum_max_threshold', 'autovacuum_vacuum_insert_threshold', 'autovacuum_vacuum_insert_scale_factor',
+               'autovacuum_analyze_threshold', 'autovacuum_analyze_scale_factor', 'autovacuum_vacuum_cost_delay',
+               'autovacuum_vacuum_cost_limit', 'autovacuum_freeze_max_age', 'default_statistics_target')
+ORDER BY name;
+```
+
+```text
+                 name                  |  setting  | unit 
+---------------------------------------+-----------+------
+ autovacuum                            | on        | 
+ autovacuum_analyze_scale_factor       | 0.1       | 
+ autovacuum_analyze_threshold          | 50        | 
+ autovacuum_freeze_max_age             | 200000000 | 
+ autovacuum_naptime                    | 60        | s
+ autovacuum_vacuum_cost_delay          | 2         | ms
+ autovacuum_vacuum_cost_limit          | -1        | 
+ autovacuum_vacuum_insert_scale_factor | 0.2       | 
+ autovacuum_vacuum_insert_threshold    | 1000      | 
+ autovacuum_vacuum_max_threshold       | 100000000 | 
+ autovacuum_vacuum_scale_factor        | 0.2       | 
+ autovacuum_vacuum_threshold           | 50        | 
+ default_statistics_target             | 100       | 
+(13 rows)
+```
+
+table ถูก vacuum เมื่อ dead tuple เกิน `autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor * reltuples` (50 + 20 % ของ row) `autovacuum_vacuum_max_threshold` ของ PostgreSQL 18 (ค่าเริ่มต้น 100 000 000) ตั้งเพดานให้สูตรนั้น table พันล้าน row จึงไม่ต้องรอ dead tuple 200 ล้านอีกต่อไป ([release notes](https://www.postgresql.org/docs/18/release-18.html), [docs](https://www.postgresql.org/docs/18/runtime-config-vacuum.html)) การ insert กระตุ้น vacuum ของตัวเองผ่าน `autovacuum_vacuum_insert_*` และ `ANALYZE` มี threshold ของตัวเอง (50 + 10 %):
+
+```sql
+-- sql/autovacuum-threshold.sql
+-- vacuum threshold = autovacuum_vacuum_threshold + scale_factor * reltuples (capped by the PG 18 max threshold)
+SELECT c.relname, c.reltuples::int AS reltuples,
+       (50 + 0.2 * c.reltuples)::int AS dead_tuples_needed_to_trigger
+FROM pg_class c WHERE c.relname IN ('tickets', 'readings');
+```
+
+```text
+ relname  | reltuples | dead_tuples_needed_to_trigger 
+----------+-----------+-------------------------------
+ tickets  |    200000 |                         40050
+ readings |    300000 |                         60050
+(2 rows)
+```
+
+นี่คือมันทำงานจริงบน table ที่เปิด autovacuum ไว้ row ที่ update 40 000 แถวสูงกว่า threshold 20 050; launcher สังเกตเห็นภายใน 15 วินาที (`autovacuum_naptime` เป็น 60 วินาที และ launcher ตรวจแต่ละฐานข้อมูลตามตารางนั้น การตรวจครั้งแรกจึงอาจนานถึงหนึ่งนาที):
+
+```text
+-- one session, autovacuum left ON for this table
+CREATE TABLE auto_t (id int PRIMARY KEY, v int NOT NULL);
+INSERT INTO auto_t SELECT g, 0 FROM generate_series(1, 100000) g;
+ANALYZE auto_t;
+UPDATE auto_t SET v = 1 WHERE id <= 40000;   -- 40 000 > 50 + 0.2 * 100 000 = 20 050
+SELECT pg_stat_force_next_flush();
+SELECT n_live_tup, n_dead_tup, last_autovacuum, autovacuum_count FROM pg_stat_user_tables WHERE relname = 'auto_t';
+-- psql output, right after the UPDATE
+ n_live_tup | n_dead_tup | last_autovacuum | autovacuum_count 
+------------+------------+-----------------+------------------
+     200000 |      40000 |                 |                0
+(1 row)
+
+-- the same query, polled every 5 s: the first poll that showed autovacuum_count = 1 was 15 s later
+ n_live_tup | n_dead_tup | ran | autovacuum_count | analyzed 
+------------+------------+-----+------------------+----------
+     100000 |          0 | t   |                1 | t
+(1 row)
+```
+
+คุณ override threshold ของ table ที่ร้อนตัวเดียวด้วย storage parameter แทนการเปลี่ยนทั้ง server:
+
+```sql
+-- sql/per-table-autovacuum.sql
+ALTER TABLE readings SET (autovacuum_enabled = on, autovacuum_vacuum_scale_factor = 0.02);
+SELECT relname, reloptions FROM pg_class WHERE relname = 'readings';
+```
+
+```text
+ALTER TABLE
+ relname  |                         reloptions                          
+----------+-------------------------------------------------------------
+ readings | {autovacuum_enabled=on,autovacuum_vacuum_scale_factor=0.02}
+(1 row)
+```
+
+## Bloat
+
+**Bloat** คือพื้นที่ที่ dead tuple หรือพื้นที่ว่างที่ table คืนไม่ได้ครอบครอง มันเสียดิสก์ cache และเวลา scan `pgstattuple` (ข้างบน) วัดได้ตรงแต่ต้องอ่านทั้ง table; การประมาณแบบถูกคือเทียบ `pg_relation_size` กับ `n_live_tup * ความกว้างเฉลี่ยของ row` bloat มีสามสาเหตุหลัก: autovacuum ตามไม่ทันกับ table ที่ร้อน, transaction ยาวที่ขัดขวางการเก็บกู้ (ด้านล่าง) และการ delete ก้อนใหญ่ก้อนเดียว
+
+### VACUUM ธรรมดาคืนเฉพาะ page ท้าย
+
+`VACUUM` ธรรมดาคืนพื้นที่ให้ระบบปฏิบัติการได้เฉพาะเมื่อ page *สุดท้าย* ของไฟล์ว่างสมบูรณ์; พื้นที่ว่างตรงกลางยังอยู่ในไฟล์เพื่อใช้ซ้ำ สอง table ขนาด 100 000 row เท่ากัน 8 MB: ลบทุกอย่างยกเว้น 10 row ท้ายของอันหนึ่ง และทุก row ที่สองของอีกอัน:
+
+```sql
+-- sql/truncation.sql
+CREATE TABLE trunc_end (id int, pad text) WITH (autovacuum_enabled = off);
+INSERT INTO trunc_end SELECT g, repeat('x', 50) FROM generate_series(1, 100000) g;
+SELECT pg_size_pretty(pg_relation_size('trunc_end')) AS before;
+DELETE FROM trunc_end WHERE id > 10;
+VACUUM trunc_end;
+SELECT pg_size_pretty(pg_relation_size('trunc_end')) AS after_vacuum_trailing_delete;
+
+CREATE TABLE trunc_mid (id int, pad text) WITH (autovacuum_enabled = off);
+INSERT INTO trunc_mid SELECT g, repeat('x', 50) FROM generate_series(1, 100000) g;
+DELETE FROM trunc_mid WHERE id % 2 = 0;
+VACUUM trunc_mid;
+SELECT pg_size_pretty(pg_relation_size('trunc_mid')) AS after_vacuum_middle_delete;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+ before  
+---------
+ 8248 kB
+(1 row)
+
+DELETE 99990
+VACUUM
+ after_vacuum_trailing_delete 
+------------------------------
+ 8192 bytes
+(1 row)
+
+CREATE TABLE
+INSERT 0 100000
+DELETE 50000
+VACUUM
+ after_vacuum_middle_delete 
+----------------------------
+ 8248 kB
+(1 row)
+```
+
+อันแรกหดเหลือ 8 kB อันที่สองยังเป็น 8 MB ทั้งที่ row หายไปครึ่งหนึ่ง
 
 ## VACUUM FULL เขียน table ใหม่
 
-`VACUUM` แบบธรรมดาทำให้พื้นที่นำกลับมาใช้ใหม่ได้ แต่ไม่ได้ทำให้ไฟล์เล็กลง หากต้องการคืนดิสก์ให้ระบบปฏิบัติการจริง ๆ และอัด table ที่บวมอย่างหนักให้กระชับ มี `VACUUM FULL` ซึ่งเขียนทั้ง table ใหม่ลงในไฟล์ที่สดใหม่และถูกอัดแน่น
+`VACUUM FULL` สร้างสำเนาใหม่ของ table ที่มีเฉพาะ row ที่ยังมีชีวิต แล้วสลับเข้ามา มันคืนพื้นที่ว่างทั้งหมด และมีราคา:
 
 ```sql
-VACUUM FULL books;
+-- sql/vacuum-full.sql
+SELECT pg_relation_filenode('tickets') AS filenode_before, pg_size_pretty(pg_relation_size('tickets')) AS heap_before;
+VACUUM FULL tickets;
+SELECT pg_relation_filenode('tickets') AS filenode_after, pg_size_pretty(pg_relation_size('tickets')) AS heap_after;
 ```
 
-ข้อเสียนั้นรุนแรง: `VACUUM FULL` จับ **exclusive lock** บน table ตลอดการเขียนใหม่ บล็อกการอ่านและเขียนทุกอย่างจนกว่าจะเสร็จ บน table ขนาดใหญ่นั่นอาจหมายถึงช่วงดาวน์ไทม์ที่ยาวนาน เก็บไว้ใช้กู้คืนจาก bloat รุนแรงแบบครั้งเดียวในช่วง maintenance window เท่านั้น — อย่าใช้เป็นงานบ้านประจำ การทำความสะอาดประจำเป็นหน้าที่ของ autovacuum
+```text
+ filenode_before | heap_before 
+-----------------+-------------
+           28461 | 57 MB
+(1 row)
 
-**ใน pgAdmin:** คลิกขวาที่ table แล้วเลือก Maintenance เพื่อรัน `VACUUM`, `ANALYZE` หรือ `VACUUM FULL` จากกล่องโต้ตอบ พร้อม checkbox สำหรับตัวเลือกต่าง ๆ กล่อง Maintenance เดียวกันนี้ยังสามารถ reindex index ที่บวมได้ด้วย
+VACUUM
+ filenode_after | heap_after 
+----------------+------------
+          28473 | 30 MB
+(1 row)
+```
+
+heap จาก 57 MB เหลือ 30 MB และได้ไฟล์ใหม่ (`filenode` 28411 เป็น 28423) ขณะรัน มันถือ lock `ACCESS EXCLUSIVE`: ไม่มีใครอ่านหรือเขียน table ได้ นี่คือ table 1 500 000 row ที่ลบไปครึ่งหนึ่ง (202 MB ก่อน) session A รัน `VACUUM FULL`; session B ลอง `SELECT count(*)` หลังจากนั้น 0.15 วินาที; session C ดู `pg_locks` ระหว่างนั้น:
+
+```text
+-- session A: script
+\timing on
+VACUUM FULL big_t;
+-- session A: psql output
+Timing is on.
+VACUUM
+Time: 474.164 ms
+
+-- session B (starts 0.15 s later): script
+\o /dev/null
+SELECT pg_sleep(0.15);
+\o
+\timing on
+SELECT count(*) FROM big_t;
+-- session B: psql output
+Timing is on.
+ count  
+--------
+ 750000
+(1 row)
+
+Time: 340.612 ms
+
+-- session C (starts 0.25 s in, while A is still rewriting): script
+\o /dev/null
+SELECT pg_sleep(0.25);
+\o
+SELECT l.mode, l.granted, a.state, left(a.query, 30) AS query, a.wait_event_type, a.wait_event
+FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+WHERE l.relation = 'big_t'::regclass ORDER BY l.granted DESC, l.pid;
+-- session C: psql output
+        mode         | granted | state  |            query            | wait_event_type |   wait_event   
+---------------------+---------+--------+-----------------------------+-----------------+----------------
+ AccessExclusiveLock | t       | active | VACUUM FULL big_t;          | IO              | DataFileExtend
+ AccessShareLock     | f       | active | SELECT count(*) FROM big_t; | Lock            | relation
+(2 rows)
+```
+
+`SELECT` ธรรมดาของ B รอ **341 ms** สำหรับการเขียนใหม่ 474 ms ของ A และ C จับได้คาหนังคาเขา: A ถือ `AccessExclusiveLock`, `AccessShareLock` ของ B เป็น `granted = f` รอบน `Lock` บน table production ที่ยุ่ง `VACUUM FULL` คือ outage ใช้เฉพาะ table ที่เอา offline ได้ ทางเลือกแบบ online คือ extension เช่น `pg_repack`
+
+## transaction ที่ถูกลืมบล็อกการเก็บกู้
+
+`VACUUM` ลบ dead tuple ได้เฉพาะที่ *ไม่มี* transaction ใดเห็นอีก transaction ที่เปิดอยู่และมี snapshot (transaction แบบ `REPEATABLE READ` ใด ๆ หรือ statement แบบ `READ COMMITTED` ที่เก่า) ทำให้ทุกเวอร์ชันที่สร้างหลังมันเริ่ม "ยังลบไม่ได้" แม้ client นั้นจะว่างอยู่ session A เปิด transaction อ่าน แล้วไปพักกาแฟสามวินาที; session B update 180 000 row และ vacuum สองครั้ง:
+
+```text
+-- session A: script (a client that opened a transaction and went for a coffee)
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) AS a_sees FROM tickets;
+\! sleep 3
+COMMIT;
+-- session A: psql output
+BEGIN
+ a_sees 
+--------
+ 200000
+(1 row)
+
+COMMIT
+
+-- session B (starts 0.5 s later): script
+UPDATE tickets SET updated_at = now() WHERE status = 'open';
+SELECT state, left(query, 32) AS last_query, backend_xmin IS NOT NULL AS holds_snapshot
+FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();
+VACUUM (VERBOSE, PROCESS_TOAST false) tickets;   -- while A is still open
+\! sleep 3.5
+VACUUM (VERBOSE, PROCESS_TOAST false) tickets;   -- after A committed
+-- session B: psql output (the lines that matter)
+UPDATE 180000
+        state        |            last_query            | holds_snapshot 
+---------------------+----------------------------------+----------------
+ idle in transaction | SELECT count(*) AS a_sees FROM t | t
+(1 row)
+
+tuples: 0 removed, 379996 remain, 180000 are dead but not yet removable
+removable cutoff: 323711, which was 1 XIDs old when operation ended
+...
+tuples: 180000 removed, 190541 remain, 0 are dead but not yet removable
+removable cutoff: 323712, which was 0 XIDs old when operation ended
+```
+
+`pg_stat_activity` แสดง A เป็น `idle in transaction` พร้อม snapshot (`backend_xmin`) `VACUUM` ครั้งแรก scan ทุกอย่างและลบ **ไม่ได้เลย**: `180000 are dead but not yet removable` หลัง A commit `VACUUM` เดิมลบได้ครบ 180 000 คูณสามวินาทีด้วย connection pool ที่รั่วหรือ batch job ที่ค้าง แล้วคุณจะได้ table ที่โตไม่มีที่สิ้นสุดขณะที่ autovacuum ทำงานแต่ไม่ได้อะไร วิธีป้องกันคือให้ transaction สั้นและตั้ง `idle_in_transaction_session_timeout`
+
+## Reading AI-generated code
+
+ผู้ช่วย AI เขียน migration ลบข้อมูลที่อยากได้พื้นที่คืนด้วย และห่อทุกอย่างใน transaction เดียว "เพื่อให้ atomic":
+
+<SpotTheBug lang="sql" code={`-- AI comment: "purge closed tickets, then reclaim the space, all in one migration"
+BEGIN;
+DELETE FROM tickets WHERE status = 'closed';
+VACUUM tickets;
+COMMIT;`}>
+
+`VACUUM` รันใน transaction block ไม่ได้ migration จึงล้มที่ statement ที่สอง หลัง `DELETE` (ซึ่งถูก rollback):
+
+```sql
+-- @expect-error 25001
+BEGIN;
+DELETE FROM tickets WHERE status = 'closed';
+VACUUM tickets;
+COMMIT;
+```
+
+```text
+BEGIN
+DELETE 20000
+ROLLBACK
+ERROR:  VACUUM cannot run inside a transaction block
+```
+
+มันล้มดัง ๆ ซึ่งเป็นผลลัพธ์ที่ดี ความเสี่ยงคือตัวรัน migration ที่กลืน error หรือ `DELETE` ที่ commit ไปแต่ vacuum ไม่เคยรัน commit ส่วนที่เป็น transaction ก่อน แล้ว vacuum เป็น statement แยก และแม้อย่างนั้น อย่าลืมว่าพื้นที่เพียง *ใช้ซ้ำได้* ไม่ได้คืนให้ระบบปฏิบัติการ:
+
+```sql
+-- sql/stb-fixed.sql
+BEGIN;
+DELETE FROM tickets WHERE status = 'closed';
+COMMIT;
+VACUUM tickets;
+```
+
+```text
+BEGIN
+DELETE 20000
+COMMIT
+VACUUM
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+ทุก `UPDATE` คือ `INSERT` เวอร์ชันใหม่บวกเครื่องหมาย "อันนี้เก่าแล้ว" บนเวอร์ชันก่อนหน้า และทุก `DELETE` คือเครื่องหมายอย่างเดียว เวอร์ชันเก่าอยู่ต่อเพราะ transaction อื่นอาจยังต้องการ `VACUUM` คือตัวเก็บขยะ: มันปล่อยเวอร์ชันได้เมื่อ snapshot ที่เก่าที่สุดในระบบไม่ต้องการแล้ว จึงเป็นเหตุที่ session ที่ idle-in-transaction ตัวเดียวหยุดการเก็บกู้ได้ทุกที่ที่มันมองเห็น พื้นที่ที่ปล่อยกลับไปที่ free list ของ table เอง ไฟล์จึงมีขนาดเท่ายอดสูงสุด `ANALYZE` เป็นอีกเรื่อง คือสำมะโนที่ planner อ่าน autovacuum รันทั้งสองตามตารางที่สัมพันธ์กับปริมาณที่ table เปลี่ยน
 
 ## เคล็ดลับและข้อควรระวัง
 
-- จงเปิด autovacuum ไว้ การปิด autovacuum เป็นสาเหตุที่พบบ่อยที่สุดของฐานข้อมูลที่ค่อย ๆ เสื่อมลงสู่ bloat และแผนที่ไม่ดี
-- จงรัน `ANALYZE` (หรือ `VACUUM ANALYZE`) ด้วยมือหลังจากการโหลดข้อมูลจำนวนมาก (bulk load), การ import หรือการ migration autovacuum อาจไม่ทำงานทันที และ statistics ที่เก่าล้าสมัยทันทีหลังการเปลี่ยนแปลงครั้งใหญ่จะนำ planner ไปผิดทาง
-- `VACUUM` แบบธรรมดาไม่บล็อกและปลอดภัยที่จะรันเมื่อใดก็ได้; `VACUUM FULL` บล็อกและก่อกวน — เก็บไว้ใช้ใน maintenance window เท่านั้น
-- transaction ที่รันยาวจะขัดขวาง vacuum ไม่ให้ทำความสะอาด tuple ที่ transaction นั้นอาจยังต้องเห็น จงระวัง transaction ที่เปิดค้างไว้และถูกลืม เมื่อ bloat โตขึ้นทั้งที่ autovacuum แข็งแรง
-- จงเฝ้าดู `n_dead_tup` และ `last_autovacuum` ใน `pg_stat_user_tables` เพื่อยืนยันว่าการ vacuum ตามทันปริมาณการเขียนของคุณจริง ๆ
+- อย่าปิด autovacuum ถ้า table ร้อนบวม ให้ลด threshold ของมัน (storage parameter ต่อ table) ไม่ใช่ปิดของ server
+- `VACUUM` ธรรมดาไม่ทำให้ไฟล์เล็กลง ยกเว้น page ท้ายที่ว่าง; `VACUUM FULL` ทำได้ และบล็อกทุกอย่างระหว่างนั้น
+- รัน `ANALYZE` (หรือ `VACUUM (ANALYZE)`) หลัง bulk load หรือ delete ก้อนใหญ่ อย่ารอ autovacuum ก่อน query หนักครั้งแรก
+- ระวัง session แบบ `idle in transaction` และ snapshot เก่า (`backend_xmin` ใน `pg_stat_activity`) ตั้ง `idle_in_transaction_session_timeout`
+- `VACUUM` รันใน transaction block ไม่ได้ (`25001`)
+- `pg_stat_user_tables` (`n_dead_tup`, `last_autovacuum`, `autovacuum_count`) คือที่แรกที่ต้องดู; สถิติอาจช้าเล็กน้อย `pg_stat_force_next_flush()` flush ตัวนับของ session ตัวเอง
 
-<Callout title="ปล่อยให้ฐานข้อมูลรักษาสุขภาพตัวเอง">
-MVCC แลกการ update ที่ตำแหน่งเดิมกับการอ่านที่ไม่บล็อก และราคาที่จ่ายคือ dead tuple ที่ต้องถูกทำความสะอาด autovacuum จ่ายราคานั้นแทนคุณ โดยคืนพื้นที่และรีเฟรช statistics ให้ในเบื้องหลัง ปล่อยให้เปิดไว้เสมอ, `ANALYZE` หลังการโหลดครั้งใหญ่ และเก็บ `VACUUM FULL` ไว้สำหรับเหตุฉุกเฉิน — นั่นคือเรื่องการบำรุงรักษาเกือบทั้งหมด
+<Callout title="Vacuum คือการบำรุงรักษา ไม่ใช่วิธีแก้">
+ถ้า table ต้อง `VACUUM FULL` บ่อยเพื่อให้เล็ก ปัญหาจริงอยู่ต้นทาง: update กว้างเกินไป, autovacuum หย่อนเกินไปสำหรับ table นี้ หรือ transaction ยาว แก้สาเหตุ แล้วให้ autovacuum รักษาไฟล์ให้ขนาดคงที่
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `VACUUM` ธรรมดา | ไม่ block การอ่านหรือเขียน ปลอดภัยที่จะรันได้ทุกเมื่อ | คืนพื้นที่ให้ใช้ซ้ำได้ภายใน table และคืนดิสก์ให้ระบบปฏิบัติการเฉพาะการตัดหน้าว่างท้ายไฟล์ |
-| `VACUUM FULL` | เขียน table ใหม่ให้กระชับและคืนดิสก์ให้ระบบปฏิบัติการจริง ๆ | จับ exclusive lock บล็อกทั้งการอ่านและเขียนตลอดการทำงาน |
-| autovacuum (อัตโนมัติ) | รันเบื้องหลังให้เองต่อเนื่อง แทบไม่ต้องดูแล | ควบคุมจังหวะเวลาไม่ได้ละเอียดเท่าการรันมือ อาจตามไม่ทันช่วง bulk load ที่หนักมาก |
-| vacuum แบบรันมือ | ควบคุมได้ว่าจะรันเมื่อไร เหมาะกับหลัง bulk load | เพิ่มภาระงานปฏิบัติการ (ops) ต้องมีคนคอยเฝ้าและสั่งเอง |
+| Autovacuum (ค่าเริ่มต้น) | เก็บกู้พื้นที่และรีเฟรชสถิติโดยไม่ต้องดูแล | ต้องปรับบน table ที่ร้อนหรือใหญ่มาก; ถูกบล็อกโดย transaction ยาว |
+| `VACUUM` ด้วยมือ | รันทันที เช่นหลัง delete ก้อนใหญ่; ถือ lock เบา ๆ | ไม่ทำให้ไฟล์เล็กลง (เฉพาะ page ท้าย) |
+| `VACUUM FULL` | คืนพื้นที่ว่างทั้งหมดให้ OS | lock `ACCESS EXCLUSIVE` (B รอ 341 ms ของการเขียนใหม่ 474 ms) และเขียนใหม่ทั้งหมด |
+| threshold ต่อ table ที่ต่ำลง | vacuum table ที่ร้อนเร็วขึ้น | งาน vacuum และ I/O มากขึ้น |
+| `default_statistics_target` สูงขึ้น | ค่าประมาณดีขึ้นบนข้อมูลเอียง | `pg_statistic` ใหญ่ขึ้น `ANALYZE` และการวาง plan ช้าลง |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **มองว่า `VACUUM FULL` เป็นงานบำรุงรักษาประจำ** — `VACUUM FULL` จับ exclusive lock ที่บล็อกทุกการอ่านและเขียน เก็บไว้ใช้กู้คืนจาก bloat รุนแรงในช่วง maintenance window เท่านั้น ไม่ใช่งานประจำวัน
-- **ปิดหรือปรับ autovacuum ให้อนุรักษ์นิยมเกินไป** — การตั้งค่า threshold ที่หลวมเกินไปหรือปิด autovacuum ไปเลย ทำให้ dead tuple สะสมโดยไม่มีใครรู้ตัว จนกลายเป็น bloat ที่แก้ยากในภายหลัง
-- **ไม่รัน `ANALYZE` หลัง bulk load ขนาดใหญ่** — หลังโหลดข้อมูลจำนวนมาก, import หรือ migration statistics เดิมจะเก่าล้าสมัยทันที ถ้า autovacuum ยังไม่ทัน planner จะได้ค่าประมาณผิดและเลือก plan ที่แย่ จงรัน `ANALYZE` ด้วยมือทันทีหลังงานเหล่านี้
-
-> 💡 ตัวอย่างจากของจริง
->
-> **แพลตฟอร์ม SaaS ที่มี write โหลดสูง** — ทีมที่รัน PostgreSQL งานหนักด้าน write เฝ้าติดตาม autovacuum lag และสัดส่วน dead tuple เป็น metric หลักในการดำเนินงาน (core operational metric) เพราะ table bloat ที่ไม่ถูกควบคุมเป็นสาเหตุอันดับต้น ๆ ของประสิทธิภาพ PostgreSQL ที่เสื่อมลงใน production
->
-> **ทีม DBA ที่ใช้ `pg_stat_user_tables`** — หลายทีมตั้ง alert อัตโนมัติจาก `n_dead_tup` และ `last_autovacuum` เพื่อรู้ล่วงหน้าก่อนที่ query จะช้าลงจริง แทนที่จะรอให้ผู้ใช้ร้องเรียนก่อน
+- **"VACUUM ทำให้ table เล็กลง"** `VACUUM` ธรรมดาทำให้ใช้ซ้ำได้: 57 MB ยังเป็น 57 MB และรอบ update ที่สองพอดีในไฟล์เดิม
+- **"autovacuum จะเก็บกวาดเอง transaction ที่เปิดค้างจึงไม่เป็นไร"** `VACUUM` ครั้งแรกลบไม่ได้เลยขณะ A เปิดอยู่: `180000 are dead but not yet removable`
+- **"VACUUM FULL คือ VACUUM ที่แรงกว่า"** มันคือการเขียนใหม่ใต้ lock แบบ exclusive: ผู้อ่านรอ 341 ms
+- **"ANALYZE สำคัญเฉพาะ table ใหญ่"** มันเปลี่ยน plan ของ table 300 000 row จาก bitmap scan เป็น seq scan
+- **"`n_live_tup` แม่นยำ"** มันแสดง 400 000 สำหรับ table 200 000 row จนกว่า vacuum จะแก้
 
 export const quizVacuum = [
   {
-    q: 'ทำไม UPDATE จึงทิ้ง dead tuple ไว้ข้างหลังใน PostgreSQL?',
+    q: 'หลัง UPDATE 180,000 ครั้งบน table 200,000 row PostgreSQL ทำอะไรกับ row เวอร์ชันเก่า?',
     options: [
-      'เพราะบั๊ก',
-      'เพราะ MVCC เขียนเวอร์ชัน row ใหม่และทำเครื่องหมายเวอร์ชันเก่าว่าล้าสมัย แทนที่จะเขียนทับที่ตำแหน่งเดิม',
-      'เพราะ index สั่งให้ทำแบบนั้น',
-      'เพราะ row ถูก lock',
+      'เขียนทับที่เดิม',
+      'เก็บไว้เป็น dead tuple จนกว่า VACUUM จะเก็บกู้ (table โตจาก 30 MB เป็น 57 MB)',
+      'ลบทันที',
+      'ย้ายไปยัง table ประวัติแยก',
     ],
     answer: 1,
+    explain: 'MVCC เขียนเวอร์ชันใหม่และทิ้งเวอร์ชันเก่า pgstattuple นับ dead tuple ได้ 180,000 (45.7 %)',
   },
   {
-    q: 'ANALYZE ทำอะไรที่ VACUUM ไม่ทำ?',
+    q: '`VACUUM` ธรรมดาทำอะไรกับขนาดไฟล์ของ table?',
     options: [
-      'คืนพื้นที่ของ dead tuple',
-      'ปรับปรุง planner statistics ที่ใช้ในการเลือกกลยุทธ์ของ scan',
-      'เขียนไฟล์ table ใหม่',
-      'lock table ทั้งตัว',
+      'ทำให้เล็กเท่าข้อมูลที่ยังมีชีวิต',
+      'มักไม่ทำอะไร: ทำเครื่องหมายพื้นที่ให้ใช้ซ้ำได้และตัดเฉพาะ page ว่างท้ายไฟล์',
+      'ทำให้เป็นสองเท่า',
+      'เขียนเป็นไฟล์ใหม่',
     ],
     answer: 1,
+    explain: 'table ยังเป็น 57 MB และรอบ update ถัดไปใช้พื้นที่ซ้ำ การลบ row ท้ายทำให้ table เหลือ 8 kB; การลบทุก row ที่สองยังคงอยู่ที่ 8 MB',
   },
   {
-    q: 'ทำไม VACUUM FULL จึงควรถูกสงวนไว้สำหรับ maintenance window?',
+    q: '`VACUUM (VERBOSE)` รายงาน `180000 are dead but not yet removable` สาเหตุที่น่าจะเป็นที่สุดคืออะไร?',
     options: [
-      'ทำงานช้าแต่ไม่บล็อกใครเลย',
-      'จับ exclusive lock ที่บล็อกการอ่านและเขียนทั้งหมดขณะที่เขียน table ใหม่',
-      'ลบ index ทิ้ง',
+      'table ไม่มี index',
+      'มี transaction ที่มี snapshot เก่ากว่ายังเปิดอยู่ (เช่น idle in transaction)',
+      'autovacuum ถูกปิด',
+      'table เล็กเกินไป',
+    ],
+    answer: 1,
+    explain: 'dead tuple ที่ใหม่กว่า snapshot เก่าที่สุดลบไม่ได้ หลัง transaction ที่ idle commit VACUUM เดิมลบได้ครบ 180000',
+  },
+  {
+    q: 'อันตรายหลักของการรัน VACUUM FULL บน table production คืออะไร?',
+    options: [
+      'ลบ row ที่ยังมีชีวิต',
+      'ถือ lock ACCESS EXCLUSIVE ผู้อ่านและผู้เขียนรอตลอดการเขียนใหม่',
       'ปิด autovacuum',
+      'ทำให้สถิติเสีย',
     ],
     answer: 1,
+    explain: 'pg_locks แสดง AccessExclusiveLock ที่ให้ VACUUM FULL และ AccessShareLock ที่รอของ SELECT ธรรมดา (ล่าช้า 341 ms ในบทเรียน)',
+  },
+  {
+    q: 'ทำไม planner เปลี่ยนจาก bitmap scan เป็น Seq Scan สำหรับ `sensor = 1` หลัง ANALYZE?',
+    options: [
+      'ANALYZE สร้าง index',
+      'มันเรียนรู้จากสถิติว่า 90 % ของ row ตรง การอ่านทั้ง table จึงถูกกว่า',
+      'ANALYZE ลบ row',
+      'Seq Scan ถูกบังคับด้วย SET',
+    ],
+    answer: 1,
+    explain: 'pg_stats แสดง most_common_vals เริ่มที่ 1 ด้วยความถี่ 0.900 ค่าประมาณเปลี่ยนจาก rows=1654 เป็น rows=270430',
   },
 ];
 
