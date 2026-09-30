@@ -1,6 +1,6 @@
 ---
 title: Subquery และ CTE
-description: ซ้อน query หนึ่งไว้ในอีก query หนึ่งด้วย scalar, IN, และ EXISTS subquery แล้วตั้งชื่อขั้นตอนระหว่างทางด้วย WITH common table expression — พร้อมชิมลางของ WITH RECURSIVE
+description: ซ้อน query หนึ่งไว้ในอีก query ด้วย scalar, IN และ EXISTS subquery แล้วตั้งชื่อขั้นตอนกลางด้วย WITH — รวมถึงกับดัก NOT IN กับ NULL, ตอนที่ CTE ถูก inline หรือ materialize, WITH RECURSIVE กับ CYCLE และ CTE ที่แก้ข้อมูล
 sidebar:
   order: 4
 ---
@@ -9,22 +9,55 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-subquery คือ `SELECT` ที่เขียนไว้ภายในอีกคำสั่งหนึ่ง query ชั้นในรันก่อนแล้วส่งผลลัพธ์ให้ query ชั้นนอก ซึ่งทำให้คุณตอบคำถามได้เป็นสองขั้นตอน: "หาค่าเฉลี่ย" แล้วก็ "แสดง row ที่อยู่เหนือค่านั้น" common table expression หรือ CTE หยิบแนวคิดเดียวกันมาแล้วตั้งชื่อให้ผลลัพธ์ระหว่างทางด้วย `WITH` query ยาว ๆ จึงอ่านเหมือนเรื่องสั้น แทนที่จะเป็นปมการซ้อนที่ยุ่งเหยิง
+subquery คือ `SELECT` ที่เขียนอยู่ในอีก statement หนึ่ง query ด้านในทำงานก่อนแล้วส่งผลให้ query ด้านนอก ทำให้ตอบคำถามเป็นสองขั้นได้: "หาค่าเฉลี่ย" แล้ว "แสดง row ที่สูงกว่านั้น" common table expression หรือ CTE ใช้แนวคิดเดียวกันแต่ตั้งชื่อให้ผลระหว่างทางด้วย `WITH` query ยาว ๆ จึงอ่านเหมือนเรื่องสั้นแทนที่จะเป็นวงเล็บซ้อนกันยุ่งเหยิง
 
-เรายังคงใช้ table `authors`, `books`, และ `sales` ต่อไป
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) คัดลอกจาก `psql` fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ตัวเลขเวลามาจาก Mac เครื่องนี้
+
+## ชุดข้อมูล
+
+ชุดข้อมูลมาตรฐานของ module นี้ สังเกตสองข้อเท็จจริงที่บทนี้พึ่งพา: *Unlinked Draft* มี `author_id = NULL` และ Sela Vance ไม่เคยเขียนหนังสือ
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## Scalar subquery
 
-scalar subquery คืนค่าเพียงค่าเดียวเป๊ะ ๆ คุณจึงวางไว้ตรงไหนก็ได้ที่ต้องการค่าเดียว — รวมถึงในการเปรียบเทียบ ที่นี่เราแสดงรายการหนังสือที่ตีพิมพ์หลังจากปีที่ตีพิมพ์โดยเฉลี่ย
+scalar subquery คืนค่าเดียวเป๊ะ จึงวางได้ทุกที่ที่ต้องการค่าเดียว รวมถึงในการเปรียบเทียบ ตรงนี้ list หนังสือที่ตีพิมพ์หลังปีเฉลี่ย (สี่ปีเฉลี่ยได้ 2013)
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/scalar-subquery.sql
     SELECT title, published
     FROM books
     WHERE published > (SELECT avg(published) FROM books)
-    ORDER BY published;
+    ORDER BY title;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -33,7 +66,7 @@ scalar subquery คืนค่าเพียงค่าเดียวเป�
       SELECT title, published
       FROM books
       WHERE published > (SELECT avg(published) FROM books)
-      ORDER BY published
+      ORDER BY title
     `);
     ```
   </TabItem>
@@ -43,7 +76,7 @@ scalar subquery คืนค่าเพียงค่าเดียวเป�
         SELECT title, published
         FROM books
         WHERE published > (SELECT avg(published) FROM books)
-        ORDER BY published
+        ORDER BY title
     """)
     rows = cur.fetchall()
     ```
@@ -54,7 +87,8 @@ scalar subquery คืนค่าเพียงค่าเดียวเป�
       SELECT title, published
       FROM books
       WHERE published > (SELECT avg(published) FROM books)
-      ORDER BY published`)
+      ORDER BY title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -63,7 +97,7 @@ scalar subquery คืนค่าเพียงค่าเดียวเป�
         "SELECT title, published
          FROM books
          WHERE published > (SELECT avg(published) FROM books)
-         ORDER BY published",
+         ORDER BY title",
     )
     .fetch_all(&pool)
     .await?;
@@ -72,58 +106,55 @@ scalar subquery คืนค่าเพียงค่าเดียวเป�
 </Tabs>
 
 ```text
-      title       | published
-------------------+-----------
- Tidal Notes      |      2011
- The Glass Orchard|      2018
+       title       | published 
+-------------------+-----------
+ The Glass Orchard |      2018
+ Unlinked Draft    |      2020
 (2 rows)
 ```
 
-`SELECT avg(published)` ชั้นในผลิตตัวเลขออกมาตัวเดียว จากนั้น query ชั้นนอกก็เอาหนังสือแต่ละเล่มไปเทียบกับตัวเลขนั้น
+ถ้า subquery คืนมากกว่าหนึ่ง row ในที่ที่ต้องการค่าเดียว PostgreSQL ไม่เดาให้:
+
+```sql
+-- @expect-error 21000
+SELECT title, (SELECT name FROM authors) AS author FROM books;
+```
+
+```text
+ERROR:  more than one row returned by a subquery used as an expression
+```
 
 ## IN และ EXISTS subquery
 
-เมื่อ query ชั้นในคืนรายการของค่ากลับมา `IN` จะตรวจว่า column ตรงกับค่าใดในรายการนั้นหรือไม่ ส่วน `EXISTS` ต่างออกไปนิดเดียวแต่สำคัญ คือคืนค่าจริงทันทีที่ subquery ผลิต row ออกมาอย่างน้อยหนึ่ง row จึงเข้ากับคำถามแบบ "มี row ที่เกี่ยวข้องอยู่ไหม?" ที่นี่เราหาผู้เขียนที่มียอดขายบันทึกไว้อย่างน้อยหนึ่งรายการ
+`IN` เทียบค่ากับ list ที่ subquery สร้าง; `EXISTS` ถามว่า subquery สร้าง row ใด ๆ หรือไม่ และมักเป็น correlated กับ row ด้านนอก ทั้งสองตอบ "ผู้เขียนที่เขียนหนังสืออย่างน้อยหนึ่งเล่ม":
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT a.name
-    FROM authors AS a
-    WHERE EXISTS (
-      SELECT 1
-      FROM books AS b
-      JOIN sales AS s ON s.book_id = b.id
-      WHERE b.author_id = a.id
-    )
-    ORDER BY a.name;
+    -- sql/exists.sql
+    SELECT name
+    FROM authors a
+    WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+    ORDER BY name;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(`
-      SELECT a.name
-      FROM authors AS a
-      WHERE EXISTS (
-        SELECT 1 FROM books AS b
-        JOIN sales AS s ON s.book_id = b.id
-        WHERE b.author_id = a.id
-      )
-      ORDER BY a.name
+      SELECT name
+      FROM authors a
+      WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+      ORDER BY name
     `);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute("""
-        SELECT a.name
-        FROM authors AS a
-        WHERE EXISTS (
-          SELECT 1 FROM books AS b
-          JOIN sales AS s ON s.book_id = b.id
-          WHERE b.author_id = a.id
-        )
-        ORDER BY a.name
+        SELECT name
+        FROM authors a
+        WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+        ORDER BY name
     """)
     rows = cur.fetchall()
     ```
@@ -131,27 +162,20 @@ scalar subquery คืนค่าเพียงค่าเดียวเป�
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx, `
-      SELECT a.name
-      FROM authors AS a
-      WHERE EXISTS (
-        SELECT 1 FROM books AS b
-        JOIN sales AS s ON s.book_id = b.id
-        WHERE b.author_id = a.id
-      )
-      ORDER BY a.name`)
+      SELECT name
+      FROM authors a
+      WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+      ORDER BY name`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT a.name
-         FROM authors AS a
-         WHERE EXISTS (
-           SELECT 1 FROM books AS b
-           JOIN sales AS s ON s.book_id = b.id
-           WHERE b.author_id = a.id
-         )
-         ORDER BY a.name",
+        "SELECT name
+         FROM authors a
+         WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+         ORDER BY name",
     )
     .fetch_all(&pool)
     .await?;
@@ -160,250 +184,675 @@ scalar subquery คืนค่าเพียงค่าเดียวเป�
 </Tabs>
 
 ```text
-    name
+    name    
 ------------
  Mara Linde
  Owen Pryce
 (2 rows)
 ```
 
-นี่คือ subquery แบบ *correlated*: query ชั้นในอ้างถึง `a.id` จาก query ชั้นนอก จึงเปรียบเสมือนถูกประเมินใหม่สำหรับผู้เขียนแต่ละคน `SELECT 1` เป็นธรรมเนียมปฏิบัติ — กับ `EXISTS` สิ่งที่สำคัญคือมี row อยู่หรือไม่ ไม่ใช่ค่าข้างใน เราจึง select ค่าคงที่ตัวหนึ่งออกมา
-
-## CTE: ตั้งชื่อขั้นตอนด้วย WITH
-
-CTE นิยามผลลัพธ์ชั่วคราวที่มีชื่ออยู่ด้านบนสุดของ query ของคุณด้วย `WITH` แล้วให้คุณอ้างถึงด้วยชื่อนั้นในส่วนล่าง วิธีนี้ไม่เปลี่ยนสิ่งที่คำนวณ แต่ช่วยคลายปม query ที่ซับซ้อน ที่นี่เรารวมยอดขายต่อหนังสือก่อน แล้วจึง join ยอดรวมเหล่านั้นกลับเข้าไปเพื่อหาชื่อของหนังสือแต่ละเล่มและตัวเลขที่พร้อมจัดอันดับ
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    WITH book_sales AS (
-      SELECT book_id, sum(copies) AS total
-      FROM sales
-      GROUP BY book_id
-    )
-    SELECT b.title, bs.total
-    FROM book_sales AS bs
-    JOIN books AS b ON b.id = bs.book_id
-    ORDER BY bs.total DESC;
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const res = await pool.query(`
-      WITH book_sales AS (
-        SELECT book_id, sum(copies) AS total
-        FROM sales
-        GROUP BY book_id
-      )
-      SELECT b.title, bs.total
-      FROM book_sales AS bs
-      JOIN books AS b ON b.id = bs.book_id
-      ORDER BY bs.total DESC
-    `);
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute("""
-        WITH book_sales AS (
-          SELECT book_id, sum(copies) AS total
-          FROM sales
-          GROUP BY book_id
-        )
-        SELECT b.title, bs.total
-        FROM book_sales AS bs
-        JOIN books AS b ON b.id = bs.book_id
-        ORDER BY bs.total DESC
-    """)
-    rows = cur.fetchall()
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    rows, err := conn.Query(ctx, `
-      WITH book_sales AS (
-        SELECT book_id, sum(copies) AS total
-        FROM sales
-        GROUP BY book_id
-      )
-      SELECT b.title, bs.total
-      FROM book_sales AS bs
-      JOIN books AS b ON b.id = bs.book_id
-      ORDER BY bs.total DESC`)
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let rows = sqlx::query(
-        "WITH book_sales AS (
-           SELECT book_id, sum(copies) AS total
-           FROM sales
-           GROUP BY book_id
-         )
-         SELECT b.title, bs.total
-         FROM book_sales AS bs
-         JOIN books AS b ON b.id = bs.book_id
-         ORDER BY bs.total DESC",
-    )
-    .fetch_all(&pool)
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-```text
-      title       | total
-------------------+-------
- The Glass Orchard|  1200
- Tidal Notes      |   450
- Quiet Harbors    |   200
-(3 rows)
+```sql
+-- sql/in.sql
+SELECT name FROM authors WHERE id IN (SELECT author_id FROM books) ORDER BY name;
 ```
 
-ชื่อ `book_sales` อ่านเหมือนตัวแปรที่เก็บยอดรวมต่อหนังสือเอาไว้ คุณนิยาม CTE ได้หลายตัวใน `WITH` เดียว โดยคั่นด้วยจุลภาค และแต่ละตัวอ้างถึงตัวก่อนหน้าได้
+```text
+    name    
+------------
+ Mara Linde
+ Owen Pryce
+(2 rows)
+```
 
-## ชิมลาง WITH RECURSIVE
+อันไหนเร็วกว่า? ใน PostgreSQL ไม่ต่างกัน หัวข้อนี้สร้าง `parents` 1 000 และ `children` 200 000 (เฉพาะ parent 1 ถึง 500 ที่มี children) พร้อม index บน `children.parent_id`:
 
-CTE แบบ `WITH RECURSIVE` อ้างถึงตัวเองได้ จึงเดินตามโซ่หรือต้นไม้ได้ — แผนผังองค์กร, ลำดับชั้นของหมวดหมู่, หรือในที่นี้คือลำดับตัวเลขง่าย ๆ คุณคงไม่ได้ใช้บ่อยนัก แต่นี่คือเครื่องมือสำหรับข้อมูลแบบลำดับชั้น
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    WITH RECURSIVE counter AS (
-      SELECT 1 AS n
-      UNION ALL
-      SELECT n + 1 FROM counter WHERE n < 5
-    )
-    SELECT n FROM counter;
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const res = await pool.query(`
-      WITH RECURSIVE counter AS (
-        SELECT 1 AS n
-        UNION ALL
-        SELECT n + 1 FROM counter WHERE n < 5
-      )
-      SELECT n FROM counter
-    `);
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute("""
-        WITH RECURSIVE counter AS (
-          SELECT 1 AS n
-          UNION ALL
-          SELECT n + 1 FROM counter WHERE n < 5
-        )
-        SELECT n FROM counter
-    """)
-    rows = cur.fetchall()
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    rows, err := conn.Query(ctx, `
-      WITH RECURSIVE counter AS (
-        SELECT 1 AS n
-        UNION ALL
-        SELECT n + 1 FROM counter WHERE n < 5
-      )
-      SELECT n FROM counter`)
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let rows = sqlx::query(
-        "WITH RECURSIVE counter AS (
-           SELECT 1 AS n
-           UNION ALL
-           SELECT n + 1 FROM counter WHERE n < 5
-         )
-         SELECT n FROM counter",
-    )
-    .fetch_all(&pool)
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
+```sql
+-- sql/subquery-plans-setup.sql
+CREATE TABLE parents (id int PRIMARY KEY);
+CREATE TABLE children (
+  id        int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  parent_id int NOT NULL REFERENCES parents (id),
+  k         int NOT NULL
+);
+INSERT INTO parents SELECT g FROM generate_series(1, 1000) AS g;
+-- only parents 1..500 have children
+INSERT INTO children (parent_id, k) SELECT 1 + g % 500, g % 10 FROM generate_series(1, 200000) AS g;
+CREATE INDEX children_parent_id_idx ON children (parent_id);
+ANALYZE parents;
+ANALYZE children;
+```
 
 ```text
- n
----
- 1
- 2
- 3
- 4
- 5
+CREATE TABLE
+CREATE TABLE
+INSERT 0 1000
+INSERT 0 200000
+CREATE INDEX
+ANALYZE
+ANALYZE
+```
+
+สองแบบด้านล่างวางเป็น plan **เดียวกันเป๊ะ** จนถึงตัวเลข cost planner เขียนทั้งสองใหม่เป็น semi join ([docs เรื่อง subquery expression](https://www.postgresql.org/docs/18/functions-subquery.html)) คำแนะนำ "EXISTS หยุดที่ match แรกได้" คือสิ่งที่ `Semi Join` ทำให้อยู่แล้วไม่ว่าจะเขียนแบบไหน:
+
+```sql
+-- sql/plan-in-vs-exists.sql
+EXPLAIN SELECT count(*) FROM parents WHERE id IN (SELECT parent_id FROM children);
+EXPLAIN SELECT count(*) FROM parents p WHERE EXISTS (SELECT 1 FROM children c WHERE c.parent_id = p.id);
+```
+
+```text
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=366.17..366.18 rows=1 width=8)
+   ->  Nested Loop Semi Join  (cost=0.29..364.92 rows=500 width=0)
+         ->  Seq Scan on parents  (cost=0.00..15.00 rows=1000 width=4)
+         ->  Index Only Scan using children_parent_id_idx on children  (cost=0.29..12.30 rows=400 width=4)
+               Index Cond: (parent_id = parents.id)
+(5 rows)
+
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=366.17..366.18 rows=1 width=8)
+   ->  Nested Loop Semi Join  (cost=0.29..364.92 rows=500 width=0)
+         ->  Seq Scan on parents p  (cost=0.00..15.00 rows=1000 width=4)
+         ->  Index Only Scan using children_parent_id_idx on children c  (cost=0.29..12.30 rows=400 width=4)
+               Index Cond: (parent_id = p.id)
 (5 rows)
 ```
 
-`SELECT` แรกคือจุดเริ่มต้น และส่วนที่อยู่หลัง `UNION ALL` ก็กิน row ที่ผลิตมาแล้วจนถึงตอนนี้ ไปเรื่อย ๆ จนกระทั่งเงื่อนไข `WHERE` หยุดเพิ่ม row ใหม่ recursive CTE มีบทเจาะลึกเป็นของตัวเองในคอร์สนี้ในภายหลัง
+### NOT IN และกับดัก NULL
+
+`NOT IN` ต่างออกไป และนี่คือความผิดพลาดกับ subquery ที่มีผลจริง `x NOT IN (1, 2, NULL)` ไม่เคยเป็นจริง: สำหรับค่าที่ไม่อยู่ใน list มันประเมินเป็น `NULL` (ไม่ทราบ) ไม่ใช่ `true` `books.author_id` ของเรามี `NULL` หนึ่งตัว "ผู้เขียนที่ไม่มีหนังสือ" จึงคืน **ว่างเปล่า** ทั้งที่คำตอบคือ Sela Vance:
+
+```sql
+-- sql/not-in-vs-not-exists.sql
+-- books.author_id contains a NULL (Unlinked Draft), so NOT IN can never be true
+SELECT name FROM authors WHERE id NOT IN (SELECT author_id FROM books) ORDER BY name;
+
+SELECT name FROM authors a
+WHERE NOT EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+ORDER BY name;
+```
+
+```text
+ name 
+------
+(0 rows)
+
+    name    
+------------
+ Sela Vance
+(1 row)
+```
+
+การกรอง `NULL` ออกจาก subquery แก้ได้ แต่ `NOT EXISTS` ไม่เคยมีปัญหานี้:
+
+```sql
+-- sql/not-in-filtered.sql
+-- NOT IN works again once the NULLs are removed from the subquery
+SELECT name FROM authors
+WHERE id NOT IN (SELECT author_id FROM books WHERE author_id IS NOT NULL)
+ORDER BY name;
+```
+
+```text
+    name    
+------------
+ Sela Vance
+(1 row)
+```
+
+นี่เป็นปัญหาของ plan ด้วย `NOT EXISTS` กลายเป็น anti join ส่วน `NOT IN` ทำไม่ได้ (เพราะกฎของ `NULL`) และเป็นตัวกรองบน hashed subplan:
+
+```sql
+-- sql/plan-not-in-vs-not-exists.sql
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parents WHERE id NOT IN (SELECT parent_id FROM children);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parents p WHERE NOT EXISTS (SELECT 1 FROM children c WHERE c.parent_id = p.id);
+```
+
+```text
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Aggregate
+   ->  Seq Scan on parents
+         Filter: (NOT (ANY (id = (hashed SubPlan 1).col1)))
+         SubPlan 1
+           ->  Seq Scan on children
+(5 rows)
+
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Aggregate
+   ->  Nested Loop Anti Join
+         ->  Seq Scan on parents p
+         ->  Index Only Scan using children_parent_id_idx on children c
+               Index Cond: (parent_id = p.id)
+(5 rows)
+```
+
+### Correlated subquery
+
+correlated subquery อ้างถึง row ด้านนอก จึงในเชิงแนวคิดรันหนึ่งครั้งต่อ row ด้านนอก ในตำแหน่ง scalar นั่นคือสิ่งที่ plan ทำจริง (`SubPlan 1 ... loops=1000`) และตรงนี้ช้ากว่า join กับ `GROUP BY` ที่ให้คำตอบเดียวกันราวหกเท่า (288 ms เทียบกับ 50 ms บน Mac เครื่องนี้ parents 1 000 และ children 200 000 การรันครั้งแรกยังจ่ายค่าอ่าน buffer แบบเย็น 165 ครั้ง):
+
+```sql
+-- sql/correlated-subquery.sql
+-- a correlated scalar subquery cannot be flattened: one probe per parent
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT p.id, (SELECT count(*) FROM children c WHERE c.parent_id = p.id) AS n
+FROM parents p;
+
+-- the same answer as a join + GROUP BY
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT p.id, count(c.id) AS n
+FROM parents p LEFT JOIN children c ON c.parent_id = p.id
+GROUP BY p.id;
+```
+
+```text
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Seq Scan on parents p (actual time=63.716..151.630 rows=1000.00 loops=1)
+   Buffers: shared hit=202006 read=165
+   SubPlan 1
+     ->  Aggregate (actual time=0.088..0.089 rows=1.00 loops=1000)
+           Buffers: shared hit=202001 read=165
+           ->  Bitmap Heap Scan on children c (actual time=0.018..0.081 rows=200.00 loops=1000)
+                 Recheck Cond: (parent_id = p.id)
+                 Heap Blocks: exact=200000
+                 Buffers: shared hit=202001 read=165
+                 ->  Bitmap Index Scan on children_parent_id_idx (actual time=0.007..0.007 rows=200.00 loops=1000)
+                       Index Cond: (parent_id = p.id)
+                       Index Searches: 1000
+                       Buffers: shared hit=2001 read=165
+ Planning:
+   Buffers: shared hit=95
+ Planning Time: 0.225 ms
+ Execution Time: 164.893 ms
+(17 rows)
+
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ HashAggregate (actual time=50.868..50.950 rows=1000.00 loops=1)
+   Group Key: p.id
+   Batches: 1  Memory Usage: 121kB
+   Buffers: shared hit=1087
+   ->  Hash Right Join (actual time=0.115..33.041 rows=200500.00 loops=1)
+         Hash Cond: (c.parent_id = p.id)
+         Buffers: shared hit=1087
+         ->  Seq Scan on children c (actual time=0.003..9.376 rows=200000.00 loops=1)
+               Buffers: shared hit=1082
+         ->  Hash (actual time=0.109..0.109 rows=1000.00 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 44kB
+               Buffers: shared hit=5
+               ->  Seq Scan on parents p (actual time=0.004..0.048 rows=1000.00 loops=1)
+                     Buffers: shared hit=5
+ Planning:
+   Buffers: shared hit=40
+ Planning Time: 0.208 ms
+ Execution Time: 51.021 ms
+(18 rows)
+```
+
+`EXISTS` แบบ correlated ไม่เป็นไร เพราะถูกแปลงเป็น semi join ตามที่แสดงข้างบน ที่ยังเป็นการ probe ต่อ row คือ correlated subquery แบบ *scalar* (รายการใน `SELECT`)
+
+## CTE: ตั้งชื่อขั้นตอนด้วย WITH
+
+CTE ตั้งชื่อให้ subquery และวางไว้ก่อน query หลักจึงอ่านจากบนลงล่าง ตรงนี้รวมยอดขายต่อเล่ม แล้ว join ชื่อหนังสือ:
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/cte.sql
+    WITH totals AS (
+      SELECT book_id, sum(copies) AS copies
+      FROM sales
+      GROUP BY book_id
+    )
+    SELECT b.title, t.copies
+    FROM totals AS t
+    JOIN books AS b ON b.id = t.book_id
+    ORDER BY t.copies DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      WITH totals AS (
+        SELECT book_id, sum(copies) AS copies
+        FROM sales
+        GROUP BY book_id
+      )
+      SELECT b.title, t.copies
+      FROM totals AS t
+      JOIN books AS b ON b.id = t.book_id
+      ORDER BY t.copies DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        WITH totals AS (
+          SELECT book_id, sum(copies) AS copies
+          FROM sales
+          GROUP BY book_id
+        )
+        SELECT b.title, t.copies
+        FROM totals AS t
+        JOIN books AS b ON b.id = t.book_id
+        ORDER BY t.copies DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      WITH totals AS (
+        SELECT book_id, sum(copies) AS copies
+        FROM sales
+        GROUP BY book_id
+      )
+      SELECT b.title, t.copies
+      FROM totals AS t
+      JOIN books AS b ON b.id = t.book_id
+      ORDER BY t.copies DESC`)
+    defer rows.Close()
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "WITH totals AS (
+           SELECT book_id, sum(copies) AS copies
+           FROM sales
+           GROUP BY book_id
+         )
+         SELECT b.title, t.copies
+         FROM totals AS t
+         JOIN books AS b ON b.id = t.book_id
+         ORDER BY t.copies DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+       title       | copies 
+-------------------+--------
+ The Glass Orchard |   1050
+ Tidal Notes       |    600
+ Quiet Harbors     |    450
+(3 rows)
+```
+
+เชื่อม CTE หลายตัวด้วย comma ได้ แต่ละตัวมองเห็นตัวก่อนหน้า จำนวนเล่มที่ขายต่อผู้เขียน:
+
+```sql
+-- sql/cte-chain.sql
+WITH per_book AS (
+  SELECT book_id, sum(copies) AS copies FROM sales GROUP BY book_id
+), per_author AS (
+  SELECT b.author_id, sum(p.copies) AS copies
+  FROM per_book p JOIN books b ON b.id = p.book_id
+  GROUP BY b.author_id
+)
+SELECT a.name, pa.copies
+FROM per_author pa JOIN authors a ON a.id = pa.author_id
+ORDER BY pa.copies DESC;
+```
+
+```text
+    name    | copies 
+------------+--------
+ Mara Linde |   1500
+ Owen Pryce |    600
+(2 rows)
+```
+
+ผลลัพธ์จาก driver สำหรับสาม query ข้างบน แต่ละอันรันหนึ่งครั้ง:
+
+```text
+$ (each snippet run once against the dataset above; multi-line driver output joined onto one line)
+[scalar] Node.js (pg 8.23.0):    [ { title: 'The Glass Orchard', published: 2018 }, { title: 'Unlinked Draft', published: 2020 } ]
+[scalar] Python (psycopg 3.3.6): [('The Glass Orchard', 2018), ('Unlinked Draft', 2020)]
+[scalar] Go (pgx v5.11.0):       [The Glass Orchard 2018] [Unlinked Draft 2020]
+[scalar] Rust (sqlx 0.9.0):      The Glass Orchard 2018 / Unlinked Draft 2020
+[exists] Node.js:                [ { name: 'Mara Linde' }, { name: 'Owen Pryce' } ]
+[exists] Python:                 [('Mara Linde',), ('Owen Pryce',)]
+[exists] Go / Rust:              Mara Linde / Owen Pryce
+[cte]    Node.js:                [ { title: 'The Glass Orchard', copies: '1050' }, { title: 'Tidal Notes', copies: '600' }, { title: 'Quiet Harbors', copies: '450' } ]
+[cte]    Python:                 [('The Glass Orchard', 1050), ('Tidal Notes', 600), ('Quiet Harbors', 450)]
+[cte]    Go / Rust:              The Glass Orchard 1050 / Tidal Notes 600 / Quiet Harbors 450
+```
+
+### CTE เป็นรั้วกั้นไหม? แล้วแต่ และคุณเลือกได้
+
+ตั้งแต่ PostgreSQL 12 CTE จะถูก **inline** เข้าไปใน query ด้านนอกเมื่อไม่ recursive ไม่มี side effect และถูกอ้างถึงเพียงครั้งเดียว มิฉะนั้นมันถูกคำนวณครั้งเดียวและใช้ผลซ้ำ (materialize) `AS MATERIALIZED` และ `AS NOT MATERIALIZED` override ค่าเริ่มต้น ([docs](https://www.postgresql.org/docs/18/queries-with.html#QUERIES-WITH-CTE-MATERIALIZATION)) สี่ plan ด้านล่างแสดงครบสี่รูปแบบ บน `children` 200 000 row:
+
+```sql
+-- sql/cte-inline.sql
+-- referenced once: inlined into the outer query
+EXPLAIN (COSTS OFF)
+WITH c AS (SELECT * FROM children WHERE k = 5)
+SELECT * FROM c WHERE id < 100;
+
+-- referenced twice: computed once and shared (materialized)
+EXPLAIN (COSTS OFF)
+WITH c AS (SELECT * FROM children WHERE k = 5)
+SELECT (SELECT count(*) FROM c) AS n, (SELECT max(id) FROM c) AS newest;
+
+-- forced with AS MATERIALIZED even though used once
+EXPLAIN (COSTS OFF)
+WITH c AS MATERIALIZED (SELECT * FROM children WHERE k = 5)
+SELECT * FROM c WHERE id < 100;
+
+-- forced inlining with NOT MATERIALIZED even though used twice
+EXPLAIN (COSTS OFF)
+WITH c AS NOT MATERIALIZED (SELECT * FROM children WHERE k = 5)
+SELECT (SELECT count(*) FROM c) AS n, (SELECT max(id) FROM c) AS newest;
+```
+
+```text
+                 QUERY PLAN                 
+--------------------------------------------
+ Index Scan using children_pkey on children
+   Index Cond: (id < 100)
+   Filter: (k = 5)
+(3 rows)
+
+           QUERY PLAN            
+---------------------------------
+ Result
+   CTE c
+     ->  Seq Scan on children
+           Filter: (k = 5)
+   InitPlan 2
+     ->  Aggregate
+           ->  CTE Scan on c
+   InitPlan 3
+     ->  Aggregate
+           ->  CTE Scan on c c_1
+(10 rows)
+
+          QUERY PLAN          
+------------------------------
+ CTE Scan on c
+   Filter: (id < 100)
+   CTE c
+     ->  Seq Scan on children
+           Filter: (k = 5)
+(5 rows)
+
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Result
+   InitPlan 1
+     ->  Finalize Aggregate
+           ->  Gather
+                 Workers Planned: 1
+                 ->  Partial Aggregate
+                       ->  Parallel Seq Scan on children
+                             Filter: (k = 5)
+   InitPlan 3
+     ->  Result
+           InitPlan 2
+             ->  Limit
+                   ->  Index Scan Backward using children_pkey on children children_1
+                         Filter: (k = 5)
+(14 rows)
+```
+
+1. อ้างถึงครั้งเดียว: ไม่มี node `CTE` เลย เงื่อนไข `id < 100` ด้านนอกถูกผลักเข้าไปใน scan ของ CTE เอง (`Index Cond: (id < 100)`, `Filter: (k = 5)`)
+2. อ้างถึงสองครั้ง: `CTE c` ถูก scan ครั้งเดียวและอ่านโดยสอง node `CTE Scan`
+3. `AS MATERIALIZED` กับการอ้างถึงเดียว: CTE ถูกคำนวณเต็มก่อน และ `id < 100` เป็นเพียง `Filter` บน `CTE Scan` คือรั้วกั้นการ optimize
+4. `NOT MATERIALIZED` กับสองการอ้างถึง: inline สองครั้ง แต่ละการอ้างถึงได้ plan ของตัวเอง (`max(id)` กลายเป็น backward index scan ด้วยซ้ำ)
+
+ไม่มีแบบไหนดีกว่าโดยทั่วไป materialize เมื่อ CTE แพงและถูกอ่านหลายครั้ง inline เมื่อ query ด้านนอกกรองมันได้
+
+## WITH RECURSIVE
+
+CTE แบบ recursive มี query เริ่มต้น, `UNION ALL` และส่วน recursive ที่อ้างถึง CTE ตัวเอง วนซ้ำจนส่วน recursive ไม่คืน row ใหม่ เป็นวิธีมาตรฐานในการเดินต้นไม้ เช่นผังองค์กร:
+
+```sql
+-- sql/recursive-setup.sql
+CREATE TABLE staff (
+  id      int PRIMARY KEY,
+  name    text NOT NULL,
+  boss_id int REFERENCES staff (id)
+);
+INSERT INTO staff VALUES
+  (1, 'Ada', NULL), (2, 'Ben', 1), (3, 'Cy', 1), (4, 'Di', 2), (5, 'Eli', 2), (6, 'Flo', 3), (7, 'Gus', 4);
+```
+
+```sql
+-- sql/recursive.sql
+WITH RECURSIVE tree AS (
+  SELECT id, name, 0 AS depth, name AS path
+  FROM staff
+  WHERE boss_id IS NULL
+  UNION ALL
+  SELECT s.id, s.name, t.depth + 1, t.path || ' > ' || s.name
+  FROM staff s
+  JOIN tree t ON s.boss_id = t.id
+)
+SELECT repeat('  ', depth) || name AS org_chart, path
+FROM tree
+ORDER BY path;
+```
+
+```text
+ org_chart |         path         
+-----------+----------------------
+ Ada       | Ada
+   Ben     | Ada > Ben
+     Di    | Ada > Ben > Di
+       Gus | Ada > Ben > Di > Gus
+     Eli   | Ada > Ben > Eli
+   Cy      | Ada > Cy
+     Flo   | Ada > Cy > Flo
+(7 rows)
+```
+
+ข้อมูลเสียทำให้ recursion ไม่จบได้: ถ้ากราฟมี cycle ส่วน recursive เจอ row ใหม่ไปเรื่อย ๆ clause `CYCLE` (PostgreSQL 14+) ทำเครื่องหมาย row ที่กลับมาที่ `id` ที่เคยเห็นแล้วและหยุดตรงนั้น เราทำข้อมูลเสียใน transaction ให้ Ada รายงานต่อเหลนของตัวเองคือ Gus แล้ว rollback:
+
+```sql
+-- sql/recursive-cycle.sql
+BEGIN;
+-- corrupt the data on purpose: Ada now reports to Gus, who reports (via Di, Ben) to Ada
+UPDATE staff SET boss_id = 7 WHERE id = 1;
+WITH RECURSIVE tree AS (
+  SELECT id, name, boss_id FROM staff WHERE id = 1
+  UNION ALL
+  SELECT s.id, s.name, s.boss_id FROM staff s JOIN tree t ON s.boss_id = t.id
+) CYCLE id SET is_cycle USING seen
+SELECT id, name, is_cycle FROM tree;
+ROLLBACK;
+```
+
+```text
+BEGIN
+UPDATE 1
+ id | name | is_cycle 
+----+------+----------
+  1 | Ada  | f
+  2 | Ben  | f
+  3 | Cy   | f
+  4 | Di   | f
+  5 | Eli  | f
+  6 | Flo  | f
+  7 | Gus  | f
+  1 | Ada  | t
+(8 rows)
+
+ROLLBACK
+```
+
+row สุดท้าย (`is_cycle = t`) คือ Ada ที่เห็นเป็นครั้งที่สอง recursion หยุดแทนที่จะวนไม่รู้จบ
+
+## CTE ที่แก้ข้อมูล
+
+`DELETE`, `UPDATE` และ `INSERT` อยู่ใน `WITH` ได้ถ้ามี `RETURNING` และผลของมันป้อนให้ statement หลักได้ ตัวอย่างนี้ย้ายยอดขาย West ไป table archive ใน statement เดียว (อยู่ใน transaction เพื่อให้ดูแล้ว rollback ได้):
+
+```sql
+-- sql/data-modifying-cte.sql
+CREATE TABLE sales_archive (LIKE sales);
+BEGIN;
+WITH moved AS (
+  DELETE FROM sales WHERE region = 'West' RETURNING *
+)
+INSERT INTO sales_archive SELECT * FROM moved;
+SELECT (SELECT count(*) FROM sales) AS live, (SELECT count(*) FROM sales_archive) AS archived;
+ROLLBACK;
+SELECT (SELECT count(*) FROM sales) AS live, (SELECT count(*) FROM sales_archive) AS archived;
+```
+
+```text
+CREATE TABLE
+BEGIN
+INSERT 0 3
+ live | archived 
+------+----------
+    3 |        3
+(1 row)
+
+ROLLBACK
+ live | archived 
+------+----------
+    6 |        0
+(1 row)
+```
+
+ใน transaction มี 3 row live และ 3 archived หลัง rollback archive ว่างอีกครั้ง
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอ "ผู้เขียนที่ไม่เคยเขียนหนังสือ" และเขียน query ที่ดูเป็นธรรมชาติที่สุด:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "authors who have not written any book"
+SELECT name
+FROM authors
+WHERE id NOT IN (SELECT author_id FROM books);`}>
+
+มันคืนว่างเปล่า และไม่มี error `books.author_id` มี `NULL` (*Unlinked Draft*) `id NOT IN (..., NULL)` จึงไม่เคยเป็นจริง และ Sela Vance ตกหล่น:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT name
+FROM authors
+WHERE id NOT IN (SELECT author_id FROM books);
+```
+
+```text
+ name 
+------
+(0 rows)
+```
+
+`NOT EXISTS` ระบุเจตนาโดยไม่มีภัยจาก `NULL` (และวาง plan เป็น anti join):
+
+```sql
+-- sql/stb-fixed.sql
+SELECT name
+FROM authors a
+WHERE NOT EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id);
+```
+
+```text
+    name    
+------------
+ Sela Vance
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+subquery คือ expression ที่ค่าเป็น table, row หรือค่าเดียว ถามว่ามันต้องเป็นอะไร แล้ว syntax ตามมาเอง: ค่าเดียว (เปรียบเทียบแบบ scalar), list สำหรับทดสอบการเป็นสมาชิก (`IN`) หรือแค่ "ว่างไหม?" (`EXISTS`) CTE คือ subquery ที่มีชื่อวางไว้ด้านบน มันเป็นเครื่องมือตั้งชื่อก่อน ส่วนจะเป็นขอบเขตการคำนวณด้วยหรือไม่ planner ตัดสินและคุณ override ได้ recursion เพิ่มความคิดเดียว: CTE ที่ป้อน row ใหม่ของตัวเองกลับเข้าไปจนไม่เหลือ
 
 ## เคล็ดลับและข้อควรระวัง
 
-- scalar subquery ต้องคืนค่าเพียงหนึ่ง row หนึ่ง column เป๊ะ ๆ ถ้าคืนมากกว่านั้น PostgreSQL จะโยน error ออกมาตอนรันไทม์
-- CTE ให้คุณตั้งชื่อแต่ละขั้นตอน query ที่ปกติจะซ้อนกันสามชั้นจึงกลายเป็นลำดับจากบนลงล่างที่อ่านง่าย
-- subquery แบบ *correlated* อ้างถึง column จาก query ชั้นนอกและเปรียบเสมือนถูกรันครั้งหนึ่งต่อหนึ่ง row ชั้นนอก ส่วนแบบ uncorrelated รันเพียงครั้งเดียว `EXISTS` มักเป็นแบบ correlated เกือบทุกครั้ง
-- เลือก `EXISTS` แทน `IN` เมื่อคุณสนใจแค่ว่ามีคู่ที่ตรงกันอยู่หรือไม่ โดยเฉพาะกับ table ขนาดใหญ่ เพราะ `EXISTS` หยุดได้ที่ row แรกที่ตรงกัน
-- ให้ query `WITH RECURSIVE` มีเงื่อนไขสิ้นสุดเสมอ ไม่อย่างนั้นจะวนสร้าง row ไปไม่รู้จบ
+- scalar subquery ต้องคืนหนึ่ง row หนึ่ง column ไม่เช่นนั้น PostgreSQL ส่ง `21000`
+- `IN` และ `EXISTS` (และ `NOT EXISTS`) วาง plan เหมือนกัน; เลือก `NOT EXISTS` แทน `NOT IN` เมื่อ column ของ subquery เป็น `NULL` ได้
+- CTE = ความอ่านง่าย ไม่ใช่รั้วประสิทธิภาพอัตโนมัติหรือการันตีว่า materialize ตรวจ `EXPLAIN` เมื่อสำคัญ
+- ทุก `WITH RECURSIVE` ที่เดินข้อมูลที่คุณควบคุมไม่ได้ควรมีจุดหยุด: `CYCLE`, ตัวนับความลึกกับ `WHERE depth < n` หรือ `UNION` แทน `UNION ALL`
+- CTE ที่แก้ข้อมูลเห็น snapshot เดียวกันหมดและรันไม่ว่า query หลักจะอ่านมันหรือไม่
 
-<Callout title="subquery หรือ CTE?">
-ทั้งสองมักคำนวณสิ่งเดียวกัน เลือก subquery สำหรับ expression เล็ก ๆ ที่ใช้ครั้งเดียวอย่าง `(SELECT avg(...))` และเลือก CTE เมื่อขั้นตอนนั้นถูกใช้ซ้ำ หรือเมื่อการตั้งชื่อขั้นตอนนั้นทำให้ทั้ง query อ่านง่ายขึ้น ความอ่านง่ายเป็นฟีเจอร์จริง ๆ — ตัวคุณในอนาคตที่ต้องดูแล query นี้จะขอบคุณคุณ
+<Callout title="Subquery หรือ CTE?">
+ใช้ subquery เมื่อขั้นตอนนั้นเล็กและใช้ครั้งเดียว ใช้ CTE เมื่ออยากตั้งชื่อขั้นตอน ใช้ซ้ำ หรืออ่าน query จากบนลงล่าง ถ้า query มีวงเล็บซ้อนสามสี่ชั้น ถึงเวลาใช้ CTE
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| CTE (`WITH ...`) | ตั้งชื่อขั้นตอนได้ อ่านง่าย รีวิวง่าย | เพิ่มบรรทัดโค้ด และในเวอร์ชันเก่าเคยถูก materialize แยกจาก query หลัก |
-| Subquery แบบฝังตรง (inline) | เขียนสั้น บาง query planner จัดการได้ดีกว่า | ซ้อนลึกแล้วอ่านยาก โดยเฉพาะเมื่อมีหลายชั้น |
-| Correlated subquery | ยืดหยุ่น เขียนตามโจทย์ทีละ row ได้ | รันซ้ำต่อ row ฝั่งนอก ช้าบน table ใหญ่ เมื่อเทียบกับ join |
+| subquery แบบ inline | กระชับ planner เห็นทุกอย่าง | ซ้อนลึกอ่านและ debug ยาก |
+| CTE (inline โดยค่าเริ่มต้น) | อ่านจากบนลงล่าง plan เหมือน subquery เมื่อใช้ครั้งเดียว | อ้างถึงสองครั้งจะ materialize และกันการผลักตัวกรองด้านนอกลงไป |
+| `AS MATERIALIZED` | คำนวณขั้นตอนแพงครั้งเดียว คาดเดาได้ | เป็นรั้วกั้นการ optimize: ตัวกรองด้านนอกทำทีหลัง |
+| correlated scalar subquery | เขียนตรงไปตรงมามาก | probe ต่อ row ด้านนอก (288 ms เทียบกับ 50 ms ของ join ข้างบน) |
+| `WITH RECURSIVE` | เดินต้นไม้และกราฟใน SQL | ต้องมีตัวป้องกันไม่จบ; อาจช้าบนกราฟใหญ่ |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า CTE ถูก materialize เป็น "fence" เสมอ** — พฤติกรรมนี้เปลี่ยนไปแล้ว PostgreSQL เวอร์ชันปัจจุบัน inline CTE เข้ากับ query หลักได้เหมือน subquery ธรรมดา อย่ายึดติดกับความเข้าใจเก่า
-- **เขียน correlated subquery ทั้งที่ join ทำงานเดียวกันได้เร็วกว่า** — เพราะ correlated subquery รันซ้ำต่อทุก row ฝั่งนอก ถ้าโจทย์แค่ต้องการ join ข้อมูล ให้ใช้ join หรือ window function แทน
-- **ซ้อน subquery ลึกหลายชั้นจนอ่านไม่ออก** — เมื่อ query เริ่มมีวงเล็บซ้อนสามสี่ชั้น ให้แตกเป็น CTE ที่ตั้งชื่อแต่ละขั้นตอน จะ debug และรีวิวง่ายกว่ามาก
-
-> 💡 ตัวอย่างจากของจริง
->
-> **Query สำหรับรายงานภายใน (internal reporting)** — มักใช้ CTE หลายตัวต่อกันเพื่อแตกโจทย์ซับซ้อนเป็นขั้นตอนที่มีชื่อ ทำให้ทีมรีวิว SQL อ่านตามลำดับได้โดยไม่ต้องไล่วงเล็บ
->
-> **ทีม data/analytics** — เวลาสร้างรายงานสรุปหลายชั้น (เช่น หา metric กลาง แล้วกรองต่อจาก metric นั้น) ทีมข้อมูลมักเลือก CTE แทน subquery ซ้อนกันเพื่อให้ query อธิบายตัวเองได้
+- **"EXISTS เร็วกว่า IN"** ทั้งสองคอมไพล์เป็น semi join เดียวกัน (plan และ cost เหมือนกันข้างบน)
+- **"NOT IN กับ NOT EXISTS เหมือนกัน"** ต่างกันทันทีที่ subquery คืน `NULL`: `NOT IN` ไม่คืน row เลย
+- **"CTE ถูก materialize เสมอ"** ไม่ใช่ตั้งแต่ PostgreSQL 12: CTE ที่อ้างถึงครั้งเดียวถูก inline
+- **"CTE ถูก inline เสมอ"** อ้างถึงสองครั้งมันถูก materialize; `AS MATERIALIZED` บังคับได้
+- **"recursive CTE วนไม่รู้จบเมื่อเจอ cycle"** วนถ้าไม่ป้องกัน; `CYCLE` ป้องกันให้เอง
 
 export const quizSubqueries = [
   {
-    q: 'scalar subquery ที่ใช้ในการเปรียบเทียบต้องคืนค่าอะไร?',
-    options: [
-      'รายการของค่า',
-      'หนึ่ง row หนึ่ง column เป๊ะ ๆ',
-      'อย่างน้อยหนึ่ง row',
-      'ค่า boolean จริงหรือเท็จ',
-    ],
+    q: 'scalar subquery ต้องคืนอะไร?',
+    options: ['กี่ row ก็ได้', 'หนึ่ง row หนึ่ง column พอดี', 'เฉพาะตัวเลข', 'ทั้ง table'],
     answer: 1,
+    explain: 'มากกว่าหนึ่ง row ล้มด้วย `more than one row returned by a subquery used as an expression` (21000); ศูนย์ row ให้ NULL',
   },
   {
-    q: 'CTE ที่นิยามด้วย WITH ให้อะไรกับคุณ?',
+    q: '`SELECT name FROM authors WHERE id NOT IN (SELECT author_id FROM books)` ไม่คืน row เลย ทั้งที่ Sela Vance ไม่มีหนังสือ เพราะอะไร?',
     options: [
-      'table ถาวรที่เก็บไว้บนดิสก์',
-      'ผลลัพธ์ชั่วคราวที่มีชื่อซึ่งคุณอ้างถึงได้ภายใน query เดียวกัน',
-      'index บน table ที่อยู่เบื้องล่าง',
-      'query ที่เร็วขึ้นในทุกกรณี',
+      'PostgreSQL 18 ไม่รองรับ NOT IN',
+      'books.author_id มี NULL จึงทำให้ NOT IN ไม่เคยเป็นจริง',
+      'subquery เป็น correlated',
+      'authors ไม่มี index บน id',
     ],
     answer: 1,
+    explain: 'x NOT IN (1, NULL) ประเมินเป็น NULL ไม่ใช่ true NOT EXISTS หรือการกรอง NULL ออกจาก subquery คืน Sela Vance',
   },
   {
-    q: 'EXISTS เหมาะเป็นพิเศษเมื่อใด?',
+    q: 'สำหรับ "ผู้เขียนที่มีหนังสืออย่างน้อยหนึ่งเล่ม" `IN (subquery)` กับ `EXISTS (subquery)` เทียบกันอย่างไรใน PostgreSQL?',
     options: [
-      'เมื่อคุณต้องการรวมค่าของ column',
-      'เมื่อคุณสนใจแค่ว่ามี row ที่ตรงกันอย่างน้อยหนึ่ง row อยู่หรือไม่',
-      'เมื่อคุณต้องการคืน column จาก query ชั้นใน',
-      'เมื่อ subquery ต้องคืนหลาย column',
+      'EXISTS เร็วกว่ามากเสมอ',
+      'IN เร็วกว่ามากเสมอ',
+      'planner แปลงทั้งสองเป็น semi join; plan และ cost เหมือนกันในบทเรียน',
+      'คืน row ต่างกัน',
+    ],
+    answer: 2,
+    explain: 'ทั้งสอง plan เป็น `Nested Loop Semi Join` cost 366.17.. เลือกตามความอ่านง่าย ไม่ใช่ตามคำเล่าลือ',
+  },
+  {
+    q: 'อะไรทำให้ CTE ไม่ถูก inline เข้า query ด้านนอก?',
+    options: [
+      'การตั้งชื่อ',
+      'อ้างถึงสองครั้ง หรือเขียน AS MATERIALIZED',
+      'ใช้ SELECT * ใน CTE',
+      'วางไว้ก่อนใน list ของ WITH',
     ],
     answer: 1,
+    explain: 'CTE ที่ไม่ recursive ไม่มี side effect และอ้างถึงครั้งเดียวถูก inline สองการอ้างถึง (หรือ AS MATERIALIZED) สร้าง node `CTE` ที่แชร์กันและถูก scan โดย `CTE Scan`',
+  },
+  {
+    q: 'อะไรป้องกันการเดิน `WITH RECURSIVE` ไม่ให้วนไม่รู้จบบนข้อมูลที่มี cycle?',
+    options: [
+      'ไม่มี PostgreSQL ตรวจจับเองอัตโนมัติ',
+      'clause CYCLE (หรือจำกัดความลึก หรือ UNION แทน UNION ALL)',
+      'เพิ่ม ORDER BY',
+      'ใช้ LIMIT ในส่วน non-recursive',
+    ],
+    answer: 1,
+    explain: '`CYCLE id SET is_cycle USING seen` ทำเครื่องหมาย row ที่กลับมาซ้ำและหยุด recursion ตรงนั้น เหมือนผังองค์กรที่ถูกทำให้เสียในบทเรียน',
   },
 ];
 

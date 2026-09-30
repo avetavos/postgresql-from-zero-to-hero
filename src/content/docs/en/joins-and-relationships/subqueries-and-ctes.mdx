@@ -1,6 +1,6 @@
 ---
 title: Subqueries and CTEs
-description: Nest one query inside another with scalar, IN, and EXISTS subqueries, then name intermediate steps with WITH common table expressions — plus a quick taste of WITH RECURSIVE.
+description: Nest one query inside another with scalar, IN, and EXISTS subqueries, then name intermediate steps with WITH — including the NOT IN NULL trap, when a CTE is inlined or materialized, WITH RECURSIVE with CYCLE, and data-modifying CTEs.
 sidebar:
   order: 4
 ---
@@ -9,22 +9,55 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 A subquery is a `SELECT` written inside another statement. The inner query runs first and hands its result to the outer one, which lets you answer questions in two steps: "find the average", then "show the rows above it". A common table expression, or CTE, takes the same idea and gives the intermediate result a name with `WITH`, so a long query reads like a short story instead of a tangle of nesting.
 
-We continue with the `authors`, `books`, and `sales` tables.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026), copied from `psql`. The `sql` fences run top to bottom in one empty database; timings are from this Mac.
+
+## The dataset
+
+The canonical dataset of this module. Note the two facts this lesson leans on: *Unlinked Draft* has `author_id = NULL`, and Sela Vance has written no book.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## Scalar subqueries
 
-A scalar subquery returns exactly one value, so you can drop it anywhere a single value is expected — including a comparison. Here we list books published after the average publication year.
+A scalar subquery returns exactly one value, so you can drop it anywhere a single value is expected, including a comparison. Here we list books published after the average publication year (the four years average 2013).
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/scalar-subquery.sql
     SELECT title, published
     FROM books
     WHERE published > (SELECT avg(published) FROM books)
-    ORDER BY published;
+    ORDER BY title;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -33,7 +66,7 @@ A scalar subquery returns exactly one value, so you can drop it anywhere a singl
       SELECT title, published
       FROM books
       WHERE published > (SELECT avg(published) FROM books)
-      ORDER BY published
+      ORDER BY title
     `);
     ```
   </TabItem>
@@ -43,7 +76,7 @@ A scalar subquery returns exactly one value, so you can drop it anywhere a singl
         SELECT title, published
         FROM books
         WHERE published > (SELECT avg(published) FROM books)
-        ORDER BY published
+        ORDER BY title
     """)
     rows = cur.fetchall()
     ```
@@ -54,7 +87,8 @@ A scalar subquery returns exactly one value, so you can drop it anywhere a singl
       SELECT title, published
       FROM books
       WHERE published > (SELECT avg(published) FROM books)
-      ORDER BY published`)
+      ORDER BY title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -63,7 +97,7 @@ A scalar subquery returns exactly one value, so you can drop it anywhere a singl
         "SELECT title, published
          FROM books
          WHERE published > (SELECT avg(published) FROM books)
-         ORDER BY published",
+         ORDER BY title",
     )
     .fetch_all(&pool)
     .await?;
@@ -72,58 +106,55 @@ A scalar subquery returns exactly one value, so you can drop it anywhere a singl
 </Tabs>
 
 ```text
-      title       | published
-------------------+-----------
- Tidal Notes      |      2011
- The Glass Orchard|      2018
+       title       | published 
+-------------------+-----------
+ The Glass Orchard |      2018
+ Unlinked Draft    |      2020
 (2 rows)
 ```
 
-The inner `SELECT avg(published)` produces a single number; the outer query then compares each book against it.
+If the subquery returns more than one row where one value is required, PostgreSQL refuses to guess:
+
+```sql
+-- @expect-error 21000
+SELECT title, (SELECT name FROM authors) AS author FROM books;
+```
+
+```text
+ERROR:  more than one row returned by a subquery used as an expression
+```
 
 ## IN and EXISTS subqueries
 
-When the inner query returns a list of values, `IN` checks whether a column matches any of them. `EXISTS` is subtly different: it returns true as soon as the subquery produces at least one row, which makes it natural for "does any related row exist?" questions. Here we find authors who have at least one sale recorded.
+`IN` compares a value with the list a subquery produces; `EXISTS` asks whether the subquery produces any row at all, and is usually correlated with the outer row. Both answer "authors who have written at least one book":
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT a.name
-    FROM authors AS a
-    WHERE EXISTS (
-      SELECT 1
-      FROM books AS b
-      JOIN sales AS s ON s.book_id = b.id
-      WHERE b.author_id = a.id
-    )
-    ORDER BY a.name;
+    -- sql/exists.sql
+    SELECT name
+    FROM authors a
+    WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+    ORDER BY name;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(`
-      SELECT a.name
-      FROM authors AS a
-      WHERE EXISTS (
-        SELECT 1 FROM books AS b
-        JOIN sales AS s ON s.book_id = b.id
-        WHERE b.author_id = a.id
-      )
-      ORDER BY a.name
+      SELECT name
+      FROM authors a
+      WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+      ORDER BY name
     `);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute("""
-        SELECT a.name
-        FROM authors AS a
-        WHERE EXISTS (
-          SELECT 1 FROM books AS b
-          JOIN sales AS s ON s.book_id = b.id
-          WHERE b.author_id = a.id
-        )
-        ORDER BY a.name
+        SELECT name
+        FROM authors a
+        WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+        ORDER BY name
     """)
     rows = cur.fetchall()
     ```
@@ -131,27 +162,20 @@ When the inner query returns a list of values, `IN` checks whether a column matc
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx, `
-      SELECT a.name
-      FROM authors AS a
-      WHERE EXISTS (
-        SELECT 1 FROM books AS b
-        JOIN sales AS s ON s.book_id = b.id
-        WHERE b.author_id = a.id
-      )
-      ORDER BY a.name`)
+      SELECT name
+      FROM authors a
+      WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+      ORDER BY name`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT a.name
-         FROM authors AS a
-         WHERE EXISTS (
-           SELECT 1 FROM books AS b
-           JOIN sales AS s ON s.book_id = b.id
-           WHERE b.author_id = a.id
-         )
-         ORDER BY a.name",
+        "SELECT name
+         FROM authors a
+         WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+         ORDER BY name",
     )
     .fetch_all(&pool)
     .await?;
@@ -160,250 +184,675 @@ When the inner query returns a list of values, `IN` checks whether a column matc
 </Tabs>
 
 ```text
-    name
+    name    
 ------------
  Mara Linde
  Owen Pryce
 (2 rows)
 ```
 
-This is a *correlated* subquery: the inner query refers to `a.id` from the outer query, so it is conceptually re-evaluated for each author. The `SELECT 1` is a convention — with `EXISTS` only the presence of a row matters, never the values, so we select a constant.
-
-## CTEs: naming a step with WITH
-
-A CTE defines a named, temporary result at the top of your query using `WITH`, then lets you refer to it by name below. It does not change what is computed, but it untangles complex queries. Here we first total sales per book, then join those totals back to find each book's title and rank-ready figures.
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    WITH book_sales AS (
-      SELECT book_id, sum(copies) AS total
-      FROM sales
-      GROUP BY book_id
-    )
-    SELECT b.title, bs.total
-    FROM book_sales AS bs
-    JOIN books AS b ON b.id = bs.book_id
-    ORDER BY bs.total DESC;
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const res = await pool.query(`
-      WITH book_sales AS (
-        SELECT book_id, sum(copies) AS total
-        FROM sales
-        GROUP BY book_id
-      )
-      SELECT b.title, bs.total
-      FROM book_sales AS bs
-      JOIN books AS b ON b.id = bs.book_id
-      ORDER BY bs.total DESC
-    `);
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute("""
-        WITH book_sales AS (
-          SELECT book_id, sum(copies) AS total
-          FROM sales
-          GROUP BY book_id
-        )
-        SELECT b.title, bs.total
-        FROM book_sales AS bs
-        JOIN books AS b ON b.id = bs.book_id
-        ORDER BY bs.total DESC
-    """)
-    rows = cur.fetchall()
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    rows, err := conn.Query(ctx, `
-      WITH book_sales AS (
-        SELECT book_id, sum(copies) AS total
-        FROM sales
-        GROUP BY book_id
-      )
-      SELECT b.title, bs.total
-      FROM book_sales AS bs
-      JOIN books AS b ON b.id = bs.book_id
-      ORDER BY bs.total DESC`)
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let rows = sqlx::query(
-        "WITH book_sales AS (
-           SELECT book_id, sum(copies) AS total
-           FROM sales
-           GROUP BY book_id
-         )
-         SELECT b.title, bs.total
-         FROM book_sales AS bs
-         JOIN books AS b ON b.id = bs.book_id
-         ORDER BY bs.total DESC",
-    )
-    .fetch_all(&pool)
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-```text
-      title       | total
-------------------+-------
- The Glass Orchard|  1200
- Tidal Notes      |   450
- Quiet Harbors    |   200
-(3 rows)
+```sql
+-- sql/in.sql
+SELECT name FROM authors WHERE id IN (SELECT author_id FROM books) ORDER BY name;
 ```
 
-The `book_sales` name reads like a variable holding the per-book totals. You can define several CTEs in one `WITH`, separated by commas, and each can reference the ones before it.
+```text
+    name    
+------------
+ Mara Linde
+ Owen Pryce
+(2 rows)
+```
 
-## A taste of WITH RECURSIVE
+Is one faster? Not in PostgreSQL. This section builds 1 000 `parents` and 200 000 `children` (only parents 1 to 500 have children) with an index on `children.parent_id`:
 
-A `WITH RECURSIVE` CTE refers to itself, which lets it walk a chain or tree — an organization chart, a category hierarchy, or here a simple sequence of numbers. You do not need this often, but it is the tool for hierarchical data.
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    WITH RECURSIVE counter AS (
-      SELECT 1 AS n
-      UNION ALL
-      SELECT n + 1 FROM counter WHERE n < 5
-    )
-    SELECT n FROM counter;
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const res = await pool.query(`
-      WITH RECURSIVE counter AS (
-        SELECT 1 AS n
-        UNION ALL
-        SELECT n + 1 FROM counter WHERE n < 5
-      )
-      SELECT n FROM counter
-    `);
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute("""
-        WITH RECURSIVE counter AS (
-          SELECT 1 AS n
-          UNION ALL
-          SELECT n + 1 FROM counter WHERE n < 5
-        )
-        SELECT n FROM counter
-    """)
-    rows = cur.fetchall()
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    rows, err := conn.Query(ctx, `
-      WITH RECURSIVE counter AS (
-        SELECT 1 AS n
-        UNION ALL
-        SELECT n + 1 FROM counter WHERE n < 5
-      )
-      SELECT n FROM counter`)
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let rows = sqlx::query(
-        "WITH RECURSIVE counter AS (
-           SELECT 1 AS n
-           UNION ALL
-           SELECT n + 1 FROM counter WHERE n < 5
-         )
-         SELECT n FROM counter",
-    )
-    .fetch_all(&pool)
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
+```sql
+-- sql/subquery-plans-setup.sql
+CREATE TABLE parents (id int PRIMARY KEY);
+CREATE TABLE children (
+  id        int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  parent_id int NOT NULL REFERENCES parents (id),
+  k         int NOT NULL
+);
+INSERT INTO parents SELECT g FROM generate_series(1, 1000) AS g;
+-- only parents 1..500 have children
+INSERT INTO children (parent_id, k) SELECT 1 + g % 500, g % 10 FROM generate_series(1, 200000) AS g;
+CREATE INDEX children_parent_id_idx ON children (parent_id);
+ANALYZE parents;
+ANALYZE children;
+```
 
 ```text
- n
----
- 1
- 2
- 3
- 4
- 5
+CREATE TABLE
+CREATE TABLE
+INSERT 0 1000
+INSERT 0 200000
+CREATE INDEX
+ANALYZE
+ANALYZE
+```
+
+The two forms below plan to **exactly the same thing**, down to the cost numbers. The planner rewrites both into a semi join ([docs on subquery expressions](https://www.postgresql.org/docs/18/functions-subquery.html)); the "EXISTS can stop at the first match" advice is what a `Semi Join` does for you either way:
+
+```sql
+-- sql/plan-in-vs-exists.sql
+EXPLAIN SELECT count(*) FROM parents WHERE id IN (SELECT parent_id FROM children);
+EXPLAIN SELECT count(*) FROM parents p WHERE EXISTS (SELECT 1 FROM children c WHERE c.parent_id = p.id);
+```
+
+```text
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=366.17..366.18 rows=1 width=8)
+   ->  Nested Loop Semi Join  (cost=0.29..364.92 rows=500 width=0)
+         ->  Seq Scan on parents  (cost=0.00..15.00 rows=1000 width=4)
+         ->  Index Only Scan using children_parent_id_idx on children  (cost=0.29..12.30 rows=400 width=4)
+               Index Cond: (parent_id = parents.id)
+(5 rows)
+
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=366.17..366.18 rows=1 width=8)
+   ->  Nested Loop Semi Join  (cost=0.29..364.92 rows=500 width=0)
+         ->  Seq Scan on parents p  (cost=0.00..15.00 rows=1000 width=4)
+         ->  Index Only Scan using children_parent_id_idx on children c  (cost=0.29..12.30 rows=400 width=4)
+               Index Cond: (parent_id = p.id)
 (5 rows)
 ```
 
-The first `SELECT` is the starting point, and the part after `UNION ALL` feeds on the rows produced so far until its `WHERE` stops adding new ones. Recursive CTEs get their own deeper treatment later in the course.
+### NOT IN and the NULL trap
+
+`NOT IN` is different, and this is the subquery mistake with real consequences. `x NOT IN (1, 2, NULL)` is never true: for a value not in the list it evaluates to `NULL` (unknown), not `true`. Our `books.author_id` contains one `NULL`, so "authors who have no book" returns **nothing**, when the answer is Sela Vance:
+
+```sql
+-- sql/not-in-vs-not-exists.sql
+-- books.author_id contains a NULL (Unlinked Draft), so NOT IN can never be true
+SELECT name FROM authors WHERE id NOT IN (SELECT author_id FROM books) ORDER BY name;
+
+SELECT name FROM authors a
+WHERE NOT EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id)
+ORDER BY name;
+```
+
+```text
+ name 
+------
+(0 rows)
+
+    name    
+------------
+ Sela Vance
+(1 row)
+```
+
+Filtering the `NULL` out of the subquery repairs it, but `NOT EXISTS` never had the problem:
+
+```sql
+-- sql/not-in-filtered.sql
+-- NOT IN works again once the NULLs are removed from the subquery
+SELECT name FROM authors
+WHERE id NOT IN (SELECT author_id FROM books WHERE author_id IS NOT NULL)
+ORDER BY name;
+```
+
+```text
+    name    
+------------
+ Sela Vance
+(1 row)
+```
+
+It is also a plan problem. `NOT EXISTS` becomes an anti join; `NOT IN` cannot (because of the `NULL` rule) and stays a filter over a hashed subplan:
+
+```sql
+-- sql/plan-not-in-vs-not-exists.sql
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parents WHERE id NOT IN (SELECT parent_id FROM children);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM parents p WHERE NOT EXISTS (SELECT 1 FROM children c WHERE c.parent_id = p.id);
+```
+
+```text
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Aggregate
+   ->  Seq Scan on parents
+         Filter: (NOT (ANY (id = (hashed SubPlan 1).col1)))
+         SubPlan 1
+           ->  Seq Scan on children
+(5 rows)
+
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Aggregate
+   ->  Nested Loop Anti Join
+         ->  Seq Scan on parents p
+         ->  Index Only Scan using children_parent_id_idx on children c
+               Index Cond: (parent_id = p.id)
+(5 rows)
+```
+
+### Correlated subqueries
+
+A correlated subquery refers to the outer row, so it conceptually runs once per outer row. In a scalar position that is literally what the plan does (`SubPlan 1 ... loops=1000`), and here it is about six times slower than the equivalent join with `GROUP BY` (288 ms against 50 ms on this Mac, 1 000 parents and 200 000 children; the first run also paid for 165 cold buffer reads):
+
+```sql
+-- sql/correlated-subquery.sql
+-- a correlated scalar subquery cannot be flattened: one probe per parent
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT p.id, (SELECT count(*) FROM children c WHERE c.parent_id = p.id) AS n
+FROM parents p;
+
+-- the same answer as a join + GROUP BY
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT p.id, count(c.id) AS n
+FROM parents p LEFT JOIN children c ON c.parent_id = p.id
+GROUP BY p.id;
+```
+
+```text
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Seq Scan on parents p (actual time=63.716..151.630 rows=1000.00 loops=1)
+   Buffers: shared hit=202006 read=165
+   SubPlan 1
+     ->  Aggregate (actual time=0.088..0.089 rows=1.00 loops=1000)
+           Buffers: shared hit=202001 read=165
+           ->  Bitmap Heap Scan on children c (actual time=0.018..0.081 rows=200.00 loops=1000)
+                 Recheck Cond: (parent_id = p.id)
+                 Heap Blocks: exact=200000
+                 Buffers: shared hit=202001 read=165
+                 ->  Bitmap Index Scan on children_parent_id_idx (actual time=0.007..0.007 rows=200.00 loops=1000)
+                       Index Cond: (parent_id = p.id)
+                       Index Searches: 1000
+                       Buffers: shared hit=2001 read=165
+ Planning:
+   Buffers: shared hit=95
+ Planning Time: 0.225 ms
+ Execution Time: 164.893 ms
+(17 rows)
+
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ HashAggregate (actual time=50.868..50.950 rows=1000.00 loops=1)
+   Group Key: p.id
+   Batches: 1  Memory Usage: 121kB
+   Buffers: shared hit=1087
+   ->  Hash Right Join (actual time=0.115..33.041 rows=200500.00 loops=1)
+         Hash Cond: (c.parent_id = p.id)
+         Buffers: shared hit=1087
+         ->  Seq Scan on children c (actual time=0.003..9.376 rows=200000.00 loops=1)
+               Buffers: shared hit=1082
+         ->  Hash (actual time=0.109..0.109 rows=1000.00 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 44kB
+               Buffers: shared hit=5
+               ->  Seq Scan on parents p (actual time=0.004..0.048 rows=1000.00 loops=1)
+                     Buffers: shared hit=5
+ Planning:
+   Buffers: shared hit=40
+ Planning Time: 0.208 ms
+ Execution Time: 51.021 ms
+(18 rows)
+```
+
+Correlated `EXISTS` is fine, since it is turned into a semi join, as shown above. It is the *scalar* correlated subquery (a `SELECT` list item) that stays a per-row probe.
+
+## CTEs: naming a step with WITH
+
+A CTE gives a subquery a name and puts it first, so the main query reads top to bottom. Here we total sales per book, then join the titles:
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/cte.sql
+    WITH totals AS (
+      SELECT book_id, sum(copies) AS copies
+      FROM sales
+      GROUP BY book_id
+    )
+    SELECT b.title, t.copies
+    FROM totals AS t
+    JOIN books AS b ON b.id = t.book_id
+    ORDER BY t.copies DESC;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      WITH totals AS (
+        SELECT book_id, sum(copies) AS copies
+        FROM sales
+        GROUP BY book_id
+      )
+      SELECT b.title, t.copies
+      FROM totals AS t
+      JOIN books AS b ON b.id = t.book_id
+      ORDER BY t.copies DESC
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        WITH totals AS (
+          SELECT book_id, sum(copies) AS copies
+          FROM sales
+          GROUP BY book_id
+        )
+        SELECT b.title, t.copies
+        FROM totals AS t
+        JOIN books AS b ON b.id = t.book_id
+        ORDER BY t.copies DESC
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      WITH totals AS (
+        SELECT book_id, sum(copies) AS copies
+        FROM sales
+        GROUP BY book_id
+      )
+      SELECT b.title, t.copies
+      FROM totals AS t
+      JOIN books AS b ON b.id = t.book_id
+      ORDER BY t.copies DESC`)
+    defer rows.Close()
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "WITH totals AS (
+           SELECT book_id, sum(copies) AS copies
+           FROM sales
+           GROUP BY book_id
+         )
+         SELECT b.title, t.copies
+         FROM totals AS t
+         JOIN books AS b ON b.id = t.book_id
+         ORDER BY t.copies DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+       title       | copies 
+-------------------+--------
+ The Glass Orchard |   1050
+ Tidal Notes       |    600
+ Quiet Harbors     |    450
+(3 rows)
+```
+
+Several CTEs can be chained with commas, each seeing the ones before it. Copies sold per author:
+
+```sql
+-- sql/cte-chain.sql
+WITH per_book AS (
+  SELECT book_id, sum(copies) AS copies FROM sales GROUP BY book_id
+), per_author AS (
+  SELECT b.author_id, sum(p.copies) AS copies
+  FROM per_book p JOIN books b ON b.id = p.book_id
+  GROUP BY b.author_id
+)
+SELECT a.name, pa.copies
+FROM per_author pa JOIN authors a ON a.id = pa.author_id
+ORDER BY pa.copies DESC;
+```
+
+```text
+    name    | copies 
+------------+--------
+ Mara Linde |   1500
+ Owen Pryce |    600
+(2 rows)
+```
+
+Driver output for the three queries above, each run once:
+
+```text
+$ (each snippet run once against the dataset above; multi-line driver output joined onto one line)
+[scalar] Node.js (pg 8.23.0):    [ { title: 'The Glass Orchard', published: 2018 }, { title: 'Unlinked Draft', published: 2020 } ]
+[scalar] Python (psycopg 3.3.6): [('The Glass Orchard', 2018), ('Unlinked Draft', 2020)]
+[scalar] Go (pgx v5.11.0):       [The Glass Orchard 2018] [Unlinked Draft 2020]
+[scalar] Rust (sqlx 0.9.0):      The Glass Orchard 2018 / Unlinked Draft 2020
+[exists] Node.js:                [ { name: 'Mara Linde' }, { name: 'Owen Pryce' } ]
+[exists] Python:                 [('Mara Linde',), ('Owen Pryce',)]
+[exists] Go / Rust:              Mara Linde / Owen Pryce
+[cte]    Node.js:                [ { title: 'The Glass Orchard', copies: '1050' }, { title: 'Tidal Notes', copies: '600' }, { title: 'Quiet Harbors', copies: '450' } ]
+[cte]    Python:                 [('The Glass Orchard', 1050), ('Tidal Notes', 600), ('Quiet Harbors', 450)]
+[cte]    Go / Rust:              The Glass Orchard 1050 / Tidal Notes 600 / Quiet Harbors 450
+```
+
+### Is a CTE a fence? It depends, and you can choose
+
+Since PostgreSQL 12 a CTE is **inlined** into the outer query when it is not recursive, has no side effects, and is referenced only once; otherwise it is computed once and its result is reused (materialized). `AS MATERIALIZED` and `AS NOT MATERIALIZED` override the default ([docs](https://www.postgresql.org/docs/18/queries-with.html#QUERIES-WITH-CTE-MATERIALIZATION)). The four plans below show all four shapes, on the 200 000-row `children`:
+
+```sql
+-- sql/cte-inline.sql
+-- referenced once: inlined into the outer query
+EXPLAIN (COSTS OFF)
+WITH c AS (SELECT * FROM children WHERE k = 5)
+SELECT * FROM c WHERE id < 100;
+
+-- referenced twice: computed once and shared (materialized)
+EXPLAIN (COSTS OFF)
+WITH c AS (SELECT * FROM children WHERE k = 5)
+SELECT (SELECT count(*) FROM c) AS n, (SELECT max(id) FROM c) AS newest;
+
+-- forced with AS MATERIALIZED even though used once
+EXPLAIN (COSTS OFF)
+WITH c AS MATERIALIZED (SELECT * FROM children WHERE k = 5)
+SELECT * FROM c WHERE id < 100;
+
+-- forced inlining with NOT MATERIALIZED even though used twice
+EXPLAIN (COSTS OFF)
+WITH c AS NOT MATERIALIZED (SELECT * FROM children WHERE k = 5)
+SELECT (SELECT count(*) FROM c) AS n, (SELECT max(id) FROM c) AS newest;
+```
+
+```text
+                 QUERY PLAN                 
+--------------------------------------------
+ Index Scan using children_pkey on children
+   Index Cond: (id < 100)
+   Filter: (k = 5)
+(3 rows)
+
+           QUERY PLAN            
+---------------------------------
+ Result
+   CTE c
+     ->  Seq Scan on children
+           Filter: (k = 5)
+   InitPlan 2
+     ->  Aggregate
+           ->  CTE Scan on c
+   InitPlan 3
+     ->  Aggregate
+           ->  CTE Scan on c c_1
+(10 rows)
+
+          QUERY PLAN          
+------------------------------
+ CTE Scan on c
+   Filter: (id < 100)
+   CTE c
+     ->  Seq Scan on children
+           Filter: (k = 5)
+(5 rows)
+
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Result
+   InitPlan 1
+     ->  Finalize Aggregate
+           ->  Gather
+                 Workers Planned: 1
+                 ->  Partial Aggregate
+                       ->  Parallel Seq Scan on children
+                             Filter: (k = 5)
+   InitPlan 3
+     ->  Result
+           InitPlan 2
+             ->  Limit
+                   ->  Index Scan Backward using children_pkey on children children_1
+                         Filter: (k = 5)
+(14 rows)
+```
+
+1. Referenced once: no `CTE` node at all. The outer `id < 100` was pushed into the CTE's own scan (`Index Cond: (id < 100)`, `Filter: (k = 5)`).
+2. Referenced twice: `CTE c` is scanned once and read by two `CTE Scan` nodes.
+3. `AS MATERIALIZED` on a single reference: the CTE is computed in full first, and `id < 100` is only a `Filter` on the `CTE Scan`, an optimisation fence.
+4. `NOT MATERIALIZED` on two references: inlined twice; each reference gets its own plan (the `max(id)` even becomes a backward index scan).
+
+Neither is better in general. Materialize when the CTE is expensive and read several times; inline when the outer query can filter it.
+
+## WITH RECURSIVE
+
+A recursive CTE has a starting query, `UNION ALL`, and a recursive part that refers to the CTE itself; it repeats until the recursive part returns no new rows. It is the standard way to walk a tree, such as an org chart:
+
+```sql
+-- sql/recursive-setup.sql
+CREATE TABLE staff (
+  id      int PRIMARY KEY,
+  name    text NOT NULL,
+  boss_id int REFERENCES staff (id)
+);
+INSERT INTO staff VALUES
+  (1, 'Ada', NULL), (2, 'Ben', 1), (3, 'Cy', 1), (4, 'Di', 2), (5, 'Eli', 2), (6, 'Flo', 3), (7, 'Gus', 4);
+```
+
+```sql
+-- sql/recursive.sql
+WITH RECURSIVE tree AS (
+  SELECT id, name, 0 AS depth, name AS path
+  FROM staff
+  WHERE boss_id IS NULL
+  UNION ALL
+  SELECT s.id, s.name, t.depth + 1, t.path || ' > ' || s.name
+  FROM staff s
+  JOIN tree t ON s.boss_id = t.id
+)
+SELECT repeat('  ', depth) || name AS org_chart, path
+FROM tree
+ORDER BY path;
+```
+
+```text
+ org_chart |         path         
+-----------+----------------------
+ Ada       | Ada
+   Ben     | Ada > Ben
+     Di    | Ada > Ben > Di
+       Gus | Ada > Ben > Di > Gus
+     Eli   | Ada > Ben > Eli
+   Cy      | Ada > Cy
+     Flo   | Ada > Cy > Flo
+(7 rows)
+```
+
+Bad data can make the recursion never stop: if the graph has a cycle, the recursive part keeps finding new rows forever. The `CYCLE` clause (PostgreSQL 14+) marks a row that revisits an `id` it has already seen and stops there. We corrupt the data inside a transaction so Ada reports to her own great-grandchild Gus, and roll back:
+
+```sql
+-- sql/recursive-cycle.sql
+BEGIN;
+-- corrupt the data on purpose: Ada now reports to Gus, who reports (via Di, Ben) to Ada
+UPDATE staff SET boss_id = 7 WHERE id = 1;
+WITH RECURSIVE tree AS (
+  SELECT id, name, boss_id FROM staff WHERE id = 1
+  UNION ALL
+  SELECT s.id, s.name, s.boss_id FROM staff s JOIN tree t ON s.boss_id = t.id
+) CYCLE id SET is_cycle USING seen
+SELECT id, name, is_cycle FROM tree;
+ROLLBACK;
+```
+
+```text
+BEGIN
+UPDATE 1
+ id | name | is_cycle 
+----+------+----------
+  1 | Ada  | f
+  2 | Ben  | f
+  3 | Cy   | f
+  4 | Di   | f
+  5 | Eli  | f
+  6 | Flo  | f
+  7 | Gus  | f
+  1 | Ada  | t
+(8 rows)
+
+ROLLBACK
+```
+
+The last row (`is_cycle = t`) is Ada seen a second time; the recursion stopped instead of running forever.
+
+## Data-modifying CTEs
+
+`DELETE`, `UPDATE` and `INSERT` can appear in a `WITH` if they have `RETURNING`, and their output can feed the main statement. This moves the West sales into an archive table in one statement (inside a transaction here, so we can look and then roll back):
+
+```sql
+-- sql/data-modifying-cte.sql
+CREATE TABLE sales_archive (LIKE sales);
+BEGIN;
+WITH moved AS (
+  DELETE FROM sales WHERE region = 'West' RETURNING *
+)
+INSERT INTO sales_archive SELECT * FROM moved;
+SELECT (SELECT count(*) FROM sales) AS live, (SELECT count(*) FROM sales_archive) AS archived;
+ROLLBACK;
+SELECT (SELECT count(*) FROM sales) AS live, (SELECT count(*) FROM sales_archive) AS archived;
+```
+
+```text
+CREATE TABLE
+BEGIN
+INSERT 0 3
+ live | archived 
+------+----------
+    3 |        3
+(1 row)
+
+ROLLBACK
+ live | archived 
+------+----------
+    6 |        0
+(1 row)
+```
+
+Inside the transaction 3 rows were live and 3 archived; after the rollback the archive is empty again.
+
+## Reading AI-generated code
+
+An assistant is asked for "authors who have not written any book" and writes the most natural-looking query:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "authors who have not written any book"
+SELECT name
+FROM authors
+WHERE id NOT IN (SELECT author_id FROM books);`}>
+
+It returns nothing, and nothing errors. `books.author_id` contains a `NULL` (*Unlinked Draft*), so `id NOT IN (..., NULL)` is never true, and Sela Vance is missed:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT name
+FROM authors
+WHERE id NOT IN (SELECT author_id FROM books);
+```
+
+```text
+ name 
+------
+(0 rows)
+```
+
+`NOT EXISTS` states the intent without the `NULL` hazard (and plans as an anti join):
+
+```sql
+-- sql/stb-fixed.sql
+SELECT name
+FROM authors a
+WHERE NOT EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id);
+```
+
+```text
+    name    
+------------
+ Sela Vance
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A subquery is an expression whose value is a table, a row or a single value. Ask what it must be, and the syntax follows: a single value (scalar comparison), a list to test membership (`IN`), or just "is it empty?" (`EXISTS`). A CTE is a named subquery placed at the top. It is a naming device first; whether it is also a computation boundary is the planner's decision, which you can override. Recursion adds one idea: a CTE that feeds its own new rows back until none remain.
 
 ## Tips / gotchas
 
-- A scalar subquery must return exactly one row and one column; if it can return more, PostgreSQL raises an error at run time.
-- CTEs let you name each step, so a query that would be three levels of nesting becomes a readable top-to-bottom sequence.
-- A *correlated* subquery references a column from the outer query and is conceptually run once per outer row; an uncorrelated one runs a single time. `EXISTS` is almost always correlated.
-- Prefer `EXISTS` over `IN` when you only care whether a match exists, especially against large tables, because `EXISTS` can stop at the first matching row.
-- Always give a `WITH RECURSIVE` query a terminating condition, or it will loop forever building rows.
+- A scalar subquery must return one row and one column, or PostgreSQL raises `21000`.
+- `IN` and `EXISTS` (and `NOT EXISTS`) plan alike; prefer `NOT EXISTS` over `NOT IN` whenever the subquery column can be `NULL`.
+- CTE = readability, not an automatic performance fence or a guaranteed materialization. Check `EXPLAIN` when it matters.
+- Every `WITH RECURSIVE` walk over data you do not control should have a stop: `CYCLE`, a depth counter with a `WHERE depth < n`, or a `UNION` instead of `UNION ALL`.
+- Data-modifying CTEs all see the same snapshot and run whether or not the main query reads them.
 
 <Callout title="Subquery or CTE?">
-They often compute the same thing. Choose a subquery for a small, one-off expression like `(SELECT avg(...))`, and a CTE when a step is reused or when naming it makes the whole query easier to read. Readability is a real feature — your future self maintaining the query will thank you.
+Use a subquery when the step is small and used once. Use a CTE when you want to name the step, reuse it, or read the query top to bottom. If the query has three or four levels of nested parentheses, it is time for CTEs.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| CTE (`WITH ...`) | Names each step, easy to read and review | More lines of code, and older versions used to materialize it separately from the main query |
-| Inline subquery | Short to write, sometimes better handled by the planner | Hard to read once nested deeply, especially with several levels |
-| Correlated subquery | Flexible, expresses per-row logic directly | Runs once per outer row, slow on large tables compared to a join |
+| Inline subquery | Compact, planner sees everything | Deep nesting is hard to read and debug |
+| CTE (inlined by default) | Readable top-to-bottom, same plan as a subquery when used once | Referencing it twice materializes it and blocks pushdown of outer filters |
+| `AS MATERIALIZED` | Computes an expensive step once, predictable | Optimisation fence: outer filters are applied after the fact |
+| Correlated scalar subquery | Very direct to write | Per-outer-row probe (288 ms vs 50 ms for the join above) |
+| `WITH RECURSIVE` | Walks trees and graphs in SQL | Needs a termination guard; can be slow on large graphs |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming a CTE is always materialized as a "fence"** — this behavior has changed. Current PostgreSQL versions can inline a CTE into the main query just like a plain subquery. Do not rely on the old assumption.
-- **Writing a correlated subquery when a join does the same job faster** — a correlated subquery re-runs once per outer row. If the goal is simply to join data, use a join or a window function instead.
-- **Nesting subqueries so deeply the query becomes unreadable** — once a query has three or four levels of nested parentheses, break it into named CTEs. It is far easier to debug and review.
-
-> 💡 Real-world example
->
-> **Internal reporting queries** — chaining several named CTEs together is a common way to break a complex report into readable steps, so reviewers can follow the SQL top to bottom instead of tracing nested parentheses.
->
-> **Data/analytics teams** — when building a multi-layer summary report (compute an intermediate metric, then filter on it), data teams often choose a CTE over nested subqueries so the query explains itself.
+- **"EXISTS is faster than IN."** Both compile to the same semi join (identical plan and cost above).
+- **"NOT IN and NOT EXISTS are the same."** They differ the moment the subquery returns a `NULL`: `NOT IN` returns no rows at all.
+- **"A CTE is always materialized."** Not since PostgreSQL 12: a CTE referenced once is inlined.
+- **"A CTE is always inlined."** Referenced twice it is materialized; `AS MATERIALIZED` forces it.
+- **"Recursive CTEs loop forever on a cycle."** They do unless you guard them; `CYCLE` does it for you.
 
 export const quizSubqueries = [
   {
-    q: 'What must a scalar subquery used in a comparison return?',
-    options: [
-      'A list of values',
-      'Exactly one row and one column',
-      'At least one row',
-      'A boolean true or false',
-    ],
+    q: 'What does a scalar subquery need to return?',
+    options: ['Any number of rows', 'Exactly one row and one column', 'Only a number', 'A whole table'],
     answer: 1,
+    explain: 'More than one row fails with `more than one row returned by a subquery used as an expression` (21000); zero rows gives NULL.',
   },
   {
-    q: 'What does a CTE defined with WITH give you?',
+    q: '`SELECT name FROM authors WHERE id NOT IN (SELECT author_id FROM books)` returns no rows, although Sela Vance has no books. Why?',
     options: [
-      'A permanent table stored on disk',
-      'A named, temporary result you can reference within the same query',
-      'An index on the underlying table',
-      'A faster query in every case',
+      'NOT IN is not supported in PostgreSQL 18',
+      'books.author_id contains a NULL, so NOT IN is never true',
+      'The subquery is correlated',
+      'authors has no index on id',
     ],
     answer: 1,
+    explain: 'x NOT IN (1, NULL) evaluates to NULL, not true. NOT EXISTS, or filtering the NULLs out of the subquery, returns Sela Vance.',
   },
   {
-    q: 'When is EXISTS a particularly good fit?',
+    q: 'For "authors who have at least one book", how do `IN (subquery)` and `EXISTS (subquery)` compare in PostgreSQL?',
     options: [
-      'When you need to sum a column',
-      'When you only care whether at least one matching row exists',
-      'When you want to return columns from the inner query',
-      'When the subquery must return many columns',
+      'EXISTS is always much faster',
+      'IN is always much faster',
+      'The planner turns both into a semi join; the plans and costs were identical in the lesson',
+      'They return different rows',
+    ],
+    answer: 2,
+    explain: 'Both plans were `Nested Loop Semi Join` with cost 366.17..; choose by readability, not by folklore.',
+  },
+  {
+    q: 'Which of these keeps a CTE from being inlined into the outer query?',
+    options: [
+      'Naming it',
+      'Referencing it twice, or writing AS MATERIALIZED',
+      'Using SELECT * in it',
+      'Putting it first in the WITH list',
     ],
     answer: 1,
+    explain: 'A non-recursive, side-effect-free CTE referenced once is inlined. Two references (or AS MATERIALIZED) produce a shared `CTE` node scanned by `CTE Scan`.',
+  },
+  {
+    q: 'What protects a `WITH RECURSIVE` walk from looping forever on data with a cycle?',
+    options: [
+      'Nothing; PostgreSQL detects it automatically',
+      'The CYCLE clause (or a depth limit, or UNION instead of UNION ALL)',
+      'Adding ORDER BY',
+      'Using LIMIT in the non-recursive part',
+    ],
+    answer: 1,
+    explain: '`CYCLE id SET is_cycle USING seen` flags the revisited row and stops the recursion there, as in the lesson\'s corrupted org chart.',
   },
 ];
 
