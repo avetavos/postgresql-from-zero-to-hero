@@ -9,27 +9,51 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 Creating data means adding rows, and the statement for that is `INSERT`. You name a table, list the columns you are supplying, and give the values. PostgreSQL fills in anything you leave out — generated ids, columns with a `DEFAULT`, and any column that allows `NULL`.
 
-This lesson uses the `authors` and `books` tables from the module overview.
+This lesson builds the course's `authors`, `books` and `sales` dataset from scratch, one `INSERT` at a time, so by the end you have exactly the rows every later lesson starts with. Everything shown is real output from **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026), top to bottom in one empty database. Timings are from this Mac.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+```
 
 ## A single row
 
-The most basic form lists the columns, then the matching values.
+The most basic form lists the columns, then the matching values. The server answers with a command tag, `INSERT 0 1`: the `0` is a legacy object id field and the `1` is the number of rows inserted.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/insert-single.sql
     INSERT INTO authors (name, born)
-    VALUES ('Mira Castellan', 1971);
+    VALUES ('Mara Linde', 1968);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     await pool.query(
       'INSERT INTO authors (name, born) VALUES ($1, $2)',
-      ['Mira Castellan', 1971],
+      ['Mara Linde', 1968],
     );
     ```
   </TabItem>
@@ -37,7 +61,7 @@ The most basic form lists the columns, then the matching values.
     ```python
     cur.execute(
         "INSERT INTO authors (name, born) VALUES (%s, %s)",
-        ("Mira Castellan", 1971),
+        ("Mara Linde", 1968),
     )
     ```
   </TabItem>
@@ -45,105 +69,61 @@ The most basic form lists the columns, then the matching values.
     ```go
     _, err := conn.Exec(ctx,
         "INSERT INTO authors (name, born) VALUES ($1, $2)",
-        "Mira Castellan", 1971)
+        "Mara Linde", 1968)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     sqlx::query("INSERT INTO authors (name, born) VALUES ($1, $2)")
-        .bind("Mira Castellan")
-        .bind(1971_i32)
+        .bind("Mara Linde")
+        .bind(1968_i32)
         .execute(&pool)
         .await?;
     ```
   </TabItem>
 </Tabs>
 
-Notice the `psql` tab uses literal values, while every driver uses **placeholders** — `$1`, `$2` in PostgreSQL native style, or `%s` for psycopg — and passes the real values separately. Always supply user data this way; never glue values into the SQL string yourself. Letting the driver bind values keeps types correct and closes the door on SQL injection, where crafted input would otherwise change what your statement does.
+```text
+INSERT 0 1
+```
+
+Notice the `psql` tab uses literal values, while every driver uses **placeholders** — `$1`, `$2` in PostgreSQL native style, or `%s` for psycopg — and passes the real values separately. Always supply user data this way; never glue values into the SQL string yourself (the last section of this lesson proves why, with a real payload).
 
 **In pgAdmin:** paste the `psql` version into the Query Tool and run it; the message panel will report `INSERT 0 1`, meaning one row was added.
 
-## Letting columns take defaults
-
-The `books` table has `copies_sold int NOT NULL DEFAULT 0`. If you simply omit that column, PostgreSQL uses the default. You can also write `DEFAULT` explicitly to be clear about your intent.
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    INSERT INTO books (title, author_id, published, copies_sold)
-    VALUES ('The Glass Orchard', 1, 2004, DEFAULT);
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await pool.query(
-      'INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)',
-      ['The Glass Orchard', 1, 2004],
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute(
-        "INSERT INTO books (title, author_id, published) VALUES (%s, %s, %s)",
-        ("The Glass Orchard", 1, 2004),
-    )
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := conn.Exec(ctx,
-        "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)",
-        "The Glass Orchard", 1, 2004)
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    sqlx::query("INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)")
-        .bind("The Glass Orchard")
-        .bind(1_i64)
-        .bind(2004_i32)
-        .execute(&pool)
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-Either way, `copies_sold` lands as `0`. Omitting a column entirely is the usual approach; writing `DEFAULT` is handy when you are filling several rows and want every position spelled out.
-
 ## Many rows at once
 
-You can list several value tuples in one statement. This is far faster than running one `INSERT` per row, because it is a single round trip to the server.
+You can list several value tuples in one statement. This is far faster than running one `INSERT` per row, because it is a single round trip and a single transaction (measured below).
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/insert-many.sql
     INSERT INTO authors (name, born) VALUES
-      ('Devon Reyes', 1985),
-      ('Priya Anand', 1990),
-      ('Tomas Holt',  1962);
+      ('Owen Pryce', 1975),
+      ('Sela Vance',  1990);
+    SELECT id, name, born FROM authors ORDER BY id;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     await pool.query(
-      'INSERT INTO authors (name, born) VALUES ($1, $2), ($3, $4), ($5, $6)',
-      ['Devon Reyes', 1985, 'Priya Anand', 1990, 'Tomas Holt', 1962],
+      'INSERT INTO authors (name, born) VALUES ($1, $2), ($3, $4)',
+      ['Owen Pryce', 1975, 'Sela Vance', 1990],
     );
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    rows = [("Devon Reyes", 1985), ("Priya Anand", 1990), ("Tomas Holt", 1962)]
+    rows = [("Owen Pryce", 1975), ("Sela Vance", 1990)]
     cur.executemany("INSERT INTO authors (name, born) VALUES (%s, %s)", rows)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     rows := [][]any{
-        {"Devon Reyes", 1985},
-        {"Priya Anand", 1990},
-        {"Tomas Holt", 1962},
+        {"Owen Pryce", 1975},
+        {"Sela Vance", 1990},
     }
     _, err := conn.CopyFrom(ctx,
         pgx.Identifier{"authors"},
@@ -153,8 +133,8 @@ You can list several value tuples in one statement. This is far faster than runn
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let names = ["Devon Reyes", "Priya Anand", "Tomas Holt"];
-    let years = [1985_i32, 1990, 1962];
+    let names = ["Owen Pryce", "Sela Vance"];
+    let years = [1975_i32, 1990];
     sqlx::query(
         "INSERT INTO authors (name, born) SELECT * FROM UNNEST($1::text[], $2::int[])",
     )
@@ -166,25 +146,70 @@ You can list several value tuples in one statement. This is far faster than runn
   </TabItem>
 </Tabs>
 
-The drivers each have an idiomatic bulk path: psycopg has `executemany`, pgx offers the very fast `CopyFrom`, and with sqlx you can unnest arrays so a single statement inserts many rows.
+```text
+INSERT 0 2
+ id |    name    | born 
+----+------------+------
+  1 | Mara Linde | 1968
+  2 | Owen Pryce | 1975
+  3 | Sela Vance | 1990
+(3 rows)
+```
+
+The drivers each have an idiomatic bulk path: psycopg has `executemany`, pgx offers the very fast `CopyFrom` (the `COPY` protocol), and with sqlx you can unnest arrays so a single statement inserts many rows. The next three books go in as a multi-row insert too. Each has an `author_id`, which must match an existing author because of the foreign key:
+
+```sql
+-- sql/insert-books.sql
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors',     1, 2003,  450),
+  ('The Glass Orchard', 1, 2018, 1250),
+  ('Tidal Notes',       2, 2011,  600);
+```
+
+## Letting columns take defaults
+
+The `books` table has `copies_sold int NOT NULL DEFAULT 0`. If you simply omit that column, PostgreSQL uses the default. You can also write `DEFAULT` explicitly to be clear about your intent, and `NULL` is a legal value for a nullable column such as `author_id`. Same statement from every driver: leave the column out of the column list.
+
+```sql
+-- sql/insert-default.sql
+INSERT INTO books (title, author_id, published, copies_sold)
+VALUES ('Unlinked Draft', NULL, 2020, DEFAULT);
+SELECT id, title, author_id, copies_sold FROM books ORDER BY id;
+```
+
+```text
+INSERT 0 1
+ id |       title       | author_id | copies_sold 
+----+-------------------+-----------+-------------
+  1 | Quiet Harbors     |         1 |         450
+  2 | The Glass Orchard |         1 |        1250
+  3 | Tidal Notes       |         2 |         600
+  4 | Unlinked Draft    |           |           0
+(4 rows)
+```
+
+`copies_sold` landed as `0` and `author_id` as NULL, and the identity gave the new row id 4. Omitting a column entirely is the usual approach; writing `DEFAULT` is handy when you are filling several rows and want every position spelled out.
 
 ## Getting the generated id back
 
-The `id` column is `GENERATED ALWAYS AS IDENTITY`, so PostgreSQL assigns it. To learn the value without a second query, append `RETURNING`.
+The `id` column is `GENERATED ALWAYS AS IDENTITY`, so PostgreSQL assigns it. To learn the value without a second query, append `RETURNING`. The block below runs inside a transaction that is rolled back, so no extra author is left behind (but the identity value is used up: sequences never roll back, as the constraints lesson showed).
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/insert-returning.sql
+    BEGIN;
     INSERT INTO authors (name, born)
-    VALUES ('Lena Whitfield', 1978)
+    VALUES ('Temp Author', 2000)
     RETURNING id;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(
       'INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id',
-      ['Lena Whitfield', 1978],
+      ['Temp Author', 2000],
     );
     console.log(res.rows[0].id);
     ```
@@ -193,7 +218,7 @@ The `id` column is `GENERATED ALWAYS AS IDENTITY`, so PostgreSQL assigns it. To 
     ```python
     cur.execute(
         "INSERT INTO authors (name, born) VALUES (%s, %s) RETURNING id",
-        ("Lena Whitfield", 1978),
+        ("Temp Author", 2000),
     )
     new_id = cur.fetchone()[0]
     ```
@@ -203,7 +228,7 @@ The `id` column is `GENERATED ALWAYS AS IDENTITY`, so PostgreSQL assigns it. To 
     var id int64
     err := conn.QueryRow(ctx,
         "INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id",
-        "Lena Whitfield", 1978).Scan(&id)
+        "Temp Author", 2000).Scan(&id)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -211,30 +236,317 @@ The `id` column is `GENERATED ALWAYS AS IDENTITY`, so PostgreSQL assigns it. To 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id",
     )
-    .bind("Lena Whitfield")
-    .bind(1978_i32)
+    .bind("Temp Author")
+    .bind(2000_i32)
     .fetch_one(&pool)
     .await?;
     ```
   </TabItem>
 </Tabs>
 
-The statement both inserts the row and hands back the new id in one trip:
+```text
+BEGIN
+ id 
+----
+  4
+(1 row)
+
+INSERT 0 1
+ROLLBACK
+```
+
+The statement both inserts the row and hands back the new id in one trip; here the next id is 4 because authors 1-3 exist. `RETURNING` works with multi-row inserts too and returns one row per inserted row, in insert order. This is also how the sales rows go in:
+
+```sql
+-- sql/insert-returning-many.sql
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400),
+  (3, 'East', 200), (2, 'West', 150), (1, 'East',  50)
+RETURNING id, book_id, region, copies;
+```
 
 ```text
- id
+ id | book_id | region | copies 
+----+---------+--------+--------
+  1 |       2 | East   |    900
+  2 |       3 | West   |    400
+  3 |       1 | West   |    400
+  4 |       3 | East   |    200
+  5 |       2 | West   |    150
+  6 |       1 | East   |     50
+(6 rows)
+
+INSERT 0 6
+```
+
+You can return any columns you like — `RETURNING id, name` or even `RETURNING *` to get the whole new row, including defaults the server filled in. (Each driver above was run once against a scratch database; the results follow.)
+
+```text
+$ (each program run once against a scratch database; `authors` emptied before every run, then `SELECT string_agg(name, ', ' ORDER BY id) FROM authors`)
+single row   Node.js (pg 8.23.0)      -> Mara Linde
+single row   Python (psycopg 3.3.6)   -> Mara Linde
+single row   Go (pgx v5.11.0)         -> Mara Linde
+single row   Rust (sqlx 0.9.0)        -> Mara Linde
+two rows     Node.js (pg 8.23.0)      -> Owen Pryce, Sela Vance
+two rows     Python (psycopg 3.3.6)   -> Owen Pryce, Sela Vance
+two rows     Go (pgx v5.11.0)         -> Owen Pryce, Sela Vance
+two rows     Rust (sqlx 0.9.0)        -> Owen Pryce, Sela Vance
+RETURNING id  Node.js (pg 8.23.0)      -> 1
+RETURNING id  Python (psycopg 3.3.6)   -> 1
+RETURNING id  Go (pgx v5.11.0)         -> 1
+RETURNING id  Rust (sqlx 0.9.0)        -> 1
+```
+
+## When an insert is refused
+
+An insert can fail in four ways you will meet in practice. Each is a different SQLSTATE class and message, real:
+
+- Supplying a value for a `GENERATED ALWAYS` identity column (`428C9`). `OVERRIDING SYSTEM VALUE` is the deliberate escape hatch:
+
+```sql
+-- @expect-error 428C9
+INSERT INTO authors (id, name, born) VALUES (10, 'Impostor', 1980);
+```
+
+```text
+ERROR:  cannot insert a non-DEFAULT value into column "id"
+DETAIL:  Column "id" is an identity column defined as GENERATED ALWAYS.
+HINT:  Use OVERRIDING SYSTEM VALUE to override.
+```
+
+- Leaving out a `NOT NULL` column that has no default (`23502`):
+
+```sql
+-- @expect-error 23502
+INSERT INTO sales (book_id, copies) VALUES (1, 10);
+```
+
+```text
+ERROR:  null value in column "region" of relation "sales" violates not-null constraint
+DETAIL:  Failing row contains (7, 1, null, 10).
+```
+
+- Pointing at a row that does not exist (`23503`):
+
+```sql
+-- @expect-error 23503
+INSERT INTO sales (book_id, region, copies) VALUES (99, 'East', 10);
+```
+
+```text
+ERROR:  insert or update on table "sales" violates foreign key constraint "sales_book_id_fkey"
+DETAIL:  Key (book_id)=(99) is not present in table "books".
+```
+
+## INSERT ... SELECT and DEFAULT VALUES
+
+The source of an insert does not have to be a literal list. `INSERT ... SELECT` copies rows produced by any query, and `DEFAULT VALUES` inserts a row where every column takes its default:
+
+```sql
+-- sql/insert-select.sql
+CREATE TABLE top_books (title text NOT NULL, copies_sold int NOT NULL);
+INSERT INTO top_books
+SELECT title, copies_sold FROM books WHERE copies_sold > 500 ORDER BY copies_sold DESC;
+
+CREATE TABLE pings (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, at timestamptz NOT NULL DEFAULT now());
+INSERT INTO pings DEFAULT VALUES RETURNING id;
+SELECT * FROM top_books;
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+CREATE TABLE
+ id 
 ----
-  5
+  1
+(1 row)
+
+INSERT 0 1
+       title       | copies_sold 
+-------------------+-------------
+ The Glass Orchard |        1250
+ Tidal Notes       |         600
+(2 rows)
+```
+
+## How much faster is batching?
+
+The claim "multi-row inserts and `COPY` are much faster than a loop of single inserts" is easy to check. The same 50,000 rows, four ways, into four tables, timed inside one psql session. The first two run 50,000 separate `INSERT` statements from the client (`\gexec`); this is over a local Unix socket, so the network cost you would pay in production is not even included:
+
+```sql
+-- sql/load-timing.sql
+CREATE TABLE load_single (id int, label text);
+CREATE TABLE load_tx     (id int, label text);
+CREATE TABLE load_multi  (id int, label text);
+CREATE TABLE load_copy   (id int, label text);
+
+-- 1) one INSERT statement per row, each its own transaction (autocommit)
+SELECT clock_timestamp() AS t0 \gset
+\o /dev/null
+SELECT format('INSERT INTO load_single VALUES (%s, %L);', g, 'row-' || g) FROM generate_series(1, 50000) g \gexec
+\o
+SELECT round(extract(epoch FROM clock_timestamp() - :'t0') * 1000) AS single_row_autocommit_ms;
+
+-- 2) the same statements inside ONE transaction
+SELECT clock_timestamp() AS t0 \gset
+BEGIN;
+\o /dev/null
+SELECT format('INSERT INTO load_tx VALUES (%s, %L);', g, 'row-' || g) FROM generate_series(1, 50000) g \gexec
+\o
+COMMIT;
+SELECT round(extract(epoch FROM clock_timestamp() - :'t0') * 1000) AS single_row_one_tx_ms;
+
+-- 3) one multi-row statement
+SELECT clock_timestamp() AS t0 \gset
+INSERT INTO load_multi SELECT g, 'row-' || g FROM generate_series(1, 50000) g;
+SELECT round(extract(epoch FROM clock_timestamp() - :'t0') * 1000) AS one_statement_ms;
+
+-- 4) COPY from a file (\copy: the file is on the client side)
+\copy (SELECT g, 'row-' || g FROM generate_series(1, 50000) g) TO '/tmp/load.csv' WITH (FORMAT csv)
+SELECT clock_timestamp() AS t0 \gset
+\copy load_copy FROM '/tmp/load.csv' WITH (FORMAT csv)
+SELECT round(extract(epoch FROM clock_timestamp() - :'t0') * 1000) AS copy_ms;
+SELECT (SELECT count(*) FROM load_single) AS single_rows, (SELECT count(*) FROM load_tx) AS tx_rows,
+       (SELECT count(*) FROM load_multi) AS multi_rows, (SELECT count(*) FROM load_copy) AS copy_rows;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+ single_row_autocommit_ms 
+--------------------------
+                     6607
+(1 row)
+
+BEGIN
+COMMIT
+ single_row_one_tx_ms 
+----------------------
+                 3400
+(1 row)
+
+INSERT 0 50000
+ one_statement_ms 
+------------------
+               34
+(1 row)
+
+COPY 50000
+COPY 50000
+ copy_ms 
+---------
+      15
+(1 row)
+
+ single_rows | tx_rows | multi_rows | copy_rows 
+-------------+---------+------------+-----------
+       50000 |   50000 |      50000 |     50000
 (1 row)
 ```
 
-You can return any columns you like — `RETURNING id, name` or even `RETURNING *` to get the whole new row, including defaults the server filled in.
+On this Mac: about 6.6 seconds when each row is its own transaction, about 3.4 seconds when the same statements share one transaction (the difference is 50,000 commits), and about 34 ms for one multi-row statement or 15 ms for `COPY`. That is a factor of several hundred between the naive loop and the batched forms, before adding network latency per statement. Use one multi-row `INSERT` for small batches (a single statement can carry at most 65,535 bound parameters, see the [protocol message formats](https://www.postgresql.org/docs/18/protocol-message-formats.html)) and `COPY` for large loads.
+
+## Reading AI-generated code
+
+An assistant asked for "a quick insert for the signup form" writes a helper. It works in every demo, including names with normal characters:
+
+<SpotTheBug lang="js" code={`// signup.js  (AI comment: "quick insert for the signup form")
+async function addAuthor(name, born) {
+  await pool.query(
+    \`INSERT INTO authors (name, born) VALUES ('\${name}', \${born})\`
+  );
+}`}>
+
+The bug is that the values are pasted into the SQL text with a template string. With `pg`, a query without parameters is sent as a simple query, which may contain several statements, so a crafted `name` can end the INSERT and append its own. Proved with a real program against a scratch database (a table `sales` with 6 rows). First, what the server actually receives for the hostile name, built in SQL with `format`:
+
+```sql
+-- sql/injection-built-sql.sql
+SELECT format($f$INSERT INTO authors (name, born) VALUES ('%s', %s)$f$,
+              $p$x', 1); DELETE FROM sales; --$p$, 1990) AS what_the_server_receives;
+```
+
+```text
+                            what_the_server_receives                             
+---------------------------------------------------------------------------------
+ INSERT INTO authors (name, born) VALUES ('x', 1); DELETE FROM sales; --', 1990)
+(1 row)
+```
+
+The first statement inserts a harmless author `x`, the second deletes every sale, and `--` comments out the rest. Now the real program: even a legitimate name with an apostrophe breaks it (`42601`), the hostile one empties `sales`, and the placeholder version stores the same hostile text as plain data and leaves `sales` alone:
+
+```text
+$ node inj.mjs        # pg 8.23.0, scratch database with 6 rows in sales
+sales rows before: 6
+O'Brien -> 42601 syntax error at or near "Brien"
+sales rows after unsafe insert: 0
+sales rows restored: 6
+sales rows after safe insert: 6
+[
+  { id: '1', name: 'x' },
+  { id: '2', name: "x', 1); DELETE FROM sales; --" },
+  { id: '3', name: "O'Brien" }
+]
+```
+
+The fix is to pass the values separately from the SQL so the server never parses them as SQL:
+
+```js
+async function addAuthor(name, born) {
+  await pool.query(
+    'INSERT INTO authors (name, born) VALUES ($1, $2)',
+    [name, born],
+  );
+}
+```
+
+In `psql` the same idea is `PREPARE` / `EXECUTE` (drivers use the protocol-level equivalent). The hostile string is stored verbatim and `sales` still has its 6 rows (rolled back to keep the dataset intact):
+
+```sql
+-- sql/injection-safe.sql
+BEGIN;
+PREPARE add_author (text, int) AS
+  INSERT INTO authors (name, born) VALUES ($1, $2);
+EXECUTE add_author($p$x', 1); DELETE FROM sales; --$p$, 1990);
+SELECT name FROM authors WHERE born = 1990 ORDER BY id;
+SELECT count(*) AS sales_rows FROM sales;
+ROLLBACK;
+DEALLOCATE add_author;
+```
+
+```text
+BEGIN
+PREPARE
+INSERT 0 1
+             name              
+-------------------------------
+ Sela Vance
+ x', 1); DELETE FROM sales; --
+(2 rows)
+
+ sales_rows 
+------------
+          6
+(1 row)
+
+ROLLBACK
+DEALLOCATE
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+An `INSERT` is a request to the server, and everything you leave out is decided by the schema: `DEFAULT`, identity generation, or `NULL`. The command you write picks the *cost profile*: every statement is a round trip, and every transaction is a commit. Batching, in one statement or in one transaction, changes those two numbers, and that is the whole speed story. Placeholders separate *code* from *data* so the server can never confuse them.
 
 ## Tips / gotchas
 
 - Always pass values through driver placeholders (`$1`, `%s`). Building SQL with string concatenation invites SQL injection and breaks on quotes or special characters.
 - With an `IDENTITY` (or `serial`) primary key, do not supply the id yourself — let PostgreSQL generate it and read it back with `RETURNING`.
-- Multi-row inserts are one statement and one round trip, so they are dramatically faster than a loop of single inserts.
+- Multi-row inserts are one statement and one round trip; `COPY` is faster still for big loads (measured above).
+- Failed and rolled-back inserts still consume identity values, so ids have gaps.
 - A column with no value and no default must allow `NULL`, or the insert fails with a not-null violation.
 
 <Callout title="RETURNING is your friend">
@@ -247,20 +559,17 @@ You can return any columns you like — `RETURNING id, name` or even `RETURNING 
 |---------|---------|------|
 | `RETURNING` after `INSERT` | Get generated values (like `id`) back in one round trip, no race condition | One more syntax to remember, and some drivers must read the result as a query instead of a plain exec |
 | A separate `SELECT` afterwards | Simple and easy for beginners to follow | An extra round trip, and a race condition if another insert lands in between |
-| Multi-row `INSERT` in one statement | Fast — a single round trip | Longer statement, and one bad row can fail the whole statement |
-| Looping single-row inserts | Easy to read, one step at a time | Very slow — N round trips for N rows |
+| Multi-row `INSERT` in one statement | Fast — a single round trip (34 ms for 50,000 rows above) | Longer statement, and one bad row can fail the whole statement |
+| `COPY` / `\copy` | Fastest bulk path (15 ms for 50,000 rows above) | Needs a file or stream in CSV/text format; less flexible error handling |
+| Looping single-row inserts | Easy to read, one step at a time | 6.6 s for the same 50,000 rows (autocommit), 3.4 s in one transaction |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Looping single-row `INSERT` statements instead of batching them** — this pays a network round trip per row. Use a multi-row `INSERT`, `executemany`, or bulk copy (`COPY`/`CopyFrom`) instead.
-- **Concatenating user input directly into the SQL string** — this opens the door to SQL injection. Always pass values through placeholders (`$1`, `%s`).
-- **Forgetting a column is `NOT NULL` with no `DEFAULT`** — the insert fails with a not-null violation. Check the schema before writing the insert, or supply every required column.
-
-> 💡 Real-world example
->
-> **High-throughput paths** — most application code inserts through an ORM (like ActiveRecord) for convenience and maintainability, but on high-throughput paths such as event ingestion or audit logging, teams often drop to hand-written SQL with `RETURNING` and multi-row inserts to cut round trips.
->
-> **Bulk CSV import** — use `COPY` or multi-row `INSERT` instead of looping row by row, so importing hundreds of thousands of rows finishes in seconds instead of minutes.
+- **"Batching only helps over a slow network."** It helped by a factor of hundreds over a local socket, because each statement also pays a commit (6.6 s vs 3.4 s vs 34 ms above).
+- **"Escaping quotes is enough to be safe."** Placeholders are the fix; hand-escaping is where injection bugs come from (the `O'Brien` failure above is the friendly version).
+- **"`RETURNING` needs a second query."** It is part of the same statement, even for many rows.
+- **"A rolled-back insert leaves no trace."** The rows are gone, but the identity value is consumed (the temp author took 4).
+- **"`DEFAULT` and omitting the column differ."** They are the same; `DEFAULT` just makes a full column list explicit.
 
 export const quizInsert = [
   {
@@ -272,6 +581,7 @@ export const quizInsert = [
       'You cannot — ids are hidden',
     ],
     answer: 1,
+    explain: '`RETURNING id` hands the generated value back in the same statement. `SELECT max(id)` races with concurrent inserts.',
   },
   {
     q: 'A column has DEFAULT 0 and is NOT NULL. What happens if you omit it from the column list?',
@@ -282,6 +592,7 @@ export const quizInsert = [
       'PostgreSQL prompts you for a value',
     ],
     answer: 2,
+    explain: 'Omitted columns take their DEFAULT. The lesson\'s `Unlinked Draft` row shows `copies_sold = 0`.',
   },
   {
     q: 'Why pass values as placeholders ($1, %s) instead of concatenating them into the SQL string?',
@@ -292,6 +603,29 @@ export const quizInsert = [
       'It lets you skip the column list',
     ],
     answer: 1,
+    explain: 'With concatenation a name like `x\', 1); DELETE FROM sales; --` becomes SQL and emptied the table in the lesson; as a bound parameter it is stored as text.',
+  },
+  {
+    q: 'You insert into a table whose id is `GENERATED ALWAYS AS IDENTITY` and supply `id = 10`. What happens?',
+    options: [
+      'The row is inserted with id 10',
+      'ERROR: cannot insert a non-DEFAULT value into column "id" (SQLSTATE 428C9)',
+      'PostgreSQL ignores 10 and generates an id',
+      'The identity sequence is reset to 10',
+    ],
+    answer: 1,
+    explain: 'ALWAYS refuses explicit values unless you add `OVERRIDING SYSTEM VALUE`. `GENERATED BY DEFAULT` would accept it.',
+  },
+  {
+    q: 'Which is the fastest way to load 50,000 rows in the lesson\'s measurement?',
+    options: [
+      'A loop of single-row INSERTs with autocommit',
+      'The same loop inside one transaction',
+      'A single multi-row INSERT or COPY',
+      'They all take the same time',
+    ],
+    answer: 2,
+    explain: 'About 6.6 s, 3.4 s, and 34 ms / 15 ms respectively on the author\'s Mac. Batching removes per-statement round trips and per-row commits.',
   },
 ];
 

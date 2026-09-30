@@ -1,6 +1,6 @@
 ---
-title: การเพิ่ม row
-description: เพิ่ม row ใหม่ด้วย INSERT — แบบ row เดียวและหลาย row, ระบุรายการ column อย่างชัดเจน, ค่า DEFAULT และการดึง id ที่ถูกสร้างขึ้นกลับมาด้วย RETURNING
+title: การ insert row
+description: เพิ่ม row ใหม่ด้วย INSERT — ทีละ row และหลาย row, รายการ column แบบระบุชัด, ค่า DEFAULT และการรับ id ที่ถูกสร้างกลับมาด้วย RETURNING
 sidebar:
   order: 2
 ---
@@ -9,27 +9,51 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-ปัญหาที่เจอจริง: แอปพลิเคชันของคุณไม่มีอะไรให้แสดงเลยจนกว่าจะมีข้อมูลอยู่ใน table เสียก่อน การสร้างข้อมูลหมายถึงการเพิ่ม row และคำสั่งสำหรับสิ่งนั้นคือ `INSERT` คุณระบุชื่อ table แสดงรายการ column ที่คุณกำลังจะให้ค่า แล้วให้ค่าเหล่านั้น PostgreSQL จะเติมทุกอย่างที่คุณเว้นไว้ — id ที่ถูกสร้างขึ้น, column ที่มี `DEFAULT` และ column ใด ๆ ที่อนุญาตให้เป็น `NULL`
+การสร้างข้อมูลหมายถึงการเพิ่ม row และ statement สำหรับสิ่งนั้นคือ `INSERT` คุณระบุ table ลิสต์ column ที่คุณให้ค่า และใส่ค่า PostgreSQL เติมทุกอย่างที่คุณละไว้ — id ที่ถูกสร้าง, column ที่มี `DEFAULT` และ column ใดก็ตามที่อนุญาต `NULL`
 
-บทเรียนนี้ใช้ table `authors` และ `books` จากภาพรวมของโมดูล
+บทเรียนนี้สร้างชุดข้อมูล `authors`, `books` และ `sales` ของคอร์สตั้งแต่ศูนย์ทีละ `INSERT` เมื่อจบคุณจะมี row ที่ตรงกับที่ทุกบทถัดไปเริ่มต้นด้วยพอดี ทุกอย่างที่แสดงคือ output จริงจาก **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) จากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ตัวเลขเวลามาจาก Mac เครื่องนี้
 
-## row เดียว
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+```
 
-รูปแบบพื้นฐานที่สุดแสดงรายการ column ก่อน แล้วตามด้วยค่าที่ตรงกัน
+## Row เดียว
+
+รูปแบบพื้นฐานที่สุดลิสต์ column แล้วตามด้วยค่าที่ตรงกัน เซิร์ฟเวอร์ตอบด้วย command tag `INSERT 0 1`: เลข `0` เป็น field object id แบบเก่า และ `1` คือจำนวน row ที่ insert
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/insert-single.sql
     INSERT INTO authors (name, born)
-    VALUES ('Mira Castellan', 1971);
+    VALUES ('Mara Linde', 1968);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     await pool.query(
       'INSERT INTO authors (name, born) VALUES ($1, $2)',
-      ['Mira Castellan', 1971],
+      ['Mara Linde', 1968],
     );
     ```
   </TabItem>
@@ -37,7 +61,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     ```python
     cur.execute(
         "INSERT INTO authors (name, born) VALUES (%s, %s)",
-        ("Mira Castellan", 1971),
+        ("Mara Linde", 1968),
     )
     ```
   </TabItem>
@@ -45,105 +69,61 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     ```go
     _, err := conn.Exec(ctx,
         "INSERT INTO authors (name, born) VALUES ($1, $2)",
-        "Mira Castellan", 1971)
+        "Mara Linde", 1968)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     sqlx::query("INSERT INTO authors (name, born) VALUES ($1, $2)")
-        .bind("Mira Castellan")
-        .bind(1971_i32)
+        .bind("Mara Linde")
+        .bind(1968_i32)
         .execute(&pool)
         .await?;
     ```
   </TabItem>
 </Tabs>
 
-สังเกตว่าแท็บ `psql` ใช้ค่าตรง ๆ (literal value) ส่วนทุก driver ใช้ **placeholder** — `$1`, `$2` ในสไตล์ native ของ PostgreSQL หรือ `%s` สำหรับ psycopg — แล้วส่งค่าจริงแยกต่างหาก จงให้ข้อมูลของผู้ใช้แบบนี้เสมอ อย่าเอาค่ามาต่อเข้ากับ SQL string ด้วยตัวเองเด็ดขาด การปล่อยให้ driver bind ค่าให้ จะรักษา type ให้ถูกต้องและปิดประตูไม่ให้เกิด SQL injection คือกรณีที่ input ซึ่งจงใจประดิษฐ์ขึ้นมาเปลี่ยนสิ่งที่คำสั่งของคุณทำ
+```text
+INSERT 0 1
+```
 
-**ใน pgAdmin:** วางเวอร์ชัน `psql` ลงใน Query Tool แล้วรัน แผงข้อความจะรายงานว่า `INSERT 0 1` ซึ่งหมายความว่ามี row หนึ่งถูกเพิ่มเข้าไป
+สังเกตว่าแท็บ `psql` ใช้ค่า literal ขณะที่ทุก driver ใช้ **placeholder** — `$1`, `$2` แบบ native ของ PostgreSQL หรือ `%s` สำหรับ psycopg — และส่งค่าจริงแยกต่างหาก ส่งข้อมูลผู้ใช้แบบนี้เสมอ ห้ามต่อค่าเข้าไปในสตริง SQL เอง (ส่วนสุดท้ายของบทเรียนนี้พิสูจน์เหตุผลด้วย payload จริง)
 
-## ปล่อยให้ column รับค่า default
-
-table `books` มี `copies_sold int NOT NULL DEFAULT 0` ถ้าคุณเพียงแค่ละ column นั้นไว้ PostgreSQL จะใช้ค่า default คุณยังเขียน `DEFAULT` อย่างชัดเจนเพื่อแสดงเจตนาของคุณได้ด้วย
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    INSERT INTO books (title, author_id, published, copies_sold)
-    VALUES ('The Glass Orchard', 1, 2004, DEFAULT);
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await pool.query(
-      'INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)',
-      ['The Glass Orchard', 1, 2004],
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute(
-        "INSERT INTO books (title, author_id, published) VALUES (%s, %s, %s)",
-        ("The Glass Orchard", 1, 2004),
-    )
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := conn.Exec(ctx,
-        "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)",
-        "The Glass Orchard", 1, 2004)
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    sqlx::query("INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3)")
-        .bind("The Glass Orchard")
-        .bind(1_i64)
-        .bind(2004_i32)
-        .execute(&pool)
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-ไม่ว่าจะวิธีไหน `copies_sold` ก็จะลงเอยเป็น `0` การละ column ไปทั้งหมดเป็นวิธีปกติทั่วไป ส่วนการเขียน `DEFAULT` มีประโยชน์เมื่อคุณกำลังเติมหลาย row และต้องการให้ทุกตำแหน่งถูกระบุออกมาชัด ๆ
+**ใน pgAdmin:** วางเวอร์ชัน `psql` ใน Query Tool แล้วรัน แผงข้อความจะรายงาน `INSERT 0 1` หมายถึงเพิ่มหนึ่ง row
 
 ## หลาย row พร้อมกัน
 
-คุณสามารถแสดงรายการ value tuple หลายอันในคำสั่งเดียวได้ ซึ่งเร็วกว่าการรัน `INSERT` หนึ่งครั้งต่อหนึ่ง row อย่างมาก เพราะเป็น round trip เดียวไปที่ server
+คุณลิสต์หลาย value tuple ใน statement เดียวได้ วิธีนี้เร็วกว่ารัน `INSERT` ทีละ row มาก เพราะเป็น round trip เดียวและ transaction เดียว (วัดด้านล่าง)
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/insert-many.sql
     INSERT INTO authors (name, born) VALUES
-      ('Devon Reyes', 1985),
-      ('Priya Anand', 1990),
-      ('Tomas Holt',  1962);
+      ('Owen Pryce', 1975),
+      ('Sela Vance',  1990);
+    SELECT id, name, born FROM authors ORDER BY id;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     await pool.query(
-      'INSERT INTO authors (name, born) VALUES ($1, $2), ($3, $4), ($5, $6)',
-      ['Devon Reyes', 1985, 'Priya Anand', 1990, 'Tomas Holt', 1962],
+      'INSERT INTO authors (name, born) VALUES ($1, $2), ($3, $4)',
+      ['Owen Pryce', 1975, 'Sela Vance', 1990],
     );
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    rows = [("Devon Reyes", 1985), ("Priya Anand", 1990), ("Tomas Holt", 1962)]
+    rows = [("Owen Pryce", 1975), ("Sela Vance", 1990)]
     cur.executemany("INSERT INTO authors (name, born) VALUES (%s, %s)", rows)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     rows := [][]any{
-        {"Devon Reyes", 1985},
-        {"Priya Anand", 1990},
-        {"Tomas Holt", 1962},
+        {"Owen Pryce", 1975},
+        {"Sela Vance", 1990},
     }
     _, err := conn.CopyFrom(ctx,
         pgx.Identifier{"authors"},
@@ -153,8 +133,8 @@ table `books` มี `copies_sold int NOT NULL DEFAULT 0` ถ้าคุณเ�
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let names = ["Devon Reyes", "Priya Anand", "Tomas Holt"];
-    let years = [1985_i32, 1990, 1962];
+    let names = ["Owen Pryce", "Sela Vance"];
+    let years = [1975_i32, 1990];
     sqlx::query(
         "INSERT INTO authors (name, born) SELECT * FROM UNNEST($1::text[], $2::int[])",
     )
@@ -166,25 +146,70 @@ table `books` มี `copies_sold int NOT NULL DEFAULT 0` ถ้าคุณเ�
   </TabItem>
 </Tabs>
 
-driver แต่ละตัวมีเส้นทางสำหรับ bulk ที่เป็นสำนวนเฉพาะตัว: psycopg มี `executemany`, pgx มี `CopyFrom` ที่เร็วมาก และด้วย sqlx คุณสามารถ unnest array เพื่อให้คำสั่งเดียว insert ได้หลาย row
+```text
+INSERT 0 2
+ id |    name    | born 
+----+------------+------
+  1 | Mara Linde | 1968
+  2 | Owen Pryce | 1975
+  3 | Sela Vance | 1990
+(3 rows)
+```
 
-## การดึง id ที่ถูกสร้างขึ้นกลับมา
+แต่ละ driver มีทางลัดสำหรับ bulk ของตัวเอง: psycopg มี `executemany`, pgx มี `CopyFrom` ที่เร็วมาก (โปรโตคอล `COPY`) และกับ sqlx คุณ unnest array เพื่อให้ statement เดียว insert หลาย row หนังสือสามเล่มถัดไปก็ insert แบบหลาย row เช่นกัน แต่ละเล่มมี `author_id` ซึ่งต้องตรงกับ author ที่มีอยู่เพราะ foreign key:
 
-column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น PostgreSQL จึงเป็นผู้กำหนดค่าให้ หากต้องการทราบค่าโดยไม่ต้อง query ครั้งที่สอง ให้เติม `RETURNING`
+```sql
+-- sql/insert-books.sql
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors',     1, 2003,  450),
+  ('The Glass Orchard', 1, 2018, 1250),
+  ('Tidal Notes',       2, 2011,  600);
+```
+
+## ปล่อยให้ column ใช้ค่า default
+
+table `books` มี `copies_sold int NOT NULL DEFAULT 0` ถ้าคุณละ column นั้น PostgreSQL ใช้ default คุณเขียน `DEFAULT` ระบุชัดเพื่อแสดงเจตนาได้ และ `NULL` เป็นค่าที่ถูกต้องสำหรับ column ที่ nullable เช่น `author_id` ทุก driver ทำเหมือนกัน: ละ column ออกจากรายการ column
+
+```sql
+-- sql/insert-default.sql
+INSERT INTO books (title, author_id, published, copies_sold)
+VALUES ('Unlinked Draft', NULL, 2020, DEFAULT);
+SELECT id, title, author_id, copies_sold FROM books ORDER BY id;
+```
+
+```text
+INSERT 0 1
+ id |       title       | author_id | copies_sold 
+----+-------------------+-----------+-------------
+  1 | Quiet Harbors     |         1 |         450
+  2 | The Glass Orchard |         1 |        1250
+  3 | Tidal Notes       |         2 |         600
+  4 | Unlinked Draft    |           |           0
+(4 rows)
+```
+
+`copies_sold` ได้ `0` และ `author_id` เป็น NULL และ identity ให้ row ใหม่ id 4 การละ column ทั้งหมดเป็นวิธีปกติ การเขียน `DEFAULT` สะดวกเมื่อคุณกรอกหลาย row และอยากให้ทุกตำแหน่งชัดเจน
+
+## การรับ id ที่ถูกสร้างกลับมา
+
+column `id` เป็น `GENERATED ALWAYS AS IDENTITY` PostgreSQL จึงกำหนดให้ เพื่อรู้ค่าโดยไม่ต้อง query ที่สอง ให้ต่อท้ายด้วย `RETURNING` บล็อกด้านล่างรันใน transaction ที่ถูก rollback จึงไม่มี author เกินค้างอยู่ (แต่ค่า identity ถูกใช้ไปแล้ว: sequence ไม่เคย rollback ดังที่บท constraints แสดง)
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/insert-returning.sql
+    BEGIN;
     INSERT INTO authors (name, born)
-    VALUES ('Lena Whitfield', 1978)
+    VALUES ('Temp Author', 2000)
     RETURNING id;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(
       'INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id',
-      ['Lena Whitfield', 1978],
+      ['Temp Author', 2000],
     );
     console.log(res.rows[0].id);
     ```
@@ -193,7 +218,7 @@ column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น Po
     ```python
     cur.execute(
         "INSERT INTO authors (name, born) VALUES (%s, %s) RETURNING id",
-        ("Lena Whitfield", 1978),
+        ("Temp Author", 2000),
     )
     new_id = cur.fetchone()[0]
     ```
@@ -203,7 +228,7 @@ column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น Po
     var id int64
     err := conn.QueryRow(ctx,
         "INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id",
-        "Lena Whitfield", 1978).Scan(&id)
+        "Temp Author", 2000).Scan(&id)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -211,87 +236,396 @@ column `id` เป็น `GENERATED ALWAYS AS IDENTITY` ดังนั้น Po
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO authors (name, born) VALUES ($1, $2) RETURNING id",
     )
-    .bind("Lena Whitfield")
-    .bind(1978_i32)
+    .bind("Temp Author")
+    .bind(2000_i32)
     .fetch_one(&pool)
     .await?;
     ```
   </TabItem>
 </Tabs>
 
-คำสั่งนี้ทั้ง insert row และส่ง id ใหม่กลับมาให้ในการเดินทางครั้งเดียว:
+```text
+BEGIN
+ id 
+----
+  4
+(1 row)
+
+INSERT 0 1
+ROLLBACK
+```
+
+statement ทั้ง insert row และส่ง id ใหม่กลับใน round trip เดียว ที่นี่ id ถัดไปคือ 4 เพราะมี author 1-3 อยู่แล้ว `RETURNING` ใช้กับ insert หลาย row ได้เช่นกันและคืนหนึ่ง row ต่อหนึ่ง row ที่ insert ตามลำดับที่ insert นี่คือวิธีที่ row ของ sales เข้าไป:
+
+```sql
+-- sql/insert-returning-many.sql
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400),
+  (3, 'East', 200), (2, 'West', 150), (1, 'East',  50)
+RETURNING id, book_id, region, copies;
+```
 
 ```text
- id
+ id | book_id | region | copies 
+----+---------+--------+--------
+  1 |       2 | East   |    900
+  2 |       3 | West   |    400
+  3 |       1 | West   |    400
+  4 |       3 | East   |    200
+  5 |       2 | West   |    150
+  6 |       1 | East   |     50
+(6 rows)
+
+INSERT 0 6
+```
+
+คุณคืน column ใดก็ได้ตามต้องการ — `RETURNING id, name` หรือแม้แต่ `RETURNING *` เพื่อรับ row ใหม่ทั้งแถว รวมถึง default ที่เซิร์ฟเวอร์เติมให้ (แต่ละ driver ข้างบนรันหนึ่งครั้งกับฐานข้อมูลชั่วคราว ผลลัพธ์ต่อไปนี้)
+
+```text
+$ (each program run once against a scratch database; `authors` emptied before every run, then `SELECT string_agg(name, ', ' ORDER BY id) FROM authors`)
+single row   Node.js (pg 8.23.0)      -> Mara Linde
+single row   Python (psycopg 3.3.6)   -> Mara Linde
+single row   Go (pgx v5.11.0)         -> Mara Linde
+single row   Rust (sqlx 0.9.0)        -> Mara Linde
+two rows     Node.js (pg 8.23.0)      -> Owen Pryce, Sela Vance
+two rows     Python (psycopg 3.3.6)   -> Owen Pryce, Sela Vance
+two rows     Go (pgx v5.11.0)         -> Owen Pryce, Sela Vance
+two rows     Rust (sqlx 0.9.0)        -> Owen Pryce, Sela Vance
+RETURNING id  Node.js (pg 8.23.0)      -> 1
+RETURNING id  Python (psycopg 3.3.6)   -> 1
+RETURNING id  Go (pgx v5.11.0)         -> 1
+RETURNING id  Rust (sqlx 0.9.0)        -> 1
+```
+
+## เมื่อ insert ถูกปฏิเสธ
+
+insert ล้มเหลวได้สี่แบบที่คุณจะเจอจริง แต่ละแบบเป็น SQLSTATE class และข้อความที่ต่างกัน ของจริง:
+
+- ส่งค่าให้ identity column แบบ `GENERATED ALWAYS` (`428C9`) `OVERRIDING SYSTEM VALUE` คือทางหนีที่ตั้งใจใช้:
+
+```sql
+-- @expect-error 428C9
+INSERT INTO authors (id, name, born) VALUES (10, 'Impostor', 1980);
+```
+
+```text
+ERROR:  cannot insert a non-DEFAULT value into column "id"
+DETAIL:  Column "id" is an identity column defined as GENERATED ALWAYS.
+HINT:  Use OVERRIDING SYSTEM VALUE to override.
+```
+
+- ละ column `NOT NULL` ที่ไม่มี default (`23502`):
+
+```sql
+-- @expect-error 23502
+INSERT INTO sales (book_id, copies) VALUES (1, 10);
+```
+
+```text
+ERROR:  null value in column "region" of relation "sales" violates not-null constraint
+DETAIL:  Failing row contains (7, 1, null, 10).
+```
+
+- ชี้ไปที่ row ที่ไม่มีอยู่ (`23503`):
+
+```sql
+-- @expect-error 23503
+INSERT INTO sales (book_id, region, copies) VALUES (99, 'East', 10);
+```
+
+```text
+ERROR:  insert or update on table "sales" violates foreign key constraint "sales_book_id_fkey"
+DETAIL:  Key (book_id)=(99) is not present in table "books".
+```
+
+## INSERT ... SELECT และ DEFAULT VALUES
+
+แหล่งของ insert ไม่ต้องเป็นรายการ literal เสมอไป `INSERT ... SELECT` คัดลอก row ที่ query ใดก็ได้สร้างขึ้น และ `DEFAULT VALUES` insert row ที่ทุก column ใช้ค่า default:
+
+```sql
+-- sql/insert-select.sql
+CREATE TABLE top_books (title text NOT NULL, copies_sold int NOT NULL);
+INSERT INTO top_books
+SELECT title, copies_sold FROM books WHERE copies_sold > 500 ORDER BY copies_sold DESC;
+
+CREATE TABLE pings (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, at timestamptz NOT NULL DEFAULT now());
+INSERT INTO pings DEFAULT VALUES RETURNING id;
+SELECT * FROM top_books;
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+CREATE TABLE
+ id 
 ----
-  5
+  1
+(1 row)
+
+INSERT 0 1
+       title       | copies_sold 
+-------------------+-------------
+ The Glass Orchard |        1250
+ Tidal Notes       |         600
+(2 rows)
+```
+
+## การ batch เร็วขึ้นแค่ไหน?
+
+ข้ออ้างว่า "insert หลาย row และ `COPY` เร็วกว่าลูปของ insert เดี่ยวมาก" ตรวจสอบได้ง่าย 50,000 row เดียวกัน สี่วิธี ลงสี่ table วัดเวลาใน psql session เดียว สองวิธีแรกรัน `INSERT` แยกกัน 50,000 statement จากฝั่ง client (`\gexec`) นี่คือผ่าน Unix socket ในเครื่อง ต้นทุนเครือข่ายที่คุณจะจ่ายบน production จึงยังไม่รวมอยู่ด้วยซ้ำ:
+
+```sql
+-- sql/load-timing.sql
+CREATE TABLE load_single (id int, label text);
+CREATE TABLE load_tx     (id int, label text);
+CREATE TABLE load_multi  (id int, label text);
+CREATE TABLE load_copy   (id int, label text);
+
+-- 1) one INSERT statement per row, each its own transaction (autocommit)
+SELECT clock_timestamp() AS t0 \gset
+\o /dev/null
+SELECT format('INSERT INTO load_single VALUES (%s, %L);', g, 'row-' || g) FROM generate_series(1, 50000) g \gexec
+\o
+SELECT round(extract(epoch FROM clock_timestamp() - :'t0') * 1000) AS single_row_autocommit_ms;
+
+-- 2) the same statements inside ONE transaction
+SELECT clock_timestamp() AS t0 \gset
+BEGIN;
+\o /dev/null
+SELECT format('INSERT INTO load_tx VALUES (%s, %L);', g, 'row-' || g) FROM generate_series(1, 50000) g \gexec
+\o
+COMMIT;
+SELECT round(extract(epoch FROM clock_timestamp() - :'t0') * 1000) AS single_row_one_tx_ms;
+
+-- 3) one multi-row statement
+SELECT clock_timestamp() AS t0 \gset
+INSERT INTO load_multi SELECT g, 'row-' || g FROM generate_series(1, 50000) g;
+SELECT round(extract(epoch FROM clock_timestamp() - :'t0') * 1000) AS one_statement_ms;
+
+-- 4) COPY from a file (\copy: the file is on the client side)
+\copy (SELECT g, 'row-' || g FROM generate_series(1, 50000) g) TO '/tmp/load.csv' WITH (FORMAT csv)
+SELECT clock_timestamp() AS t0 \gset
+\copy load_copy FROM '/tmp/load.csv' WITH (FORMAT csv)
+SELECT round(extract(epoch FROM clock_timestamp() - :'t0') * 1000) AS copy_ms;
+SELECT (SELECT count(*) FROM load_single) AS single_rows, (SELECT count(*) FROM load_tx) AS tx_rows,
+       (SELECT count(*) FROM load_multi) AS multi_rows, (SELECT count(*) FROM load_copy) AS copy_rows;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+ single_row_autocommit_ms 
+--------------------------
+                     6607
+(1 row)
+
+BEGIN
+COMMIT
+ single_row_one_tx_ms 
+----------------------
+                 3400
+(1 row)
+
+INSERT 0 50000
+ one_statement_ms 
+------------------
+               34
+(1 row)
+
+COPY 50000
+COPY 50000
+ copy_ms 
+---------
+      15
+(1 row)
+
+ single_rows | tx_rows | multi_rows | copy_rows 
+-------------+---------+------------+-----------
+       50000 |   50000 |      50000 |     50000
 (1 row)
 ```
 
-คุณสามารถ return column ใดก็ได้ที่คุณต้องการ — `RETURNING id, name` หรือแม้แต่ `RETURNING *` เพื่อรับ row ใหม่ทั้ง row รวมถึง default ที่ server เติมให้ด้วย
+บน Mac เครื่องนี้: ราว 6.6 วินาทีเมื่อแต่ละ row เป็น transaction ของตัวเอง ราว 3.4 วินาทีเมื่อ statement เดียวกันอยู่ใน transaction เดียว (ต่างกันที่การ commit 50,000 ครั้ง) และราว 34 ms สำหรับ statement หลาย row เดียว หรือ 15 ms สำหรับ `COPY` นั่นต่างกันหลายร้อยเท่าระหว่างลูปแบบไร้เดียงสากับแบบ batch ก่อนบวก latency เครือข่ายต่อ statement ใช้ `INSERT` หลาย row เดียวสำหรับ batch เล็ก (statement หนึ่งส่ง parameter ที่ bind ได้สูงสุด 65,535 ตัว ดู [protocol message formats](https://www.postgresql.org/docs/18/protocol-message-formats.html)) และ `COPY` สำหรับโหลดขนาดใหญ่
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ที่ถูกขอ "insert เร็ว ๆ สำหรับฟอร์มสมัครสมาชิก" เขียน helper มันใช้ได้ในทุก demo รวมถึงชื่อที่ตัวอักษรปกติ:
+
+<SpotTheBug lang="js" code={`// signup.js  (AI comment: "quick insert for the signup form")
+async function addAuthor(name, born) {
+  await pool.query(
+    \`INSERT INTO authors (name, born) VALUES ('\${name}', \${born})\`
+  );
+}`}>
+
+bug คือค่าถูกแปะลงในข้อความ SQL ด้วย template string กับ `pg` query ที่ไม่มี parameter ถูกส่งเป็น simple query ซึ่งมีหลาย statement ได้ `name` ที่ถูกออกแบบมาจึงปิด INSERT แล้วต่อ statement ของตัวเอง พิสูจน์ด้วยโปรแกรมจริงกับฐานข้อมูลชั่วคราว (table `sales` มี 6 row) ก่อนอื่น สิ่งที่เซิร์ฟเวอร์ได้รับจริงสำหรับชื่ออันตราย สร้างใน SQL ด้วย `format`:
+
+```sql
+-- sql/injection-built-sql.sql
+SELECT format($f$INSERT INTO authors (name, born) VALUES ('%s', %s)$f$,
+              $p$x', 1); DELETE FROM sales; --$p$, 1990) AS what_the_server_receives;
+```
+
+```text
+                            what_the_server_receives                             
+---------------------------------------------------------------------------------
+ INSERT INTO authors (name, born) VALUES ('x', 1); DELETE FROM sales; --', 1990)
+(1 row)
+```
+
+statement แรก insert author ไร้พิษภัย `x` statement ที่สองลบทุก sale และ `--` คอมเมนต์ส่วนที่เหลือ ทีนี้โปรแกรมจริง: แม้ชื่อที่ถูกต้องที่มีเครื่องหมายอะพอสโทรฟีก็ทำให้พัง (`42601`) ชื่ออันตรายทำให้ `sales` ว่าง และเวอร์ชัน placeholder เก็บข้อความอันตรายเดียวกันเป็นข้อมูลธรรมดาและไม่แตะ `sales`:
+
+```text
+$ node inj.mjs        # pg 8.23.0, scratch database with 6 rows in sales
+sales rows before: 6
+O'Brien -> 42601 syntax error at or near "Brien"
+sales rows after unsafe insert: 0
+sales rows restored: 6
+sales rows after safe insert: 6
+[
+  { id: '1', name: 'x' },
+  { id: '2', name: "x', 1); DELETE FROM sales; --" },
+  { id: '3', name: "O'Brien" }
+]
+```
+
+วิธีแก้คือส่งค่าแยกจาก SQL เซิร์ฟเวอร์จึงไม่เคย parse ค่าเป็น SQL:
+
+```js
+async function addAuthor(name, born) {
+  await pool.query(
+    'INSERT INTO authors (name, born) VALUES ($1, $2)',
+    [name, born],
+  );
+}
+```
+
+ใน `psql` แนวคิดเดียวกันคือ `PREPARE` / `EXECUTE` (driver ใช้สิ่งเทียบเท่าระดับโปรโตคอล) สตริงอันตรายถูกเก็บตามตัวอักษร และ `sales` ยังมี 6 row (rollback เพื่อรักษาชุดข้อมูลให้ครบ):
+
+```sql
+-- sql/injection-safe.sql
+BEGIN;
+PREPARE add_author (text, int) AS
+  INSERT INTO authors (name, born) VALUES ($1, $2);
+EXECUTE add_author($p$x', 1); DELETE FROM sales; --$p$, 1990);
+SELECT name FROM authors WHERE born = 1990 ORDER BY id;
+SELECT count(*) AS sales_rows FROM sales;
+ROLLBACK;
+DEALLOCATE add_author;
+```
+
+```text
+BEGIN
+PREPARE
+INSERT 0 1
+             name              
+-------------------------------
+ Sela Vance
+ x', 1); DELETE FROM sales; --
+(2 rows)
+
+ sales_rows 
+------------
+          6
+(1 row)
+
+ROLLBACK
+DEALLOCATE
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`INSERT` คือคำขอไปยังเซิร์ฟเวอร์ และทุกอย่างที่คุณละไว้ schema เป็นผู้ตัดสิน: `DEFAULT`, การสร้าง identity หรือ `NULL` คำสั่งที่คุณเขียนเลือก *โปรไฟล์ต้นทุน*: ทุก statement คือ round trip และทุก transaction คือ commit การ batch ไม่ว่าใน statement เดียวหรือ transaction เดียว เปลี่ยนสองตัวเลขนั้น และนั่นคือเรื่องความเร็วทั้งหมด placeholder แยก *โค้ด* ออกจาก *ข้อมูล* เซิร์ฟเวอร์จึงไม่มีวันสับสนสองอย่างนี้
 
 ## เคล็ดลับและข้อควรระวัง
 
-- ส่งค่าผ่าน placeholder ของ driver (`$1`, `%s`) เสมอ การสร้าง SQL ด้วยการต่อ string เปิดทางให้ SQL injection และพังเมื่อเจออัญประกาศหรืออักขระพิเศษ
-- เมื่อใช้ primary key แบบ `IDENTITY` (หรือ `serial`) อย่าให้ค่า id เอง — ปล่อยให้ PostgreSQL สร้างให้ แล้วอ่านกลับมาด้วย `RETURNING`
-- การ insert หลาย row เป็นคำสั่งเดียวและ round trip เดียว ดังนั้นจึงเร็วกว่าการวน loop insert ทีละ row อย่างมาก
-- column ที่ไม่มีค่าและไม่มี default ต้องอนุญาตให้เป็น `NULL` ได้ มิฉะนั้น insert จะล้มเหลวด้วย not-null violation
+- ส่งค่าผ่าน placeholder ของ driver (`$1`, `%s`) เสมอ การสร้าง SQL ด้วยการต่อสตริงเชื้อเชิญ SQL injection และพังกับเครื่องหมายคำพูดหรืออักขระพิเศษ
+- กับ primary key แบบ `IDENTITY` (หรือ `serial`) อย่าใส่ id เอง ให้ PostgreSQL สร้างแล้วอ่านกลับด้วย `RETURNING`
+- insert หลาย row คือ statement เดียวและ round trip เดียว `COPY` เร็วกว่าอีกสำหรับโหลดใหญ่ (วัดข้างบน)
+- insert ที่ล้มเหลวและที่ถูก rollback ก็ยังใช้ค่า identity ไป id จึงมีช่องว่าง
+- column ที่ไม่มีค่าและไม่มี default ต้องอนุญาต `NULL` ไม่เช่นนั้น insert ล้มเหลวด้วย not-null violation
 
 <Callout title="RETURNING คือเพื่อนของคุณ">
-`RETURNING` เปลี่ยนการเขียน (write) ให้กลายเป็น write บวก read ในคำสั่งเดียว ช่วยตัด `SELECT` ที่ต้องตามมาทิ้ง และเลี่ยง race condition เพราะค่าที่คุณได้กลับมาคือค่าที่ insert นี้สร้างขึ้นเป๊ะ ๆ
+`RETURNING` เปลี่ยนการเขียนเป็นการเขียนบวกอ่านใน statement เดียว มันเลี่ยง `SELECT` ตามหลังและเลี่ยง race condition เพราะค่าที่ได้กลับมาคือค่าที่ insert นี้สร้างเป๊ะ
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `RETURNING` หลัง `INSERT` | ได้ค่าที่ถูกสร้างขึ้น (เช่น `id`) กลับมาใน round trip เดียว ไม่มี race condition | ต้องจำ syntax เพิ่มเติม และบาง driver ต้องอ่านผลลัพธ์แบบ query แทน exec ธรรมดา |
-| แยก `SELECT` มาทีหลัง | เขียนง่าย เข้าใจง่ายสำหรับมือใหม่ | เดินทางไป-กลับเพิ่มอีกครั้ง และมี race condition ถ้ามี insert อื่นแทรกระหว่างนั้น |
-| `INSERT` หลาย row ในคำสั่งเดียว | เร็ว เพราะเป็น round trip เดียว | คำสั่งยาวขึ้น และ error ของ row เดียวอาจทำให้ทั้งคำสั่งล้มเหลว |
-| วน loop insert ทีละ row | โค้ดอ่านง่าย ทีละขั้นตอน | ช้ามาก เพราะเดินทางไป-กลับ N ครั้งสำหรับ N row |
+| `RETURNING` หลัง `INSERT` | รับค่าที่ถูกสร้าง (เช่น `id`) กลับใน round trip เดียว ไม่มี race condition | มี syntax ให้จำเพิ่ม และบาง driver ต้องอ่านผลเป็น query แทน exec ธรรมดา |
+| `SELECT` แยกทีหลัง | เรียบง่ายและผู้เริ่มต้นตามได้ง่าย | เพิ่ม round trip และมี race condition ถ้ามี insert อื่นแทรกเข้ามา |
+| `INSERT` หลาย row ใน statement เดียว | เร็ว — round trip เดียว (34 ms สำหรับ 50,000 row ข้างบน) | statement ยาวขึ้น และ row เสียหนึ่งแถวทำให้ทั้ง statement ล้มได้ |
+| `COPY` / `\copy` | ทางลัด bulk ที่เร็วที่สุด (15 ms สำหรับ 50,000 row ข้างบน) | ต้องมีไฟล์หรือ stream แบบ CSV/text จัดการ error ได้ยืดหยุ่นน้อยกว่า |
+| ลูป insert ทีละ row | อ่านง่าย ทีละขั้น | 6.6 วินาทีสำหรับ 50,000 row เดียวกัน (autocommit), 3.4 วินาทีใน transaction เดียว |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **วน loop รัน `INSERT` ทีละ row แทนที่จะรวมเป็นคำสั่งเดียว** — ทำให้เสีย network round-trip ต่อ row ควรใช้ multi-row `INSERT`, `executemany`, หรือ bulk copy (`COPY`/`CopyFrom`) แทน
-- **เอา input ของผู้ใช้มาต่อ (concatenate) เข้ากับ SQL string ตรง ๆ** — เปิดช่องให้เกิด SQL injection ให้ส่งค่าผ่าน placeholder (`$1`, `%s`) เสมอ
-- **ลืมว่า column เป็น `NOT NULL` และไม่มี `DEFAULT`** — insert จะล้มเหลวด้วย not-null violation ตรวจ schema ก่อนเขียน insert หรือใส่ค่าให้ครบทุก column ที่จำเป็น
-
-> 💡 ตัวอย่างจากของจริง
->
-> **งาน throughput สูง** — งาน insert ทั่วไปในแอปส่วนใหญ่ผ่าน ORM (เช่น ActiveRecord) เพื่อความสะดวกและ maintainability แต่ในจุดที่ throughput สูง เช่น event ingestion หรือ audit log ทีมมักจะลง SQL มือพร้อม `RETURNING` และ multi-row insert เพื่อลด round-trip
->
-> **ระบบ bulk import ไฟล์ CSV ของผู้ใช้** — ใช้ `COPY` หรือ multi-row `INSERT` แทนการวน insert ทีละ row เพื่อให้ import ไฟล์หลักแสน row เสร็จในไม่กี่วินาทีแทนที่จะเป็นหลักนาที
+- **"การ batch ช่วยเฉพาะบนเครือข่ายช้า"** มันช่วยหลายร้อยเท่าแม้ผ่าน local socket เพราะแต่ละ statement ต้องจ่าย commit ด้วย (6.6 วินาที กับ 3.4 วินาที กับ 34 ms ข้างบน)
+- **"escape เครื่องหมายคำพูดก็พอจะปลอดภัย"** placeholder คือทางแก้ การ escape ด้วยมือคือที่มาของ bug injection (ความล้มเหลวของ `O'Brien` ข้างบนเป็นเวอร์ชันที่เป็นมิตร)
+- **"`RETURNING` ต้องใช้ query ที่สอง"** มันเป็นส่วนของ statement เดียวกัน แม้กับหลาย row
+- **"insert ที่ rollback ไม่ทิ้งร่องรอย"** row หายไป แต่ค่า identity ถูกใช้ไป (temp author ใช้ 4)
+- **"`DEFAULT` กับการละ column ต่างกัน"** เหมือนกัน `DEFAULT` แค่ทำให้รายการ column ครบชัดเจน
 
 export const quizInsert = [
   {
-    q: 'จะอ่านค่า id ที่ server สร้างให้ทันทีหลัง insert ได้อย่างไร?',
+    q: 'คุณอ่าน id ที่เซิร์ฟเวอร์สร้างทันทีหลัง insert ได้อย่างไร?',
     options: [
-      'รัน SELECT max(id) แยกอีกทีทีหลัง',
-      'ต่อ RETURNING id ท้าย INSERT',
-      'อ่านจาก connection object ของ driver',
-      'อ่านไม่ได้ — id ถูกซ่อนไว้',
+      'รัน SELECT max(id) แยกทีหลัง',
+      'ต่อท้าย INSERT ด้วย RETURNING id',
+      'อ่านจาก object การเชื่อมต่อของ driver',
+      'ทำไม่ได้ — id ถูกซ่อน',
     ],
     answer: 1,
+    explain: '`RETURNING id` ส่งค่าที่สร้างกลับใน statement เดียวกัน `SELECT max(id)` มี race กับ insert พร้อมกัน',
   },
   {
-    q: 'column หนึ่งมี DEFAULT 0 และเป็น NOT NULL จะเกิดอะไรขึ้นถ้าไม่ใส่ column นั้นใน column list?',
+    q: 'column หนึ่งมี DEFAULT 0 และเป็น NOT NULL จะเกิดอะไรขึ้นถ้าละมันจากรายการ column?',
     options: [
       'insert ล้มเหลว',
       'column ถูกตั้งเป็น NULL',
-      'column ใช้ค่า default คือ 0',
-      'PostgreSQL ถามหาค่าจากเรา',
+      'column ใช้ค่า default เป็น 0',
+      'PostgreSQL ถามให้ใส่ค่า',
     ],
     answer: 2,
+    explain: 'column ที่ละไว้ใช้ DEFAULT ของมัน row `Unlinked Draft` ในบทเรียนแสดง `copies_sold = 0`',
   },
   {
-    q: 'ทำไมถึงควรส่งค่าผ่าน placeholder ($1, %s) แทนการ concatenate เข้าไปใน SQL string ตรง ๆ?',
+    q: 'ทำไมจึงส่งค่าเป็น placeholder ($1, %s) แทนการต่อเข้าไปในสตริง SQL?',
     options: [
       'รันเร็วกว่าในทุกกรณี',
-      'ช่วยเลี่ยง SQL injection และคง type ให้ถูกต้อง',
-      'เป็นข้อบังคับของ SQL standard',
-      'ทำให้ข้าม column list ได้',
+      'หลีกเลี่ยง SQL injection และรักษา type ให้ถูกต้อง',
+      'มาตรฐาน SQL บังคับ',
+      'ทำให้ข้ามรายการ column ได้',
     ],
     answer: 1,
+    explain: 'ด้วยการต่อสตริง ชื่ออย่าง `x\', 1); DELETE FROM sales; --` กลายเป็น SQL และทำให้ table ว่างในบทเรียน แต่เป็น parameter ที่ bind มันถูกเก็บเป็นข้อความ',
+  },
+  {
+    q: 'คุณ insert ลง table ที่ id เป็น `GENERATED ALWAYS AS IDENTITY` และระบุ `id = 10` จะเกิดอะไรขึ้น?',
+    options: [
+      'row ถูก insert ด้วย id 10',
+      'ERROR: cannot insert a non-DEFAULT value into column "id" (SQLSTATE 428C9)',
+      'PostgreSQL เมิน 10 แล้วสร้าง id เอง',
+      'sequence ของ identity ถูกรีเซ็ตเป็น 10',
+    ],
+    answer: 1,
+    explain: 'ALWAYS ปฏิเสธค่าที่ระบุเอง เว้นแต่คุณเพิ่ม `OVERRIDING SYSTEM VALUE` ส่วน `GENERATED BY DEFAULT` จะรับ',
+  },
+  {
+    q: 'วิธีใดโหลด 50,000 row ได้เร็วที่สุดในการวัดของบทเรียน?',
+    options: [
+      'ลูปของ INSERT ทีละ row แบบ autocommit',
+      'ลูปเดียวกันภายใน transaction เดียว',
+      'INSERT หลาย row เดียว หรือ COPY',
+      'ใช้เวลาเท่ากันทั้งหมด',
+    ],
+    answer: 2,
+    explain: 'ราว 6.6 วินาที, 3 วินาที และ 34 ms / 15 ms ตามลำดับบน Mac ของผู้เขียน การ batch ลบ round trip ต่อ statement และ commit ต่อ row',
   },
 ];
 
