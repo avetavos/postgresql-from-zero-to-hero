@@ -1,6 +1,6 @@
 ---
-title: Join
-description: รวม row จากสอง table ด้วย INNER JOIN แล้วเก็บ row ที่ไม่มีคู่ที่ตรงกันด้วย LEFT, RIGHT, และ FULL OUTER JOIN — ว่าด้วยสิ่งที่ ON clause จับคู่และความหมายของ NULL ใน outer join
+title: Joins
+description: รวม row จากสอง table ด้วย INNER, LEFT, RIGHT และ FULL join แล้วไปต่อ — ON กับ WHERE, USING, กับดัก NATURAL JOIN, LATERAL, semi และ anti join และสามอัลกอริทึม join ใน EXPLAIN จริง
 sidebar:
   order: 2
 ---
@@ -10,18 +10,51 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-ปัญหาที่เจอจริง: ข้อมูลที่เกี่ยวข้องกันมักถูกแยกเก็บไว้คนละ table เพื่อลดความซ้ำซ้อน แต่งานจริงมักต้องเห็นข้อมูลรวมกัน — join รับสอง table มาจับคู่ row ตามกฎที่คุณเขียนใน `ON` clause เพราะหนังสือเก็บ `id` ของผู้เขียนไว้ คุณจึงสั่งให้ PostgreSQL เดินตามการเชื่อมโยงนั้นและผลิต row ที่บรรจุ column จากทั้งสอง table พร้อมกันได้ ทางเลือกเดียวที่คุณต้องตัดสินใจจริง ๆ คือจะทำอย่างไรกับ row ที่ไม่มีคู่ที่ตรงกันในอีกฝั่ง — และนั่นแหละคือสิ่งที่แยกประเภทของ join ออกจากกัน
+join นำสอง table มาจับคู่ row ตามกฎที่คุณเขียนใน clause `ON` เพราะหนังสือเก็บ `id` ของผู้เขียน คุณจึงสั่งให้ PostgreSQL เดินตามลิงก์นั้นและสร้าง row ที่มี column จากทั้งสอง table พร้อมกันได้ ตัวเลือกจริงเพียงอย่างเดียวคือจะทำอย่างไรกับ row ที่ไม่มีคู่อีกฝั่ง และนั่นคือสิ่งที่แยกชนิดของ join ออกจากกัน
 
-เรายังคงใช้ table `authors`, `books`, และ `sales` ต่อไป
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ผลลัพธ์คัดลอกจาก `psql` และตัวเลขเวลาใน plan มาจาก Mac เครื่องนี้
+
+## ชุดข้อมูล
+
+นี่คือชุดข้อมูลมาตรฐานของคอร์ส ทุกบทเรียนใน module นี้เริ่มจากสาม table เดียวกัน คุณจึงวางบล็อกนี้ในฐานข้อมูลเปล่าแล้วได้ผลลัพธ์ตรงกับที่แสดงเป๊ะ Sela Vance ไม่มีหนังสือ และ *Unlinked Draft* ไม่มีผู้เขียน: row ที่ไม่มีคู่สองแบบที่ทำให้ join น่าสนใจ
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## INNER JOIN: เฉพาะ row ที่ตรงกัน
 
-`INNER JOIN` คืน row ที่รวมกันหนึ่ง row สำหรับทุกคู่ที่เงื่อนไข `ON` เป็นจริง row ฝั่งใดก็ตามที่ไม่เจอคู่จะถูกทิ้งไปเฉย ๆ นี่คือ join ที่คุณหยิบมาใช้บ่อยที่สุด
+`INNER JOIN` คืนหนึ่ง row ที่รวมกันสำหรับทุกคู่ที่เงื่อนไข `ON` เป็นจริง row ฝั่งใดที่หาคู่ไม่เจอจะถูกทิ้ง นี่คือ join ที่คุณใช้บ่อยที่สุด
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/inner-join.sql
     SELECT b.title, a.name AS author
     FROM books AS b
     INNER JOIN authors AS a ON a.id = b.author_id
@@ -36,7 +69,6 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
       INNER JOIN authors AS a ON a.id = b.author_id
       ORDER BY b.title
     `);
-    console.log(res.rows);
     ```
   </TabItem>
   <TabItem label="Python">
@@ -57,6 +89,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
       FROM books AS b
       INNER JOIN authors AS a ON a.id = b.author_id
       ORDER BY b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -74,27 +107,28 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
-      title       |    author
-------------------+---------------
- Quiet Harbors    | Mara Linde
- The Glass Orchard| Mara Linde
- Tidal Notes      | Owen Pryce
+       title       |   author   
+-------------------+------------
+ Quiet Harbors     | Mara Linde
+ The Glass Orchard | Mara Linde
+ Tidal Notes       | Owen Pryce
 (3 rows)
 ```
 
-ผู้เขียนที่ไม่มีหนังสือ หรือหนังสือที่ `author_id` ไม่ตรงกับผู้เขียนคนใดเลย จะไม่มีวันปรากฏในผลลัพธ์นี้
+Sela Vance (ไม่มีหนังสือ) และ *Unlinked Draft* (ไม่มีผู้เขียน) ไม่ปรากฏในผลลัพธ์นี้
 
-## LEFT JOIN: เก็บทุก row ทางฝั่งซ้าย
+## LEFT JOIN: เก็บทุก row ฝั่งซ้าย
 
-`LEFT OUTER JOIN` (คีย์เวิร์ด `OUTER` ใส่หรือไม่ก็ได้) เก็บทุก row จาก table ฝั่งซ้ายไว้แม้จะไม่มีคู่ที่ตรงกันในฝั่งขวา column ฝั่งขวาจะถูกเติมด้วย `NULL` สำหรับ row ที่ไม่มีคู่เหล่านั้น นี่คือวิธีที่คุณจะแสดงรายชื่อผู้เขียนและดูว่าใครยังไม่มีหนังสือเลย
+`LEFT OUTER JOIN` (คำว่า `OUTER` เป็นทางเลือก) เก็บทุก row จาก table ฝั่งซ้ายแม้ฝั่งขวาไม่มีคู่ column ฝั่งขวาถูกเติม `NULL` สำหรับ row ที่ไม่มีคู่ วิธีนี้ใช้ list ผู้เขียนและดูว่าใครยังไม่มีหนังสือ
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/left-join.sql
     SELECT a.name AS author, b.title
     FROM authors AS a
     LEFT JOIN books AS b ON b.author_id = a.id
-    ORDER BY a.name;
+    ORDER BY a.name, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -103,7 +137,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
       SELECT a.name AS author, b.title
       FROM authors AS a
       LEFT JOIN books AS b ON b.author_id = a.id
-      ORDER BY a.name
+      ORDER BY a.name, b.title
     `);
     ```
   </TabItem>
@@ -113,7 +147,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
         SELECT a.name AS author, b.title
         FROM authors AS a
         LEFT JOIN books AS b ON b.author_id = a.id
-        ORDER BY a.name
+        ORDER BY a.name, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -124,7 +158,8 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
       SELECT a.name AS author, b.title
       FROM authors AS a
       LEFT JOIN books AS b ON b.author_id = a.id
-      ORDER BY a.name`)
+      ORDER BY a.name, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -133,7 +168,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
         "SELECT a.name AS author, b.title
          FROM authors AS a
          LEFT JOIN books AS b ON b.author_id = a.id
-         ORDER BY a.name",
+         ORDER BY a.name, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -142,28 +177,29 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
-    author     |       title
----------------+-------------------
- Mara Linde    | Quiet Harbors
- Mara Linde    | The Glass Orchard
- Owen Pryce    | Tidal Notes
- Sela Vance    |
+   author   |       title       
+------------+-------------------
+ Mara Linde | Quiet Harbors
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+ Sela Vance | 
 (4 rows)
 ```
 
-Sela Vance ยังไม่ได้เขียนหนังสือเลย row ของเธอจึงยังอยู่รอดโดยมี `title` เป็น `NULL` เจ้า `NULL` นั้นคือ join ที่กำลังบอกว่า "row ฝั่งซ้ายมีอยู่ แต่ไม่มีอะไรตรงกันในฝั่งขวา"
+Sela Vance ยังไม่เคยเขียนหนังสือ row ของเธอจึงอยู่รอดพร้อม title เป็น `NULL` `NULL` นั้นคือ join บอกว่า "row ฝั่งซ้ายมีอยู่ แต่ฝั่งขวาไม่มีอะไรตรง"
 
 ## RIGHT และ FULL OUTER JOIN
 
-`RIGHT JOIN` คือภาพสะท้อนกลับด้าน คือเก็บทุก row จาก table ฝั่งขวาและเติมฝั่งซ้ายด้วย `NULL` ตรงที่ไม่มีคู่ที่ตรงกัน `A RIGHT JOIN B` ผลิต row ออกมาเหมือนกับ `B LEFT JOIN A` หลายคนจึงเขียนแต่ `LEFT JOIN` เท่านั้น ส่วน `FULL OUTER JOIN` เก็บ row ที่ไม่มีคู่จากทั้งสองฝั่งพร้อมกัน
+`RIGHT JOIN` เป็นภาพสะท้อน: เก็บทุก row จาก table ฝั่งขวาและเติม `NULL` ฝั่งซ้ายเมื่อไม่มีคู่ `A RIGHT JOIN B` ให้ row เดียวกับ `B LEFT JOIN A` หลายคนจึงเขียนแต่ `LEFT JOIN` ส่วน `FULL OUTER JOIN` เก็บ row ที่ไม่มีคู่จากทั้งสองฝั่งพร้อมกัน
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/full-join.sql
     SELECT a.name AS author, b.title
     FROM authors AS a
     FULL OUTER JOIN books AS b ON b.author_id = a.id
-    ORDER BY a.name;
+    ORDER BY a.name, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -172,7 +208,7 @@ Sela Vance ยังไม่ได้เขียนหนังสือเล
       SELECT a.name AS author, b.title
       FROM authors AS a
       FULL OUTER JOIN books AS b ON b.author_id = a.id
-      ORDER BY a.name
+      ORDER BY a.name, b.title
     `);
     ```
   </TabItem>
@@ -182,7 +218,7 @@ Sela Vance ยังไม่ได้เขียนหนังสือเล
         SELECT a.name AS author, b.title
         FROM authors AS a
         FULL OUTER JOIN books AS b ON b.author_id = a.id
-        ORDER BY a.name
+        ORDER BY a.name, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -193,7 +229,8 @@ Sela Vance ยังไม่ได้เขียนหนังสือเล
       SELECT a.name AS author, b.title
       FROM authors AS a
       FULL OUTER JOIN books AS b ON b.author_id = a.id
-      ORDER BY a.name`)
+      ORDER BY a.name, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -202,7 +239,7 @@ Sela Vance ยังไม่ได้เขียนหนังสือเล
         "SELECT a.name AS author, b.title
          FROM authors AS a
          FULL OUTER JOIN books AS b ON b.author_id = a.id
-         ORDER BY a.name",
+         ORDER BY a.name, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -211,80 +248,587 @@ Sela Vance ยังไม่ได้เขียนหนังสือเล
 </Tabs>
 
 ```text
-    author     |       title
----------------+-------------------
- Mara Linde    | Quiet Harbors
- Mara Linde    | The Glass Orchard
- Owen Pryce    | Tidal Notes
- Sela Vance    |
-               | Unlinked Draft
+   author   |       title       
+------------+-------------------
+ Mara Linde | Quiet Harbors
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+ Sela Vance | 
+            | Unlinked Draft
 (5 rows)
 ```
 
-row สุดท้ายคือหนังสือที่ `author_id` ไม่ได้ชี้ไปยังผู้เขียนคนใด ฝั่งผู้เขียนจึงเป็น `NULL` full join เป็น join แบบเดียวที่เผย row แบบนี้ออกมาพร้อมกับผู้เขียนที่ไม่มีหนังสือ
+row สุดท้ายคือหนังสือที่ `author_id` เป็น `NULL` ฝั่งผู้เขียนจึงเป็น `NULL` full join เป็น join เดียวที่แสดงมันคู่กับผู้เขียนที่ไม่มีหนังสือ
+
+สาม query เดียวกัน รันครั้งเดียวจากแต่ละ driver กับฐานข้อมูลเดียวกัน (Node.js `pg` 8.23.0, Python `psycopg` 3.3.6, Go `pgx` v5.11.0, Rust `sqlx` 0.9.0) แต่ละตัวรายงานจำนวน row และคู่ `author/title` สังเกตว่าแต่ละ driver สะกด `NULL` ต่างกันอย่างไร:
+
+```text
+$ (each snippet run once against the dataset above)
+[INNER]  Node.js: 3 Quiet Harbors/Mara Linde; The Glass Orchard/Mara Linde; Tidal Notes/Owen Pryce
+[INNER]  Python:  3 Quiet Harbors/Mara Linde; The Glass Orchard/Mara Linde; Tidal Notes/Owen Pryce
+[INNER]  Go:      3 Quiet Harbors/Mara Linde; The Glass Orchard/Mara Linde; Tidal Notes/Owen Pryce;
+[INNER]  Rust:    3 Quiet Harbors/Mara Linde; The Glass Orchard/Mara Linde; Tidal Notes/Owen Pryce
+[LEFT]   Node.js: 4 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/
+[LEFT]   Python:  4 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/None
+[LEFT]   Go:      4 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/<nil>;
+[LEFT]   Rust:    4 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/NULL
+[FULL]   Node.js: 5 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/; /Unlinked Draft
+[FULL]   Python:  5 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/None; None/Unlinked Draft
+[FULL]   Go:      5 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/<nil>; <nil>/Unlinked Draft;
+[FULL]   Rust:    5 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/NULL; NULL/Unlinked Draft
+```
 
 ## แต่ละ join เก็บ row ไหนบ้าง
 
-join ทั้งสี่แบบต่างกันแค่วิธีจัดการกับ row ที่ไม่ผ่านการทดสอบ `ON` เท่านั้น ภาพนี้สรุปว่าใครรอด
+ชนิดของ join ต่างกันเฉพาะวิธีจัดการ row ที่ไม่ผ่านการทดสอบ `ON` ภาพนี้สรุปว่าใครอยู่รอด
 
 export const joinDiagram = `flowchart TD
-  M[Matching rows on both sides] --> INNER[INNER JOIN keeps these only]
-  M --> LEFT[LEFT JOIN keeps these plus unmatched left rows]
-  M --> RIGHT[RIGHT JOIN keeps these plus unmatched right rows]
-  M --> FULL[FULL OUTER JOIN keeps these plus unmatched rows from both sides]`;
+  M["Matching rows on both sides"] --> INNER["INNER JOIN keeps these only"]
+  M --> LEFT["LEFT JOIN keeps these plus unmatched left rows"]
+  M --> RIGHT["RIGHT JOIN keeps these plus unmatched right rows"]
+  M --> FULL["FULL OUTER JOIN keeps these plus unmatched rows from both sides"]`;
 
-<Mermaid code={joinDiagram} title="join แต่ละแบบเก็บอะไรไว้บ้าง" />
+<Mermaid code={joinDiagram} title="join แต่ละชนิดเก็บ row อะไรไว้" />
+
+## ไม่มี ON: syntax error หรือ cross join
+
+`JOIN` ที่ไม่มี `ON` หรือ `USING` ไม่ใช่ cross join แบบเงียบใน PostgreSQL แต่เป็น syntax error:
+
+```sql
+-- @expect-error 42601
+SELECT * FROM authors JOIN books;
+```
+
+```text
+ERROR:  syntax error at or near ";"
+LINE 1: SELECT * FROM authors JOIN books;
+                                        ^
+```
+
+แบบเงียบคือ comma join `FROM a, b` ที่ไม่มี `WHERE` จับคู่ทุก row ซ้ายกับทุก row ขวา (3 ผู้เขียน × 4 หนังสือ = 12) เท่ากับที่ `CROSS JOIN` ตรง ๆ คืน ส่วน join ที่ถูกต้องคืน 3:
+
+```sql
+-- sql/comma-cross.sql
+SELECT count(*) AS comma_join FROM authors, books;
+SELECT count(*) AS cross_join FROM authors CROSS JOIN books;
+SELECT count(*) AS proper_join FROM authors a JOIN books b ON b.author_id = a.id;
+```
+
+```text
+ comma_join 
+------------
+         12
+(1 row)
+
+ cross_join 
+------------
+         12
+(1 row)
+
+ proper_join 
+-------------
+           3
+(1 row)
+```
+
+## ON เทียบกับ WHERE ใน outer join
+
+สำหรับ inner join เงื่อนไขใน `ON` กับเงื่อนไขเดียวกันใน `WHERE` ให้ row เท่ากัน แต่ outer join ไม่ใช่ `ON` ตัดสินว่า row ไหน *ตรงกัน* ส่วน `WHERE` ทำงานทีหลังและลบ row ออกจากผลลัพธ์ รวมถึง row ที่ถูกเติม `NULL` ซึ่ง `LEFT JOIN` เพิ่งอุตส่าห์เก็บไว้
+
+```sql
+-- sql/on-vs-where.sql
+-- filter in ON: every author survives, the filter only limits which books match
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id AND b.published > 2010
+ORDER BY a.name, b.title;
+
+-- same filter in WHERE: the NULL-extended rows are thrown away, it is an INNER JOIN now
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+WHERE b.published > 2010
+ORDER BY a.name, b.title;
+```
+
+```text
+    name    |       title       
+------------+-------------------
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+ Sela Vance | 
+(3 rows)
+
+    name    |       title       
+------------+-------------------
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+(2 rows)
+```
+
+Sela Vance อยู่ในผลลัพธ์แรกและหายไปในผลลัพธ์ที่สอง เวอร์ชัน `WHERE` เปลี่ยน `LEFT JOIN` เป็น `INNER JOIN` เงียบ ๆ เพราะ `NULL > 2010` ไม่เป็นจริง นี่คือ bug ที่หัวข้อ *Reading AI-generated code* ด้านล่างพูดถึง
+
+## USING และเหตุที่ NATURAL JOIN เป็นกับดัก
+
+เมื่อ column ที่ join มีชื่อเดียวกันในทั้งสอง table `USING (col)` เป็นทางลัดของ `ON a.col = b.col` และแสดง column นั้นครั้งเดียวใน `SELECT *` ส่วน `NATURAL JOIN` ไปไกลกว่านั้นและ join บน **ทุก** column ที่ชื่อเหมือนกันในทั้งสอง table โดยไม่มีทางบอกว่าอันไหน ในชุดข้อมูลของเรา `authors.id` และ `books.id` ต่างชื่อ `id` `NATURAL JOIN` จึงเทียบ id ของผู้เขียนกับ id ของ *หนังสือ* และจับคู่ Owen Pryce กับ *The Glass Orchard* ผู้เขียนกับหนังสือที่ไม่เกี่ยวกัน:
+
+```sql
+-- sql/using-natural.sql
+-- USING: the joined column appears once in SELECT *
+SELECT *
+FROM books
+JOIN (SELECT id AS author_id, name FROM authors) AS a USING (author_id)
+ORDER BY books.id;
+
+-- NATURAL JOIN: matches on EVERY same-named column. authors and books both have "id"
+SELECT a.name, b.title
+FROM authors a NATURAL JOIN books b
+ORDER BY a.name;
+```
+
+```text
+ author_id | id |       title       | published | copies_sold |    name    
+-----------+----+-------------------+-----------+-------------+------------
+         1 |  1 | Quiet Harbors     |      2003 |         450 | Mara Linde
+         1 |  2 | The Glass Orchard |      2018 |        1250 | Mara Linde
+         2 |  3 | Tidal Notes       |      2011 |         600 | Owen Pryce
+(3 rows)
+
+    name    |       title       
+------------+-------------------
+ Mara Linde | Quiet Harbors
+ Owen Pryce | The Glass Orchard
+ Sela Vance | Tidal Notes
+(3 rows)
+```
+
+ยิ่งนานยิ่งแย่ เพราะเงื่อนไข join ขึ้นกับชื่อ column ใน table ณ ตอนนี้ เพิ่ม column `author_id` ให้ `authors` (migration ธรรมดามาก) แล้ว `NATURAL JOIN` เดิมต้องการให้ `id` *และ* `author_id` ตรงกัน: ผลลัพธ์หดจาก 3 row เหลือ 1 โดยไม่มี error:
+
+```sql
+-- sql/natural-drift.sql
+-- someone adds a column to both tables, and the NATURAL JOIN silently changes meaning
+BEGIN;
+ALTER TABLE authors ADD COLUMN author_id bigint;
+UPDATE authors SET author_id = id;
+SELECT * FROM books NATURAL JOIN authors ORDER BY books.id;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ALTER TABLE
+UPDATE 3
+ id | author_id |     title     | published | copies_sold |    name    | born 
+----+-----------+---------------+-----------+-------------+------------+------
+  1 |         1 | Quiet Harbors |      2003 |         450 | Mara Linde | 1968
+(1 row)
+
+ROLLBACK
+```
+
+เขียน `ON` ให้ชัด มันเสียแค่ไม่กี่ตัวอักษรและไม่เปลี่ยนความหมายลับหลังคุณ ([เอกสาร PostgreSQL เรื่อง joined tables](https://www.postgresql.org/docs/18/queries-table-expressions.html#QUERIES-JOIN))
+
+## NULL ไม่เท่ากับ NULL ใน ON
+
+เงื่อนไข join เป็น boolean expression ธรรมดา `NULL = NULL` ไม่เป็นจริง สอง row ที่ `author_id` เป็น `NULL` จึงไม่จับคู่กันเองใน self-join ส่วนการเทียบแบบ null-safe `IS NOT DISTINCT FROM` จับคู่ได้:
+
+```sql
+-- sql/null-in-on.sql
+SELECT count(*) AS with_equals
+FROM books x JOIN books y ON x.author_id = y.author_id;
+
+SELECT count(*) AS with_not_distinct
+FROM books x JOIN books y ON x.author_id IS NOT DISTINCT FROM y.author_id;
+```
+
+```text
+ with_equals 
+-------------
+           5
+(1 row)
+
+ with_not_distinct 
+-------------------
+                 6
+(1 row)
+```
+
+ตัวเลข 5 คือสี่คู่ (1,1) บวกหนึ่งคู่ (2,2) ส่วน row ที่เพิ่มใน query ที่สองคือ *Unlinked Draft* จับคู่กับตัวเอง
+
+## LATERAL: subquery ที่มองเห็น row ทางซ้าย
+
+ปกติแต่ละรายการใน `FROM` เป็นอิสระต่อกัน subquery ที่ระบุ `LATERAL` อ้างถึง column ของรายการก่อนหน้าได้ จึงรันหนึ่งครั้งต่อ row ซ้าย ([docs](https://www.postgresql.org/docs/18/queries-table-expressions.html#QUERIES-LATERAL)) ทำให้ "top N ต่อกลุ่ม" เป็น query สั้น ๆ ตรงนี้คือยอดขายสูงสุดของแต่ละเล่ม `LEFT JOIN LATERAL ... ON true` เก็บ *Unlinked Draft* ที่ไม่มียอดขายไว้:
+
+```sql
+-- sql/lateral.sql
+-- the biggest sale for each book; LEFT JOIN LATERAL ... ON true keeps books with no sales
+SELECT b.title, s.region, s.copies
+FROM books b
+LEFT JOIN LATERAL (
+  SELECT region, copies
+  FROM sales
+  WHERE sales.book_id = b.id
+  ORDER BY copies DESC
+  LIMIT 1
+) AS s ON true
+ORDER BY b.id;
+```
+
+```text
+       title       | region | copies 
+-------------------+--------+--------
+ Quiet Harbors     | West   |    400
+ The Glass Orchard | East   |    900
+ Tidal Notes       | West   |    400
+ Unlinked Draft    |        |       
+(4 rows)
+```
+
+`LIMIT 1` ใน subquery คือหัวใจ: join ธรรมดาบอกไม่ได้ว่า "เอาเฉพาะ row แรกของฝั่งขวา ต่อหนึ่ง row ซ้าย"
+
+## Semi join และ anti join
+
+"ผู้เขียนที่มีหนังสืออย่างน้อยหนึ่งเล่ม" และ "ผู้เขียนที่ไม่มีหนังสือ" ไม่ใช่ join จริง ๆ เพราะคุณไม่ต้องการ column จาก table อื่น มันคือตัวกรอง เขียนด้วย `EXISTS` และ `NOT EXISTS` (หรือ `IN` สำหรับอันแรก) planner แปลงเป็น *semi* และ *anti* join ภายใน และต่างจาก join ธรรมดา semi join ไม่คืน row ซ้ายซ้ำสองครั้ง (Mara Linde มีสองเล่มแต่ปรากฏครั้งเดียว):
+
+```sql
+-- sql/semi-anti.sql
+SELECT name FROM authors a
+WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id);
+
+SELECT name FROM authors a
+WHERE NOT EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id);
+```
+
+```text
+    name    
+------------
+ Mara Linde
+ Owen Pryce
+(2 rows)
+
+    name    
+------------
+ Sela Vance
+(1 row)
+```
+
+## สามอัลกอริทึม join ใน plan จริง
+
+`EXPLAIN` แสดงว่า join ถูกรันอย่างไร PostgreSQL มีสามอัลกอริทึมและเลือกตาม cost เพื่อให้เห็นครบทั้งสามเราต้องมีมากกว่าสี่ row หัวข้อนี้จึงสร้าง `customers` 10 000 และ `orders` 200 000 (20 order ต่อลูกค้า มี index บน `orders.customer_id`):
+
+```sql
+-- sql/join-algorithms-setup.sql
+CREATE TABLE customers (
+  id   int PRIMARY KEY,
+  name text NOT NULL
+);
+CREATE TABLE orders (
+  id          int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id int NOT NULL REFERENCES customers (id),
+  total       numeric(10, 2) NOT NULL
+);
+INSERT INTO customers SELECT g, 'customer ' || g FROM generate_series(1, 10000) AS g;
+INSERT INTO orders (customer_id, total)
+SELECT 1 + (g * 7919) % 10000, g % 500 FROM generate_series(1, 200000) AS g;
+CREATE INDEX orders_customer_id_idx ON orders (customer_id);
+ANALYZE customers;
+ANALYZE orders;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 10000
+INSERT 0 200000
+CREATE INDEX
+ANALYZE
+ANALYZE
+```
+
+**Nested Loop**: สำหรับแต่ละ row ของฝั่ง outer ไปค้นฝั่ง inner (ที่นี่ผ่าน index) เหมาะเมื่อฝั่ง outer เล็กมาก ลูกค้าหนึ่งคน 20 order:
+
+```sql
+-- sql/plan-nested-loop.sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT c.name, o.total
+FROM customers c JOIN orders o ON o.customer_id = c.id
+WHERE c.id = 42;
+```
+
+```text
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=4.74..85.05 rows=20 width=17) (actual time=0.041..0.123 rows=20.00 loops=1)
+   Buffers: shared hit=23 read=2
+   ->  Index Scan using customers_pkey on customers c  (cost=0.29..8.30 rows=1 width=17) (actual time=0.007..0.007 rows=1.00 loops=1)
+         Index Cond: (id = 42)
+         Index Searches: 1
+         Buffers: shared hit=3
+   ->  Bitmap Heap Scan on orders o  (cost=4.45..76.54 rows=20 width=8) (actual time=0.032..0.110 rows=20.00 loops=1)
+         Recheck Cond: (customer_id = 42)
+         Heap Blocks: exact=20
+         Buffers: shared hit=20 read=2
+         ->  Bitmap Index Scan on orders_customer_id_idx  (cost=0.00..4.45 rows=20 width=0) (actual time=0.020..0.020 rows=20.00 loops=1)
+               Index Cond: (customer_id = 42)
+               Index Searches: 1
+               Buffers: shared read=2
+ Planning:
+   Buffers: shared hit=112 read=1
+ Planning Time: 0.360 ms
+ Execution Time: 0.166 ms
+(18 rows)
+```
+
+การ scan ฝั่ง outer คืน 1 row (`rows=1.00`, `loops=1`) แล้ว bitmap probe หนึ่งครั้งเจอ 20 order รันเสร็จใน 0.17 ms บน Mac เครื่องนี้ สังเกตรายละเอียดของ PG 18: `rows=20.00` (จำนวน row จริงแสดงเป็นค่าเฉลี่ยทศนิยม), `Index Searches: 1` และบรรทัด `Planning: Buffers`
+
+**Hash Join**: สร้าง hash table บนฝั่งที่เล็กกว่า scan ฝั่งใหญ่หนึ่งรอบแล้ว probe เป็นค่าเริ่มต้นเมื่อ join ทุกอย่างกับทุกอย่าง:
+
+```sql
+-- sql/plan-hash-join.sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT c.id, sum(o.total)
+FROM customers c JOIN orders o ON o.customer_id = c.id
+GROUP BY c.id;
+```
+
+```text
+                                                             QUERY PLAN                                                             
+------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=4896.22..5021.22 rows=10000 width=36) (actual time=96.175..97.616 rows=10000.00 loops=1)
+   Group Key: c.id
+   Batches: 1  Memory Usage: 3857kB
+   Buffers: shared hit=1146
+   ->  Hash Join  (cost=289.00..3896.22 rows=200000 width=8) (actual time=1.829..54.991 rows=200000.00 loops=1)
+         Hash Cond: (o.customer_id = c.id)
+         Buffers: shared hit=1146
+         ->  Seq Scan on orders o  (cost=0.00..3082.00 rows=200000 width=8) (actual time=0.008..12.607 rows=200000.00 loops=1)
+               Buffers: shared hit=1082
+         ->  Hash  (cost=164.00..164.00 rows=10000 width=4) (actual time=1.779..1.779 rows=10000.00 loops=1)
+               Buckets: 16384  Batches: 1  Memory Usage: 480kB
+               Buffers: shared hit=64
+               ->  Seq Scan on customers c  (cost=0.00..164.00 rows=10000 width=4) (actual time=0.006..0.656 rows=10000.00 loops=1)
+                     Buffers: shared hit=64
+ Planning:
+   Buffers: shared hit=148 read=1
+ Planning Time: 0.616 ms
+ Execution Time: 98.217 ms
+(18 rows)
+```
+
+ทั้งสอง table ถูกอ่านหนึ่งรอบ (`Seq Scan`) ลูกค้า 10 000 คนถูก hash ใน 480 kB (`Batches: 1` แปลว่าพอดีใน `work_mem`) และ row ที่ join แล้ว 200 000 ออกมาในราว 38 ms ส่วน aggregate ด้านบนทำให้รวมเป็น 68 ms
+
+**Merge Join**: เดินสอง input ที่เรียงตาม join key ทั้งคู่ไปพร้อมกัน planner ไม่ได้เลือกมันข้างบน เพื่อดูสักครั้ง บล็อกถัดไปห้ามอีกสองอัลกอริทึมใน transaction เดียวด้วย `SET LOCAL` นี่คือสวิตช์สำหรับสอนเท่านั้น ไม่ใช่วิธีแก้ใน production:
+
+```sql
+-- sql/plan-merge-join.sql
+-- teaching switch only: forbid the two cheaper choices to see the third one
+BEGIN;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_nestloop = off;
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT c.id, sum(o.total)
+FROM customers c JOIN orders o ON o.customer_id = c.id
+GROUP BY c.id;
+ROLLBACK;
+```
+
+```text
+BEGIN
+SET
+SET
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
+ GroupAggregate (actual time=0.097..115.201 rows=10000.00 loops=1)
+   Group Key: c.id
+   Buffers: shared hit=200096 read=187
+   ->  Merge Join (actual time=0.017..96.338 rows=200000.00 loops=1)
+         Merge Cond: (c.id = o.customer_id)
+         Buffers: shared hit=200096 read=187
+         ->  Index Only Scan using customers_pkey on customers c (actual time=0.008..1.629 rows=10000.00 loops=1)
+               Heap Fetches: 10000
+               Index Searches: 1
+               Buffers: shared hit=93
+         ->  Index Scan using orders_customer_id_idx on orders o (actual time=0.006..74.123 rows=200000.00 loops=1)
+               Index Searches: 1
+               Buffers: shared hit=200003 read=187
+ Planning:
+   Buffers: shared hit=149
+ Planning Time: 0.365 ms
+ Execution Time: 115.575 ms
+(17 rows)
+
+ROLLBACK
+```
+
+ตรงนี้ช้ากว่า (120 ms เทียบกับ 68 ms) เพราะการได้ orders เรียงตาม `customer_id` หมายถึง index lookup ลง heap 200 000 ครั้ง (`Buffers: shared hit=200096`) merge join เด่นเมื่อสอง input มาถึงแบบเรียงแล้วด้วยต้นทุนต่ำ หรือเมื่อยังไงก็ต้อง `Sort` อยู่แล้ว
+
+semi และ anti join ปรากฏใน plan เป็น node ของ join เช่นกัน `EXPLAIN` ของตัวกรอง `EXISTS` และ `NOT EXISTS` บน table เดียวกัน:
+
+```sql
+-- sql/plan-semi-anti.sql
+EXPLAIN (COSTS OFF)
+SELECT c.id FROM customers c
+WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.total > 498);
+
+EXPLAIN (COSTS OFF)
+SELECT c.id FROM customers c
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.total > 498);
+```
+
+```text
+                      QUERY PLAN                      
+------------------------------------------------------
+ Hash Join
+   Hash Cond: (c.id = o.customer_id)
+   ->  Seq Scan on customers c
+   ->  Hash
+         ->  HashAggregate
+               Group Key: o.customer_id
+               ->  Seq Scan on orders o
+                     Filter: (total > '498'::numeric)
+(8 rows)
+
+                QUERY PLAN                
+------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (o.customer_id = c.id)
+   ->  Seq Scan on orders o
+         Filter: (total > '498'::numeric)
+   ->  Hash
+         ->  Seq Scan on customers c
+(6 rows)
+```
+
+`EXISTS` กลายเป็น `Hash Join` กับ `HashAggregate` ของ `customer_id` ที่เข้าเงื่อนไข (การกำจัดค่าซ้ำคือสิ่งที่ทำให้มันทำตัวเป็น semi join) ส่วน `NOT EXISTS` กลายเป็น `Hash Right Anti Join` ไม่มีตัวไหนเป็น subquery ต่อ row
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอ "ผู้เขียนทุกคน พร้อมหนังสือที่ตีพิมพ์หลังปี 2010" และเขียน query ที่ดูถูกต้อง:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "list every author with their books published after 2010"
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+WHERE b.published > 2010;`}>
+
+เจตนาคือ `LEFT JOIN` (ผู้เขียนทุกคน) แต่ตัวกรองอยู่ใน `WHERE` หลัง join row ของ Sela Vance มี `b.published = NULL` `NULL > 2010` ไม่เป็นจริง และ row ถูกกรองทิ้ง query คืนสอง row ไม่ใช่สาม และไม่มี error ใด ๆ:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+WHERE b.published > 2010;
+```
+
+```text
+    name    |       title       
+------------+-------------------
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+(2 rows)
+```
+
+วิธีแก้คือย้ายเงื่อนไขที่อธิบายว่า *หนังสือเล่มไหนตรงกัน* เข้าไปใน `ON` เพื่อให้ผู้เขียนที่ไม่มีหนังสือที่ตรงยังคงมี row ที่เติม `NULL`:
+
+```sql
+-- sql/stb-fixed.sql
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id AND b.published > 2010
+ORDER BY a.name, b.title;
+```
+
+```text
+    name    |       title       
+------------+-------------------
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+ Sela Vance | 
+(3 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+join คือ cross product ที่ผ่านตัวกรอง: ในเชิงแนวคิดทุก row ซ้ายถูกจับคู่กับทุก row ขวา และเงื่อนไข `ON` เก็บคู่ที่ผ่าน outer join เพิ่มหนึ่งขั้นตอน *หลัง* การทดสอบนั้น: row ซ้าย (หรือขวา หรือทั้งคู่) ที่จบโดยไม่มีคู่จะถูกเพิ่มกลับพร้อม `NULL` ส่วน `WHERE` ทำงานหลังทั้งหมดนั้น ส่วนที่เหลือในบทนี้ (`USING`, `LATERAL`, semi join) คือรูปแปรของการเลือกว่าคู่ไหนถูกเก็บ และอัลกอริทึม (nested loop, hash, merge) คือสามวิธีคำนวณผลลัพธ์เดียวกันโดยไม่ต้องสร้าง product เต็มรูป
 
 ## เคล็ดลับและข้อควรระวัง
 
-- `JOIN` ที่ไม่มี `ON` หรือ `USING` เป็น syntax error ใน PostgreSQL ส่วน cross join โดยไม่ตั้งใจเกิดจากการเขียน table คั่นด้วย comma (`FROM a, b`) แล้วลืม `WHERE`: ทุก row ฝั่งซ้ายจับคู่กับทุก row ฝั่งขวา สิบ row กับสิบ row ได้ผลลัพธ์หนึ่งร้อย row
-- ตั้ง alias สั้น ๆ ให้แต่ละ table เช่น `a` และ `b` แล้วใส่นำหน้าทุก column วิธีนี้ทำให้ query อ่านง่ายและเลี่ยงความกำกวมเมื่อทั้งสอง table มี column ชื่อเดียวกันอย่าง `id`
-- `NULL` ในผลลัพธ์ของ outer join หมายถึง "ไม่พบ row ที่ตรงกัน" ไม่ได้หมายถึง "ค่าเป็นศูนย์หรือว่างเปล่า" ทดสอบด้วย `IS NULL` ห้ามใช้ `= NULL` เด็ดขาด
-- การใส่ตัวกรองให้ table ฝั่งขวาใน `WHERE` แทนที่จะเป็น `ON` อาจเปลี่ยน `LEFT JOIN` กลับให้เป็น inner join อย่างเงียบ ๆ เพราะ `NULL` ไม่ผ่านการเปรียบเทียบใน `WHERE` ส่วนใหญ่
+- `JOIN` ที่ไม่มี `ON` หรือ `USING` เป็น syntax error (`42601`) cross join โดยไม่ตั้งใจมาจากการลิสต์ table ด้วย comma (`FROM a, b`) แล้วลืม `WHERE`: สิบกับสิบ row ให้หนึ่งร้อย row
+- ตั้ง alias สั้น ๆ ให้แต่ละ table เช่น `a` และ `b` แล้วใส่ prefix ทุก column ทำให้ query อ่านง่ายและไม่กำกวมเมื่อสอง table มี column ชื่อเดียวกันอย่าง `id`
+- `NULL` ในผลลัพธ์ outer join แปลว่า "ไม่พบ row ที่ตรงกัน" ไม่ใช่ "ค่าเป็นศูนย์หรือว่าง" ทดสอบด้วย `IS NULL` ห้าม `= NULL`
+- ใส่ตัวกรองที่อธิบายฝั่ง *ทางเลือก* ใน `ON` และตัวกรองของฝั่งที่คุณเก็บไว้ใน `WHERE`
+- ใช้ `EXISTS` / `NOT EXISTS` เมื่อต้องแค่ทดสอบว่ามีอยู่: ไม่มีค่าซ้ำ ไม่มี column ที่ต้องทิ้ง
 
-<Callout title="เลือกฝั่งที่คุณอยากเก็บไว้">
-ตัดสินใจว่า table ไหนต้องปรากฏในผลลัพธ์เสมอ ให้วาง table นั้นไว้ก่อน แล้ว `LEFT JOIN` table อีกตัวเข้ามา "ผู้เขียนทุกคน พร้อมหนังสือถ้ามี" คือ `LEFT JOIN` จาก `authors` ส่วน "เฉพาะผู้เขียนที่มีหนังสือ" คือ `INNER JOIN` วลีภาษาอังกฤษมักบอกประเภทของ join ให้คุณรู้
+<Callout title="เลือกฝั่งที่ต้องการเก็บ">
+ตัดสินใจว่า table ไหนต้องปรากฏในผลลัพธ์เสมอ วางไว้ก่อน แล้ว `LEFT JOIN` อีก table เข้าไป "ผู้เขียนทุกคน พร้อมหนังสือถ้ามี" คือ `LEFT JOIN` จาก `authors` "เฉพาะผู้เขียนที่มีหนังสือ" คือ `INNER JOIN` (หรือ `EXISTS`) ประโยคภาษาอังกฤษมักบอกชนิด join ให้เอง
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Join table ที่ normalize ไว้ตอน query | ข้อมูลไม่ซ้ำ (no duplication) เสมอเป็นข้อมูลล่าสุด | query ซับซ้อนขึ้น และต้องคำนวณ join ทุกครั้งที่ query |
-| Denormalize/คัดลอกข้อมูลไว้ล่วงหน้า | อ่านเร็วกว่า ไม่ต้อง join ตอน query | เสี่ยงข้อมูลไม่ตรงกัน (stale/inconsistent) ต้องคอยซิงค์เอง |
+| join table ที่ normalize ตอน query | ข้อมูลไม่ซ้ำและเป็นปัจจุบันเสมอ | query ซับซ้อนกว่า และ join ถูกคำนวณใหม่ทุกครั้ง |
+| Denormalize / คัดลอกข้อมูลไว้ล่วงหน้า | อ่านเร็วกว่าเพราะไม่มี join ตอน query | เสี่ยงข้อมูลเก่าหรือไม่สอดคล้อง ต้องซิงก์สำเนาเอง |
+| `NATURAL JOIN` / `USING` | เขียนสั้น | `NATURAL` เปลี่ยนความหมายเงียบ ๆ เมื่อเพิ่มหรือเปลี่ยนชื่อ column |
+| `EXISTS` แทน join สำหรับทดสอบการมีอยู่ | ไม่ทำ row ซ้ายซ้ำ planner ใช้ semi join | คืน column จาก table อื่นไม่ได้ |
+| บังคับอัลกอริทึม join ด้วย `enable_*` | ใช้วินิจฉัย plan ได้ | ไม่ใช่วิธีแก้: มัน override planner ทั้ง session |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **เขียน table คั่นด้วย comma แล้วลืมเงื่อนไข join** — `FROM a, b` ที่ไม่มี `WHERE` ที่จับคู่กัน คือ cross join แบบเงียบ ๆ ที่จับคู่ทุก row กับทุก row จนผลลัพธ์ระเบิด (row explosion) (ส่วน `a JOIN b` ที่ไม่มี `ON` จะ error เป็น syntax error) ควรใช้ `JOIN ... ON` แบบ explicit
-- **ไม่ตั้ง alias ให้ table** — เมื่อสอง table มี column ชื่อเดียวกันอย่าง `id` query จะโยน ambiguous column error หรือแม้ไม่ error ก็อ่านยากจนดูแลต่อไม่ได้ ใช้ alias สั้น ๆ อย่าง `a`, `b` เสมอ
-- **ใส่ filter ของ table ฝั่งขวาไว้ใน `WHERE` แทน `ON`** — กับ `LEFT JOIN` แล้วพฤติกรรมจะกลายเป็น `INNER JOIN` อย่างเงียบ ๆ เพราะ `WHERE` จะทิ้ง row ที่มีค่า `NULL` ทางฝั่งขวาไปด้วย ถ้าอยากกรองแต่ยังเก็บ row ฝั่งซ้ายไว้ครบ ต้องใส่เงื่อนไขนั้นใน `ON`
-
-> 💡 ตัวอย่างจากของจริง
->
-> **Activity feed และประวัติข้อความ** — แอปจำนวนมาก join table ผู้ใช้, workspace/server และข้อความตอน query แทนที่จะคัดลอกชื่อผู้ใช้ไปฝังไว้ในทุกข้อความ ทำให้เปลี่ยนชื่อครั้งเดียวก็อัปเดตทุกที่
->
-> **ระบบติดตามโปรเจกต์แบบ open-source** — หน้าประวัติ merge request หรือ pipeline รวมข้อมูลจากหลาย table (users, projects, commits) ด้วย join ตอน query เพื่อให้ single source of truth อยู่ที่เดียว ไม่ต้องกังวลเรื่องข้อมูลซ้ำที่หลุดซิงค์กัน
+- **"JOIN ที่ไม่มี ON คือ cross join แบบเงียบ"** เป็น syntax error ใน PostgreSQL cross join แบบเงียบคือ `FROM a, b` ที่ไม่มี `WHERE`
+- **"ON กับ WHERE ใช้แทนกันได้"** ใช้ได้เฉพาะ inner join ใน `LEFT JOIN` การใส่ `WHERE` บน table ขวาเปลี่ยนมันเป็น inner join (2 row แทน 3 ข้างบน)
+- **"NATURAL JOIN join ด้วย foreign key"** มัน join บนทุก column ชื่อเดียวกัน ที่นี่คือ `id` กับ `id` จับคู่ row ที่ไม่เกี่ยวกัน
+- **"NULL = NULL จับคู่ใน join"** ไม่เคยจับคู่ ใช้ `IS NOT DISTINCT FROM` เมื่อหมายถึงอย่างนั้น
+- **"hash join เร็วที่สุดเสมอ"** planner เลือกตาม cost: nested loop ใช้ 0.17 ms กับลูกค้าหนึ่งคน และการบังคับ merge join ใช้ 120 ms เทียบกับ hash join 68 ms สำหรับทั้งหมด
 
 export const quizJoins = [
   {
-    q: 'join แบบใดคืนเฉพาะ row ที่มีคู่ที่ตรงกันทั้งสองฝั่ง?',
+    q: 'join แบบไหนคืนเฉพาะ row ที่มีคู่ทั้งสองฝั่ง?',
     options: ['LEFT JOIN', 'INNER JOIN', 'FULL OUTER JOIN', 'CROSS JOIN'],
     answer: 1,
+    explain: 'INNER JOIN ทิ้งทุก row ที่ไม่มีคู่ ในบทเรียนมันคืน 3 row โดยไม่มี Sela Vance หรือ Unlinked Draft',
   },
   {
-    q: 'ใน LEFT JOIN อะไรปรากฏใน column ฝั่งขวาเมื่อ row ฝั่งซ้ายไม่มีคู่ที่ตรงกัน?',
-    options: ['ศูนย์', 'string ว่าง', 'NULL', 'row นั้นถูกทิ้งไป'],
+    q: 'ใน LEFT JOIN, column ฝั่งขวาแสดงอะไรเมื่อ row ซ้ายไม่มีคู่?',
+    options: ['ศูนย์', 'สตริงว่าง', 'NULL', 'row ถูกทิ้ง'],
     answer: 2,
+    explain: 'row ซ้ายที่ไม่มีคู่ถูกเก็บไว้และฝั่งขวาเป็น NULL (Sela Vance ที่ title เป็น NULL) แต่ละ driver สะกดต่างกัน: None, <nil>, NULL',
   },
   {
-    q: 'จะเกิดอะไรขึ้นถ้าคุณเขียน join แต่ลืม ON clause?',
+    q: 'จะเกิดอะไรขึ้นถ้าเขียน `SELECT * FROM authors JOIN books;` โดยไม่มี ON?',
     options: [
-      'PostgreSQL คืนผลลัพธ์เป็นศูนย์ row',
-      'ทำตัวเหมือน cross join ที่จับคู่ทุก row กับทุก row',
-      'โยน syntax error ออกมาทุกครั้ง',
-      'เปลี่ยนเป็น INNER JOIN บน primary key อย่างเงียบ ๆ',
+      'PostgreSQL คืนศูนย์ row',
+      'ทำตัวเหมือน cross join จับคู่ทุก row กับทุก row',
+      'เกิด syntax error (42601)',
+      'กลายเป็น INNER JOIN บน primary key เงียบ ๆ',
+    ],
+    answer: 2,
+    explain: 'JOIN ต้องมี ON หรือ USING cross join แบบเงียบมาจากรูป comma `FROM authors, books` ซึ่งคืน 12 row',
+  },
+  {
+    q: 'query ไหนคืนผู้เขียนทั้งสามคน พร้อมเฉพาะหนังสือที่ตีพิมพ์หลังปี 2010 (NULL ถ้าไม่มี)?',
+    options: [
+      'authors LEFT JOIN books ON b.author_id = a.id WHERE b.published > 2010',
+      'authors LEFT JOIN books ON b.author_id = a.id AND b.published > 2010',
+      'authors INNER JOIN books ON b.author_id = a.id AND b.published > 2010',
+      'authors NATURAL JOIN books',
     ],
     answer: 1,
+    explain: 'เงื่อนไขที่อธิบายฝั่งทางเลือกต้องอยู่ใน ON ถ้าอยู่ใน WHERE มันลบ row ที่เติม NULL ของ Sela Vance และ query กลายเป็น inner join',
+  },
+  {
+    q: 'ทำไม NATURAL JOIN จึงเสี่ยง?',
+    options: [
+      'PostgreSQL 18 ไม่รองรับ',
+      'มันสร้าง cross join เสมอ',
+      'มัน join บนทุก column ชื่อเดียวกัน column ชื่อซ้ำที่ไม่เกี่ยวข้อง (หรือ column ใหม่) จึงเปลี่ยนผลลัพธ์',
+      'ใช้ร่วมกับ WHERE ไม่ได้',
+    ],
+    answer: 2,
+    explain: 'authors.id กับ books.id ชื่อเหมือนกัน มันจึงจับคู่ row ที่ไม่เกี่ยวกัน การเพิ่ม authors.author_id เปลี่ยนผลลัพธ์จาก 3 row เหลือ 1',
   },
 ];
 

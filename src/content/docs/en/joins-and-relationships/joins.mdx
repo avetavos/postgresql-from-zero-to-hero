@@ -1,6 +1,6 @@
 ---
 title: Joins
-description: Combine rows from two tables with INNER JOIN, then keep unmatched rows with LEFT, RIGHT, and FULL OUTER JOIN — what the ON clause matches and what NULLs mean in an outer join.
+description: Combine rows from two tables with INNER, LEFT, RIGHT and FULL joins, then go further — ON vs WHERE, USING, the NATURAL JOIN trap, LATERAL, semi and anti joins, and the three join algorithms in a real EXPLAIN.
 sidebar:
   order: 2
 ---
@@ -10,18 +10,51 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-A join takes two tables and pairs up their rows according to a rule you write in the `ON` clause. Because a book stores its author's `id`, you can ask PostgreSQL to walk that link and produce rows that contain columns from both tables at once. The only real choice you make is what to do with rows that have no match on the other side — and that is exactly what distinguishes the join types.
+A join takes two tables and pairs up their rows according to a rule you write in the `ON` clause. Because a book stores its author's `id`, you can ask PostgreSQL to walk that link and produce rows that contain columns from both tables at once. The only real choice you make is what to do with rows that have no match on the other side, and that is exactly what distinguishes the join types.
 
-We continue with the `authors`, `books`, and `sales` tables.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The `sql` fences run top to bottom in one empty database; the outputs are copied from `psql`, and the timings in the plans are from this Mac.
+
+## The dataset
+
+This is the course's canonical dataset. Every lesson in this module starts from the same three tables, so you can paste the block into an empty database and get exactly the results shown here. Sela Vance has no books, and *Unlinked Draft* has no author: the two kinds of unmatched row that make joins interesting.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## INNER JOIN: only matching rows
 
-An `INNER JOIN` returns one combined row for every pair where the `ON` condition is true. Rows on either side that find no partner are simply dropped. This is the join you reach for most often.
+An `INNER JOIN` returns one combined row for every pair where the `ON` condition is true. Rows on either side that find no partner are dropped. This is the join you reach for most often.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/inner-join.sql
     SELECT b.title, a.name AS author
     FROM books AS b
     INNER JOIN authors AS a ON a.id = b.author_id
@@ -36,7 +69,6 @@ An `INNER JOIN` returns one combined row for every pair where the `ON` condition
       INNER JOIN authors AS a ON a.id = b.author_id
       ORDER BY b.title
     `);
-    console.log(res.rows);
     ```
   </TabItem>
   <TabItem label="Python">
@@ -57,6 +89,7 @@ An `INNER JOIN` returns one combined row for every pair where the `ON` condition
       FROM books AS b
       INNER JOIN authors AS a ON a.id = b.author_id
       ORDER BY b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -74,15 +107,15 @@ An `INNER JOIN` returns one combined row for every pair where the `ON` condition
 </Tabs>
 
 ```text
-      title       |    author
-------------------+---------------
- Quiet Harbors    | Mara Linde
- The Glass Orchard| Mara Linde
- Tidal Notes      | Owen Pryce
+       title       |   author   
+-------------------+------------
+ Quiet Harbors     | Mara Linde
+ The Glass Orchard | Mara Linde
+ Tidal Notes       | Owen Pryce
 (3 rows)
 ```
 
-An author with no books, or a book whose `author_id` does not match any author, never appears in this result.
+Sela Vance (no books) and *Unlinked Draft* (no author) never appear in this result.
 
 ## LEFT JOIN: keep every row on the left
 
@@ -91,10 +124,11 @@ A `LEFT OUTER JOIN` (the `OUTER` keyword is optional) keeps every row from the l
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/left-join.sql
     SELECT a.name AS author, b.title
     FROM authors AS a
     LEFT JOIN books AS b ON b.author_id = a.id
-    ORDER BY a.name;
+    ORDER BY a.name, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -103,7 +137,7 @@ A `LEFT OUTER JOIN` (the `OUTER` keyword is optional) keeps every row from the l
       SELECT a.name AS author, b.title
       FROM authors AS a
       LEFT JOIN books AS b ON b.author_id = a.id
-      ORDER BY a.name
+      ORDER BY a.name, b.title
     `);
     ```
   </TabItem>
@@ -113,7 +147,7 @@ A `LEFT OUTER JOIN` (the `OUTER` keyword is optional) keeps every row from the l
         SELECT a.name AS author, b.title
         FROM authors AS a
         LEFT JOIN books AS b ON b.author_id = a.id
-        ORDER BY a.name
+        ORDER BY a.name, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -124,7 +158,8 @@ A `LEFT OUTER JOIN` (the `OUTER` keyword is optional) keeps every row from the l
       SELECT a.name AS author, b.title
       FROM authors AS a
       LEFT JOIN books AS b ON b.author_id = a.id
-      ORDER BY a.name`)
+      ORDER BY a.name, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -133,7 +168,7 @@ A `LEFT OUTER JOIN` (the `OUTER` keyword is optional) keeps every row from the l
         "SELECT a.name AS author, b.title
          FROM authors AS a
          LEFT JOIN books AS b ON b.author_id = a.id
-         ORDER BY a.name",
+         ORDER BY a.name, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -142,12 +177,12 @@ A `LEFT OUTER JOIN` (the `OUTER` keyword is optional) keeps every row from the l
 </Tabs>
 
 ```text
-    author     |       title
----------------+-------------------
- Mara Linde    | Quiet Harbors
- Mara Linde    | The Glass Orchard
- Owen Pryce    | Tidal Notes
- Sela Vance    |
+   author   |       title       
+------------+-------------------
+ Mara Linde | Quiet Harbors
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+ Sela Vance | 
 (4 rows)
 ```
 
@@ -160,10 +195,11 @@ A `RIGHT JOIN` is the mirror image: it keeps every row from the right-hand table
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/full-join.sql
     SELECT a.name AS author, b.title
     FROM authors AS a
     FULL OUTER JOIN books AS b ON b.author_id = a.id
-    ORDER BY a.name;
+    ORDER BY a.name, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -172,7 +208,7 @@ A `RIGHT JOIN` is the mirror image: it keeps every row from the right-hand table
       SELECT a.name AS author, b.title
       FROM authors AS a
       FULL OUTER JOIN books AS b ON b.author_id = a.id
-      ORDER BY a.name
+      ORDER BY a.name, b.title
     `);
     ```
   </TabItem>
@@ -182,7 +218,7 @@ A `RIGHT JOIN` is the mirror image: it keeps every row from the right-hand table
         SELECT a.name AS author, b.title
         FROM authors AS a
         FULL OUTER JOIN books AS b ON b.author_id = a.id
-        ORDER BY a.name
+        ORDER BY a.name, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -193,7 +229,8 @@ A `RIGHT JOIN` is the mirror image: it keeps every row from the right-hand table
       SELECT a.name AS author, b.title
       FROM authors AS a
       FULL OUTER JOIN books AS b ON b.author_id = a.id
-      ORDER BY a.name`)
+      ORDER BY a.name, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -202,7 +239,7 @@ A `RIGHT JOIN` is the mirror image: it keeps every row from the right-hand table
         "SELECT a.name AS author, b.title
          FROM authors AS a
          FULL OUTER JOIN books AS b ON b.author_id = a.id
-         ORDER BY a.name",
+         ORDER BY a.name, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -211,39 +248,522 @@ A `RIGHT JOIN` is the mirror image: it keeps every row from the right-hand table
 </Tabs>
 
 ```text
-    author     |       title
----------------+-------------------
- Mara Linde    | Quiet Harbors
- Mara Linde    | The Glass Orchard
- Owen Pryce    | Tidal Notes
- Sela Vance    |
-               | Unlinked Draft
+   author   |       title       
+------------+-------------------
+ Mara Linde | Quiet Harbors
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+ Sela Vance | 
+            | Unlinked Draft
 (5 rows)
 ```
 
-The last row is a book whose `author_id` points at no author, so the author side is `NULL`. A full join is the only join that would reveal it alongside the author with no books.
+The last row is a book whose `author_id` is `NULL`, so the author side is `NULL`. A full join is the only join that shows it alongside the author with no books.
+
+The same three queries, run once from each driver against the same database (Node.js `pg` 8.23.0, Python `psycopg` 3.3.6, Go `pgx` v5.11.0, Rust `sqlx` 0.9.0). Each reports the row count and `author/title` pairs; look at how each driver spells `NULL`:
+
+```text
+$ (each snippet run once against the dataset above)
+[INNER]  Node.js: 3 Quiet Harbors/Mara Linde; The Glass Orchard/Mara Linde; Tidal Notes/Owen Pryce
+[INNER]  Python:  3 Quiet Harbors/Mara Linde; The Glass Orchard/Mara Linde; Tidal Notes/Owen Pryce
+[INNER]  Go:      3 Quiet Harbors/Mara Linde; The Glass Orchard/Mara Linde; Tidal Notes/Owen Pryce;
+[INNER]  Rust:    3 Quiet Harbors/Mara Linde; The Glass Orchard/Mara Linde; Tidal Notes/Owen Pryce
+[LEFT]   Node.js: 4 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/
+[LEFT]   Python:  4 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/None
+[LEFT]   Go:      4 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/<nil>;
+[LEFT]   Rust:    4 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/NULL
+[FULL]   Node.js: 5 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/; /Unlinked Draft
+[FULL]   Python:  5 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/None; None/Unlinked Draft
+[FULL]   Go:      5 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/<nil>; <nil>/Unlinked Draft;
+[FULL]   Rust:    5 Mara Linde/Quiet Harbors; Mara Linde/The Glass Orchard; Owen Pryce/Tidal Notes; Sela Vance/NULL; NULL/Unlinked Draft
+```
 
 ## Which rows each join keeps
 
-The four join types differ only in how they treat rows that fail the `ON` test. This picture summarizes who survives.
+The join types differ only in how they treat rows that fail the `ON` test. This picture summarizes who survives.
 
 export const joinDiagram = `flowchart TD
-  M[Matching rows on both sides] --> INNER[INNER JOIN keeps these only]
-  M --> LEFT[LEFT JOIN keeps these plus unmatched left rows]
-  M --> RIGHT[RIGHT JOIN keeps these plus unmatched right rows]
-  M --> FULL[FULL OUTER JOIN keeps these plus unmatched rows from both sides]`;
+  M["Matching rows on both sides"] --> INNER["INNER JOIN keeps these only"]
+  M --> LEFT["LEFT JOIN keeps these plus unmatched left rows"]
+  M --> RIGHT["RIGHT JOIN keeps these plus unmatched right rows"]
+  M --> FULL["FULL OUTER JOIN keeps these plus unmatched rows from both sides"]`;
 
 <Mermaid code={joinDiagram} title="What each join type keeps" />
 
+## Without ON: syntax error, or a cross join
+
+`JOIN` with no `ON` or `USING` is not a silent cross join in PostgreSQL. It is a syntax error:
+
+```sql
+-- @expect-error 42601
+SELECT * FROM authors JOIN books;
+```
+
+```text
+ERROR:  syntax error at or near ";"
+LINE 1: SELECT * FROM authors JOIN books;
+                                        ^
+```
+
+The silent version is the comma join. `FROM a, b` with no `WHERE` pairs every left row with every right row (3 authors × 4 books = 12), exactly what an explicit `CROSS JOIN` returns, while the proper join returns 3:
+
+```sql
+-- sql/comma-cross.sql
+SELECT count(*) AS comma_join FROM authors, books;
+SELECT count(*) AS cross_join FROM authors CROSS JOIN books;
+SELECT count(*) AS proper_join FROM authors a JOIN books b ON b.author_id = a.id;
+```
+
+```text
+ comma_join 
+------------
+         12
+(1 row)
+
+ cross_join 
+------------
+         12
+(1 row)
+
+ proper_join 
+-------------
+           3
+(1 row)
+```
+
+## ON versus WHERE in an outer join
+
+For an inner join, a condition in `ON` and the same condition in `WHERE` give the same rows. For an outer join they do not. `ON` decides which rows *match*; `WHERE` runs afterwards and removes rows from the result, including the `NULL`-extended ones that a `LEFT JOIN` just went to the trouble of keeping.
+
+```sql
+-- sql/on-vs-where.sql
+-- filter in ON: every author survives, the filter only limits which books match
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id AND b.published > 2010
+ORDER BY a.name, b.title;
+
+-- same filter in WHERE: the NULL-extended rows are thrown away, it is an INNER JOIN now
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+WHERE b.published > 2010
+ORDER BY a.name, b.title;
+```
+
+```text
+    name    |       title       
+------------+-------------------
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+ Sela Vance | 
+(3 rows)
+
+    name    |       title       
+------------+-------------------
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+(2 rows)
+```
+
+Sela Vance is in the first result and gone from the second. The `WHERE` version quietly turned the `LEFT JOIN` into an `INNER JOIN`, because `NULL > 2010` is not true. This is the bug the *Reading AI-generated code* section below is about.
+
+## USING, and why NATURAL JOIN is a trap
+
+When the joined columns have the same name in both tables, `USING (col)` is shorthand for `ON a.col = b.col` and it emits the column once in `SELECT *`. `NATURAL JOIN` goes further and joins on **every** column that has the same name in both tables, with no way to say which. In our dataset `authors.id` and `books.id` are both called `id`, so a `NATURAL JOIN` compares an author's id with a *book's* id and pairs Owen Pryce with *The Glass Orchard*, an author with an unrelated book:
+
+```sql
+-- sql/using-natural.sql
+-- USING: the joined column appears once in SELECT *
+SELECT *
+FROM books
+JOIN (SELECT id AS author_id, name FROM authors) AS a USING (author_id)
+ORDER BY books.id;
+
+-- NATURAL JOIN: matches on EVERY same-named column. authors and books both have "id"
+SELECT a.name, b.title
+FROM authors a NATURAL JOIN books b
+ORDER BY a.name;
+```
+
+```text
+ author_id | id |       title       | published | copies_sold |    name    
+-----------+----+-------------------+-----------+-------------+------------
+         1 |  1 | Quiet Harbors     |      2003 |         450 | Mara Linde
+         1 |  2 | The Glass Orchard |      2018 |        1250 | Mara Linde
+         2 |  3 | Tidal Notes       |      2011 |         600 | Owen Pryce
+(3 rows)
+
+    name    |       title       
+------------+-------------------
+ Mara Linde | Quiet Harbors
+ Owen Pryce | The Glass Orchard
+ Sela Vance | Tidal Notes
+(3 rows)
+```
+
+It gets worse over time, because the join condition depends on the column names in the tables today. Add an `author_id` column to `authors` (a perfectly ordinary migration) and the same `NATURAL JOIN` now needs `id` *and* `author_id` to match: the result shrinks from 3 rows to 1, with no error:
+
+```sql
+-- sql/natural-drift.sql
+-- someone adds a column to both tables, and the NATURAL JOIN silently changes meaning
+BEGIN;
+ALTER TABLE authors ADD COLUMN author_id bigint;
+UPDATE authors SET author_id = id;
+SELECT * FROM books NATURAL JOIN authors ORDER BY books.id;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ALTER TABLE
+UPDATE 3
+ id | author_id |     title     | published | copies_sold |    name    | born 
+----+-----------+---------------+-----------+-------------+------------+------
+  1 |         1 | Quiet Harbors |      2003 |         450 | Mara Linde | 1968
+(1 row)
+
+ROLLBACK
+```
+
+Write `ON` explicitly. It costs a few characters and cannot change meaning behind your back ([PostgreSQL docs, joined tables](https://www.postgresql.org/docs/18/queries-table-expressions.html#QUERIES-JOIN)).
+
+## NULL never equals NULL in ON
+
+A join condition is an ordinary boolean expression. `NULL = NULL` is not true, so the two rows with a `NULL` `author_id` never match each other in a self-join; the null-safe comparison `IS NOT DISTINCT FROM` does match them:
+
+```sql
+-- sql/null-in-on.sql
+SELECT count(*) AS with_equals
+FROM books x JOIN books y ON x.author_id = y.author_id;
+
+SELECT count(*) AS with_not_distinct
+FROM books x JOIN books y ON x.author_id IS NOT DISTINCT FROM y.author_id;
+```
+
+```text
+ with_equals 
+-------------
+           5
+(1 row)
+
+ with_not_distinct 
+-------------------
+                 6
+(1 row)
+```
+
+The 5 are the four (1,1) pairs plus the one (2,2) pair; the extra row in the second query is *Unlinked Draft* matching itself.
+
+## LATERAL: a subquery that sees the row to its left
+
+Normally each `FROM` item is independent. A subquery marked `LATERAL` may refer to columns of the items before it, so it runs once per left row ([docs](https://www.postgresql.org/docs/18/queries-table-expressions.html#QUERIES-LATERAL)). That makes "top N per group" a short query. Here, the biggest sale of each book; `LEFT JOIN LATERAL ... ON true` keeps *Unlinked Draft*, which has no sales:
+
+```sql
+-- sql/lateral.sql
+-- the biggest sale for each book; LEFT JOIN LATERAL ... ON true keeps books with no sales
+SELECT b.title, s.region, s.copies
+FROM books b
+LEFT JOIN LATERAL (
+  SELECT region, copies
+  FROM sales
+  WHERE sales.book_id = b.id
+  ORDER BY copies DESC
+  LIMIT 1
+) AS s ON true
+ORDER BY b.id;
+```
+
+```text
+       title       | region | copies 
+-------------------+--------+--------
+ Quiet Harbors     | West   |    400
+ The Glass Orchard | East   |    900
+ Tidal Notes       | West   |    400
+ Unlinked Draft    |        |       
+(4 rows)
+```
+
+`LIMIT 1` inside the subquery is the point: a plain join cannot express "only the first row of the right side, per left row".
+
+## Semi joins and anti joins
+
+"Authors that have at least one book" and "authors with no book" are not really joins, since you do not want columns from the other table; they are filters. Write them with `EXISTS` and `NOT EXISTS` (or `IN` for the first). The planner turns them into *semi* and *anti* joins internally, and, unlike a plain join, a semi join never returns a left row twice (Mara Linde has two books and appears once):
+
+```sql
+-- sql/semi-anti.sql
+SELECT name FROM authors a
+WHERE EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id);
+
+SELECT name FROM authors a
+WHERE NOT EXISTS (SELECT 1 FROM books b WHERE b.author_id = a.id);
+```
+
+```text
+    name    
+------------
+ Mara Linde
+ Owen Pryce
+(2 rows)
+
+    name    
+------------
+ Sela Vance
+(1 row)
+```
+
+## The three join algorithms, in a real plan
+
+`EXPLAIN` shows how the join is executed. PostgreSQL has three algorithms and picks by cost. To see all three we need more than four rows, so this section builds 10 000 `customers` and 200 000 `orders` (20 orders per customer, an index on `orders.customer_id`):
+
+```sql
+-- sql/join-algorithms-setup.sql
+CREATE TABLE customers (
+  id   int PRIMARY KEY,
+  name text NOT NULL
+);
+CREATE TABLE orders (
+  id          int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id int NOT NULL REFERENCES customers (id),
+  total       numeric(10, 2) NOT NULL
+);
+INSERT INTO customers SELECT g, 'customer ' || g FROM generate_series(1, 10000) AS g;
+INSERT INTO orders (customer_id, total)
+SELECT 1 + (g * 7919) % 10000, g % 500 FROM generate_series(1, 200000) AS g;
+CREATE INDEX orders_customer_id_idx ON orders (customer_id);
+ANALYZE customers;
+ANALYZE orders;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 10000
+INSERT 0 200000
+CREATE INDEX
+ANALYZE
+ANALYZE
+```
+
+**Nested Loop**: for each row of the outer side, probe the inner side (here through an index). Ideal when the outer side is tiny. One customer, 20 orders:
+
+```sql
+-- sql/plan-nested-loop.sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT c.name, o.total
+FROM customers c JOIN orders o ON o.customer_id = c.id
+WHERE c.id = 42;
+```
+
+```text
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=4.74..85.05 rows=20 width=17) (actual time=0.041..0.123 rows=20.00 loops=1)
+   Buffers: shared hit=23 read=2
+   ->  Index Scan using customers_pkey on customers c  (cost=0.29..8.30 rows=1 width=17) (actual time=0.007..0.007 rows=1.00 loops=1)
+         Index Cond: (id = 42)
+         Index Searches: 1
+         Buffers: shared hit=3
+   ->  Bitmap Heap Scan on orders o  (cost=4.45..76.54 rows=20 width=8) (actual time=0.032..0.110 rows=20.00 loops=1)
+         Recheck Cond: (customer_id = 42)
+         Heap Blocks: exact=20
+         Buffers: shared hit=20 read=2
+         ->  Bitmap Index Scan on orders_customer_id_idx  (cost=0.00..4.45 rows=20 width=0) (actual time=0.020..0.020 rows=20.00 loops=1)
+               Index Cond: (customer_id = 42)
+               Index Searches: 1
+               Buffers: shared read=2
+ Planning:
+   Buffers: shared hit=112 read=1
+ Planning Time: 0.360 ms
+ Execution Time: 0.166 ms
+(18 rows)
+```
+
+The outer scan returns 1 row (`rows=1.00`, `loops=1`), then one bitmap probe finds the 20 orders. Execution took 0.17 ms on this Mac. Note the PG 18 details: `rows=20.00` (actual rows are shown as fractional averages), `Index Searches: 1` and the `Planning: Buffers` line.
+
+**Hash Join**: build a hash table on the smaller side, scan the bigger side once and probe it. This is the default when you join everything to everything:
+
+```sql
+-- sql/plan-hash-join.sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT c.id, sum(o.total)
+FROM customers c JOIN orders o ON o.customer_id = c.id
+GROUP BY c.id;
+```
+
+```text
+                                                             QUERY PLAN                                                             
+------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=4896.22..5021.22 rows=10000 width=36) (actual time=96.175..97.616 rows=10000.00 loops=1)
+   Group Key: c.id
+   Batches: 1  Memory Usage: 3857kB
+   Buffers: shared hit=1146
+   ->  Hash Join  (cost=289.00..3896.22 rows=200000 width=8) (actual time=1.829..54.991 rows=200000.00 loops=1)
+         Hash Cond: (o.customer_id = c.id)
+         Buffers: shared hit=1146
+         ->  Seq Scan on orders o  (cost=0.00..3082.00 rows=200000 width=8) (actual time=0.008..12.607 rows=200000.00 loops=1)
+               Buffers: shared hit=1082
+         ->  Hash  (cost=164.00..164.00 rows=10000 width=4) (actual time=1.779..1.779 rows=10000.00 loops=1)
+               Buckets: 16384  Batches: 1  Memory Usage: 480kB
+               Buffers: shared hit=64
+               ->  Seq Scan on customers c  (cost=0.00..164.00 rows=10000 width=4) (actual time=0.006..0.656 rows=10000.00 loops=1)
+                     Buffers: shared hit=64
+ Planning:
+   Buffers: shared hit=148 read=1
+ Planning Time: 0.616 ms
+ Execution Time: 98.217 ms
+(18 rows)
+```
+
+Both tables are read once (`Seq Scan`), the 10 000 customers are hashed in 480 kB (`Batches: 1` means it fit in `work_mem`), and 200 000 joined rows come out in about 38 ms; the aggregate on top brings the total to 68 ms.
+
+**Merge Join**: walk two inputs that are both sorted on the join key, in step. The planner did not choose it above. To see one, the next block forbids the other two algorithms for a single transaction with `SET LOCAL`. This is a teaching switch, never a production fix:
+
+```sql
+-- sql/plan-merge-join.sql
+-- teaching switch only: forbid the two cheaper choices to see the third one
+BEGIN;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_nestloop = off;
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT c.id, sum(o.total)
+FROM customers c JOIN orders o ON o.customer_id = c.id
+GROUP BY c.id;
+ROLLBACK;
+```
+
+```text
+BEGIN
+SET
+SET
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
+ GroupAggregate (actual time=0.097..115.201 rows=10000.00 loops=1)
+   Group Key: c.id
+   Buffers: shared hit=200096 read=187
+   ->  Merge Join (actual time=0.017..96.338 rows=200000.00 loops=1)
+         Merge Cond: (c.id = o.customer_id)
+         Buffers: shared hit=200096 read=187
+         ->  Index Only Scan using customers_pkey on customers c (actual time=0.008..1.629 rows=10000.00 loops=1)
+               Heap Fetches: 10000
+               Index Searches: 1
+               Buffers: shared hit=93
+         ->  Index Scan using orders_customer_id_idx on orders o (actual time=0.006..74.123 rows=200000.00 loops=1)
+               Index Searches: 1
+               Buffers: shared hit=200003 read=187
+ Planning:
+   Buffers: shared hit=149
+ Planning Time: 0.365 ms
+ Execution Time: 115.575 ms
+(17 rows)
+
+ROLLBACK
+```
+
+Here it is slower (120 ms against 68 ms) because getting the orders in `customer_id` order means 200 000 index lookups into the heap (`Buffers: shared hit=200096`). Merge joins shine when both inputs arrive already sorted at little cost, or when a `Sort` is needed anyway.
+
+Semi and anti joins show up in plans as join nodes too. `EXPLAIN` of an `EXISTS` and a `NOT EXISTS` filter on the same tables:
+
+```sql
+-- sql/plan-semi-anti.sql
+EXPLAIN (COSTS OFF)
+SELECT c.id FROM customers c
+WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.total > 498);
+
+EXPLAIN (COSTS OFF)
+SELECT c.id FROM customers c
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.total > 498);
+```
+
+```text
+                      QUERY PLAN                      
+------------------------------------------------------
+ Hash Join
+   Hash Cond: (c.id = o.customer_id)
+   ->  Seq Scan on customers c
+   ->  Hash
+         ->  HashAggregate
+               Group Key: o.customer_id
+               ->  Seq Scan on orders o
+                     Filter: (total > '498'::numeric)
+(8 rows)
+
+                QUERY PLAN                
+------------------------------------------
+ Hash Right Anti Join
+   Hash Cond: (o.customer_id = c.id)
+   ->  Seq Scan on orders o
+         Filter: (total > '498'::numeric)
+   ->  Hash
+         ->  Seq Scan on customers c
+(6 rows)
+```
+
+`EXISTS` became a `Hash Join` against a `HashAggregate` of the qualifying `customer_id`s (the de-duplication is what makes it behave as a semi join); `NOT EXISTS` became a `Hash Right Anti Join`. Neither is a per-row subquery.
+
+## Reading AI-generated code
+
+An assistant is asked for "every author, with their books published after 2010" and writes a query that looks right:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "list every author with their books published after 2010"
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+WHERE b.published > 2010;`}>
+
+The intent is a `LEFT JOIN` (every author), but the filter sits in `WHERE`. After the join, Sela Vance's row has `b.published = NULL`, `NULL > 2010` is not true, and the row is filtered out. The query returns two rows, not three, and nothing errors:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+WHERE b.published > 2010;
+```
+
+```text
+    name    |       title       
+------------+-------------------
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+(2 rows)
+```
+
+The fix is to move the condition that describes *which books match* into `ON`, so authors without a matching book keep their `NULL`-extended row:
+
+```sql
+-- sql/stb-fixed.sql
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id AND b.published > 2010
+ORDER BY a.name, b.title;
+```
+
+```text
+    name    |       title       
+------------+-------------------
+ Mara Linde | The Glass Orchard
+ Owen Pryce | Tidal Notes
+ Sela Vance | 
+(3 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A join is a filtered cross product: conceptually every left row is paired with every right row, and the `ON` condition keeps the pairs that pass. Outer joins add one step *after* that test: any left (or right, or both) row that ended up with no partner is re-added with `NULL`s. `WHERE` runs after all of that. Everything else in this lesson (`USING`, `LATERAL`, semi joins) is a variation on which pairs are kept, and the algorithms (nested loop, hash, merge) are three different ways to compute the same result without materializing the full product.
+
 ## Tips / gotchas
 
-- `JOIN` without `ON` or `USING` is a syntax error in PostgreSQL. An accidental cross join comes from listing tables with a comma (`FROM a, b`) and forgetting the `WHERE`: every left row pairs with every right row, so ten and ten rows give one hundred output rows.
+- `JOIN` without `ON` or `USING` is a syntax error (`42601`). An accidental cross join comes from listing tables with a comma (`FROM a, b`) and forgetting the `WHERE`: ten and ten rows give one hundred output rows.
 - Give each table a short alias such as `a` and `b`, then prefix every column. It keeps queries readable and avoids ambiguity when both tables share a column name like `id`.
 - A `NULL` in an outer-join result means "no matching row was found", not "the value is zero or empty". Test for it with `IS NULL`, never `= NULL`.
-- Putting a filter on the right table in `WHERE` instead of `ON` can quietly turn a `LEFT JOIN` back into an inner one, because `NULL` fails most `WHERE` comparisons.
+- Put filters that describe the *optional* side in `ON`, filters on the side you are keeping in `WHERE`.
+- Prefer `EXISTS` / `NOT EXISTS` when you only need to test for presence: no duplicates, no columns you will throw away.
 
 <Callout title="Pick the side you want to keep">
-Decide which table must always appear in the output, put it first, and `LEFT JOIN` the other onto it. "Every author, with their books if any" is a `LEFT JOIN` from `authors`. "Only authors who have books" is an `INNER JOIN`. The English phrasing usually tells you the join type.
+Decide which table must always appear in the output, put it first, and `LEFT JOIN` the other onto it. "Every author, with their books if any" is a `LEFT JOIN` from `authors`. "Only authors who have books" is an `INNER JOIN` (or `EXISTS`). The English phrasing usually tells you the join type.
 </Callout>
 
 ## Trade-offs
@@ -252,39 +772,63 @@ Decide which table must always appear in the output, put it first, and `LEFT JOI
 |---------|---------|------|
 | Join normalized tables at query time | Data is never duplicated and is always current | Queries are more complex, and the join is recomputed every time |
 | Denormalize / copy data ahead of time | Reads are faster since there is no join at query time | Risk of stale or inconsistent data; you must keep the copies in sync yourself |
+| `NATURAL JOIN` / `USING` | Short to write | `NATURAL` silently changes meaning when columns are added or renamed |
+| `EXISTS` instead of a join for presence tests | Never duplicates left rows; planner uses a semi join | Cannot return columns from the other table |
+| Forcing a join algorithm with `enable_*` | Useful to diagnose a plan | Never a fix: it overrides the planner for the whole session |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Listing tables with commas and forgetting the join condition** — `FROM a, b` with no matching `WHERE` is a silent cross join that matches every row with every row and explodes the result set (`a JOIN b` without `ON` fails with a syntax error instead). Prefer explicit `JOIN ... ON`.
-- **Not aliasing tables** — when two tables share a column name like `id`, the query throws an ambiguous column error, or if it does not error, it becomes unreadable to maintain. Always use short aliases like `a`, `b`.
-- **Putting a filter on the right-hand table in `WHERE` instead of `ON`** — with a `LEFT JOIN`, this silently turns the query back into an `INNER JOIN`, because `WHERE` discards rows where the right side is `NULL`. To filter while still keeping every left row, put that condition in `ON`.
-
-> 💡 Real-world example
->
-> **Activity feeds and message history** — many apps join user, workspace/server, and message tables at query time instead of copying the username into every message row, so a single rename updates everywhere it is shown.
->
-> **Open-source project trackers** — a merge-request or pipeline history page pulls data from several tables (users, projects, commits) with a join at query time, keeping one single source of truth instead of risking copies that drift out of sync.
+- **"A JOIN with no ON is a silent cross join."** It is a syntax error in PostgreSQL. The silent cross join is `FROM a, b` with no `WHERE`.
+- **"ON and WHERE are interchangeable."** Only for inner joins. In a `LEFT JOIN`, a `WHERE` on the right table turns it into an inner join (2 rows instead of 3 above).
+- **"NATURAL JOIN joins on the foreign key."** It joins on every same-named column, here `id` against `id`, pairing unrelated rows.
+- **"NULL = NULL matches in a join."** It never does; use `IS NOT DISTINCT FROM` when you mean it.
+- **"Hash join is always fastest."** The planner picks by cost: a nested loop took 0.17 ms for one customer, and forcing a merge join took 120 ms against the hash join's 68 ms for all of them.
 
 export const quizJoins = [
   {
     q: 'Which join returns only the rows that have a match on both sides?',
     options: ['LEFT JOIN', 'INNER JOIN', 'FULL OUTER JOIN', 'CROSS JOIN'],
     answer: 1,
+    explain: 'INNER JOIN drops any row without a partner. In the lesson it returned 3 rows, without Sela Vance or Unlinked Draft.',
   },
   {
     q: 'In a LEFT JOIN, what appears in the right-hand columns when a left row has no match?',
     options: ['Zero', 'An empty string', 'NULL', 'The row is dropped'],
     answer: 2,
+    explain: 'Unmatched left rows are kept and the right side is NULL (Sela Vance with a NULL title). Drivers spell it differently: None, <nil>, NULL.',
   },
   {
-    q: 'What happens if you write a join but forget the ON clause?',
+    q: 'What happens if you write `SELECT * FROM authors JOIN books;` with no ON clause?',
     options: [
       'PostgreSQL returns no rows',
       'It behaves like a cross join, pairing every row with every row',
-      'It raises a syntax error every time',
+      'It raises a syntax error (42601)',
       'It silently becomes an INNER JOIN on the primary keys',
     ],
+    answer: 2,
+    explain: 'JOIN requires ON or USING. The silent cross join comes from the comma form `FROM authors, books`, which returned 12 rows.',
+  },
+  {
+    q: 'Which query returns all three authors, with only their books published after 2010 (NULL for none)?',
+    options: [
+      'authors LEFT JOIN books ON b.author_id = a.id WHERE b.published > 2010',
+      'authors LEFT JOIN books ON b.author_id = a.id AND b.published > 2010',
+      'authors INNER JOIN books ON b.author_id = a.id AND b.published > 2010',
+      'authors NATURAL JOIN books',
+    ],
     answer: 1,
+    explain: 'The condition describing the optional side belongs in ON. In WHERE it removes the NULL-extended row for Sela Vance and the query becomes an inner join.',
+  },
+  {
+    q: 'Why is NATURAL JOIN risky?',
+    options: [
+      'It is not supported in PostgreSQL 18',
+      'It always produces a cross join',
+      'It joins on every same-named column, so an unrelated same-named column (or a new one) changes the result',
+      'It cannot be combined with WHERE',
+    ],
+    answer: 2,
+    explain: 'authors.id and books.id share a name, so it paired unrelated rows; adding authors.author_id changed the result from 3 rows to 1.',
   },
 ];
 
