@@ -568,7 +568,7 @@ SELECT region, sum(copies) FROM big_sales GROUP BY region;
 (23 rows)
 ```
 
-Read it from the inside out: a `Parallel Seq Scan` reads half of the table in each of two processes (`loops=2`, `rows=250000.00` each), each computes a `Partial HashAggregate` of 5 groups (32 kB of hash table), the five-row partial results are sorted and merged by `Gather Merge`, and a `Finalize GroupAggregate` combines them. The whole query took 46 ms on this Mac (500 000 rows, 1 worker). Only 5 rows leave the aggregation, out of 500 000 scanned: that is the "sends little data over the network" argument for aggregating in the database.
+Read it from the inside out: a `Parallel Seq Scan` reads half of the table in each of two processes (`loops=2`, `rows=250000.00` each), each computes a `Partial HashAggregate` of 5 groups (32 kB of hash table), the five-row partial results are sorted and merged by `Gather Merge`, and a `Finalize GroupAggregate` combines them. The whole query took 65 ms on this Mac (500 000 rows, 1 worker). Only 5 rows leave the aggregation, out of 500 000 scanned: that is the "sends little data over the network" argument for aggregating in the database.
 
 And where does `HAVING` run? A condition that does not mention an aggregate is pushed below the aggregation into the scan (`Filter: (region = 'East')` under `Parallel Seq Scan`, so the other four regions are never aggregated); one that needs the aggregate stays above it as a `Filter` on the finalize node:
 

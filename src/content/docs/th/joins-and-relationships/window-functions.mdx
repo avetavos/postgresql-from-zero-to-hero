@@ -616,7 +616,7 @@ SET
 ROLLBACK
 ```
 
-มันกลายเป็น `quicksort  Memory: 27914kB` และไม่มี temp buffer และ **ไม่ได้เร็วขึ้น** บน Mac เครื่องนี้ (579 ms เทียบกับ 560 ms รันครั้งเดียว อยู่ในระดับสัญญาณรบกวน): การ sort ครึ่งล้าน row ครอบงำทั้งสองแบบ index บน `(region, copies DESC)` ให้ลำดับได้และตัด sort ออก ซึ่ง module เรื่อง indexes ครอบคลุม
+มันกลายเป็น `quicksort  Memory: 27914kB` และไม่มี temp buffer และ **ไม่ได้เร็วขึ้น** บน Mac เครื่องนี้ (577 ms เทียบกับ 561 ms รันครั้งเดียว อยู่ในระดับสัญญาณรบกวน): การ sort ครึ่งล้าน row ครอบงำทั้งสองแบบ index บน `(region, copies DESC)` ให้ลำดับได้และตัด sort ออก ซึ่ง module เรื่อง indexes ครอบคลุม
 
 เมื่อต้องการแค่ row บนสุดของแต่ละ partition PostgreSQL 15+ หยุดก่อนได้ `WHERE rn <= 3` ด้านนอกปรากฏเป็น `Run Condition` บน `WindowAgg` และ node ปล่อย 15 row (3 ต่อ region) แทน 500 000:
 

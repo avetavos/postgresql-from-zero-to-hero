@@ -332,7 +332,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM parents p WHERE NOT EXISTS (SELECT 1 FR
 
 ### Correlated subqueries
 
-A correlated subquery refers to the outer row, so it conceptually runs once per outer row. In a scalar position that is literally what the plan does (`SubPlan 1 ... loops=1000`), and here it is about six times slower than the equivalent join with `GROUP BY` (288 ms against 50 ms on this Mac, 1 000 parents and 200 000 children; the first run also paid for 165 cold buffer reads):
+A correlated subquery refers to the outer row, so it conceptually runs once per outer row. In a scalar position that is literally what the plan does (`SubPlan 1 ... loops=1000`), and here it is about three times slower than the equivalent join with `GROUP BY` (165 ms against 51 ms on this Mac, 1 000 parents and 200 000 children; the first run also paid for 165 cold buffer reads):
 
 ```sql
 -- sql/correlated-subquery.sql
@@ -792,7 +792,7 @@ Use a subquery when the step is small and used once. Use a CTE when you want to 
 | Inline subquery | Compact, planner sees everything | Deep nesting is hard to read and debug |
 | CTE (inlined by default) | Readable top-to-bottom, same plan as a subquery when used once | Referencing it twice materializes it and blocks pushdown of outer filters |
 | `AS MATERIALIZED` | Computes an expensive step once, predictable | Optimisation fence: outer filters are applied after the fact |
-| Correlated scalar subquery | Very direct to write | Per-outer-row probe (288 ms vs 50 ms for the join above) |
+| Correlated scalar subquery | Very direct to write | Per-outer-row probe (165 ms vs 51 ms for the join above) |
 | `WITH RECURSIVE` | Walks trees and graphs in SQL | Needs a termination guard; can be slow on large graphs |
 
 ## Common Misconceptions

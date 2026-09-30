@@ -332,7 +332,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM parents p WHERE NOT EXISTS (SELECT 1 FR
 
 ### Correlated subquery
 
-correlated subquery อ้างถึง row ด้านนอก จึงในเชิงแนวคิดรันหนึ่งครั้งต่อ row ด้านนอก ในตำแหน่ง scalar นั่นคือสิ่งที่ plan ทำจริง (`SubPlan 1 ... loops=1000`) และตรงนี้ช้ากว่า join กับ `GROUP BY` ที่ให้คำตอบเดียวกันราวหกเท่า (288 ms เทียบกับ 50 ms บน Mac เครื่องนี้ parents 1 000 และ children 200 000 การรันครั้งแรกยังจ่ายค่าอ่าน buffer แบบเย็น 165 ครั้ง):
+correlated subquery อ้างถึง row ด้านนอก จึงในเชิงแนวคิดรันหนึ่งครั้งต่อ row ด้านนอก ในตำแหน่ง scalar นั่นคือสิ่งที่ plan ทำจริง (`SubPlan 1 ... loops=1000`) และตรงนี้ช้ากว่า join กับ `GROUP BY` ที่ให้คำตอบเดียวกันราวสามเท่า (165 ms เทียบกับ 51 ms บน Mac เครื่องนี้ parents 1 000 และ children 200 000 การรันครั้งแรกยังจ่ายค่าอ่าน buffer แบบเย็น 165 ครั้ง):
 
 ```sql
 -- sql/correlated-subquery.sql
@@ -792,7 +792,7 @@ subquery คือ expression ที่ค่าเป็น table, row หร�
 | subquery แบบ inline | กระชับ planner เห็นทุกอย่าง | ซ้อนลึกอ่านและ debug ยาก |
 | CTE (inline โดยค่าเริ่มต้น) | อ่านจากบนลงล่าง plan เหมือน subquery เมื่อใช้ครั้งเดียว | อ้างถึงสองครั้งจะ materialize และกันการผลักตัวกรองด้านนอกลงไป |
 | `AS MATERIALIZED` | คำนวณขั้นตอนแพงครั้งเดียว คาดเดาได้ | เป็นรั้วกั้นการ optimize: ตัวกรองด้านนอกทำทีหลัง |
-| correlated scalar subquery | เขียนตรงไปตรงมามาก | probe ต่อ row ด้านนอก (288 ms เทียบกับ 50 ms ของ join ข้างบน) |
+| correlated scalar subquery | เขียนตรงไปตรงมามาก | probe ต่อ row ด้านนอก (165 ms เทียบกับ 51 ms ของ join ข้างบน) |
 | `WITH RECURSIVE` | เดินต้นไม้และกราฟใน SQL | ต้องมีตัวป้องกันไม่จบ; อาจช้าบนกราฟใหญ่ |
 
 ## Common Misconceptions

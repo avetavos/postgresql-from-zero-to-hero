@@ -615,7 +615,7 @@ GROUP BY c.id;
 (18 rows)
 ```
 
-ทั้งสอง table ถูกอ่านหนึ่งรอบ (`Seq Scan`) ลูกค้า 10 000 คนถูก hash ใน 480 kB (`Batches: 1` แปลว่าพอดีใน `work_mem`) และ row ที่ join แล้ว 200 000 ออกมาในราว 38 ms ส่วน aggregate ด้านบนทำให้รวมเป็น 68 ms
+ทั้งสอง table ถูกอ่านหนึ่งรอบ (`Seq Scan`) ลูกค้า 10 000 คนถูก hash ใน 480 kB (`Batches: 1` แปลว่าพอดีใน `work_mem`) และ row ที่ join แล้ว 200 000 ออกมาในราว 55 ms ส่วน aggregate ด้านบนทำให้รวมเป็น 98 ms
 
 **Merge Join**: เดินสอง input ที่เรียงตาม join key ทั้งคู่ไปพร้อมกัน planner ไม่ได้เลือกมันข้างบน เพื่อดูสักครั้ง บล็อกถัดไปห้ามอีกสองอัลกอริทึมใน transaction เดียวด้วย `SET LOCAL` นี่คือสวิตช์สำหรับสอนเท่านั้น ไม่ใช่วิธีแก้ใน production:
 
@@ -660,7 +660,7 @@ SET
 ROLLBACK
 ```
 
-ตรงนี้ช้ากว่า (120 ms เทียบกับ 68 ms) เพราะการได้ orders เรียงตาม `customer_id` หมายถึง index lookup ลง heap 200 000 ครั้ง (`Buffers: shared hit=200096`) merge join เด่นเมื่อสอง input มาถึงแบบเรียงแล้วด้วยต้นทุนต่ำ หรือเมื่อยังไงก็ต้อง `Sort` อยู่แล้ว
+ตรงนี้ช้ากว่า (116 ms เทียบกับ 98 ms) เพราะการได้ orders เรียงตาม `customer_id` หมายถึง index lookup ลง heap 200 000 ครั้ง (`Buffers: shared hit=200096`) merge join เด่นเมื่อสอง input มาถึงแบบเรียงแล้วด้วยต้นทุนต่ำ หรือเมื่อยังไงก็ต้อง `Sort` อยู่แล้ว
 
 semi และ anti join ปรากฏใน plan เป็น node ของ join เช่นกัน `EXPLAIN` ของตัวกรอง `EXISTS` และ `NOT EXISTS` บน table เดียวกัน:
 
@@ -782,7 +782,7 @@ join คือ cross product ที่ผ่านตัวกรอง: ใน�
 - **"ON กับ WHERE ใช้แทนกันได้"** ใช้ได้เฉพาะ inner join ใน `LEFT JOIN` การใส่ `WHERE` บน table ขวาเปลี่ยนมันเป็น inner join (2 row แทน 3 ข้างบน)
 - **"NATURAL JOIN join ด้วย foreign key"** มัน join บนทุก column ชื่อเดียวกัน ที่นี่คือ `id` กับ `id` จับคู่ row ที่ไม่เกี่ยวกัน
 - **"NULL = NULL จับคู่ใน join"** ไม่เคยจับคู่ ใช้ `IS NOT DISTINCT FROM` เมื่อหมายถึงอย่างนั้น
-- **"hash join เร็วที่สุดเสมอ"** planner เลือกตาม cost: nested loop ใช้ 0.17 ms กับลูกค้าหนึ่งคน และการบังคับ merge join ใช้ 120 ms เทียบกับ hash join 68 ms สำหรับทั้งหมด
+- **"hash join เร็วที่สุดเสมอ"** planner เลือกตาม cost: nested loop ใช้ 0.17 ms กับลูกค้าหนึ่งคน และการบังคับ merge join ใช้ 116 ms เทียบกับ hash join 98 ms สำหรับทั้งหมด
 
 export const quizJoins = [
   {

@@ -616,7 +616,7 @@ SET
 ROLLBACK
 ```
 
-It became `quicksort  Memory: 27914kB` and no temp buffers, and it was **not faster** on this Mac (579 ms against 560 ms, single runs, within noise): sorting half a million rows dominates either way. An index on `(region, copies DESC)` could supply the order and remove the sort; the indexes module covers that.
+It became `quicksort  Memory: 27914kB` and no temp buffers, and it was **not faster** on this Mac (577 ms against 561 ms, single runs, within noise): sorting half a million rows dominates either way. An index on `(region, copies DESC)` could supply the order and remove the sort; the indexes module covers that.
 
 When you only want the top rows of each partition, PostgreSQL 15+ can stop early. The `WHERE rn <= 3` on the outside appears as a `Run Condition` on the `WindowAgg`, and the node emits 15 rows (3 per region) instead of 500 000:
 

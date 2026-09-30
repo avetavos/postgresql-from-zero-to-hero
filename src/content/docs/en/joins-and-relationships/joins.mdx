@@ -615,7 +615,7 @@ GROUP BY c.id;
 (18 rows)
 ```
 
-Both tables are read once (`Seq Scan`), the 10 000 customers are hashed in 480 kB (`Batches: 1` means it fit in `work_mem`), and 200 000 joined rows come out in about 38 ms; the aggregate on top brings the total to 68 ms.
+Both tables are read once (`Seq Scan`), the 10 000 customers are hashed in 480 kB (`Batches: 1` means it fit in `work_mem`), and 200 000 joined rows come out in about 55 ms; the aggregate on top brings the total to 98 ms.
 
 **Merge Join**: walk two inputs that are both sorted on the join key, in step. The planner did not choose it above. To see one, the next block forbids the other two algorithms for a single transaction with `SET LOCAL`. This is a teaching switch, never a production fix:
 
@@ -660,7 +660,7 @@ SET
 ROLLBACK
 ```
 
-Here it is slower (120 ms against 68 ms) because getting the orders in `customer_id` order means 200 000 index lookups into the heap (`Buffers: shared hit=200096`). Merge joins shine when both inputs arrive already sorted at little cost, or when a `Sort` is needed anyway.
+Here it is slower (116 ms against 98 ms) because getting the orders in `customer_id` order means 200 000 index lookups into the heap (`Buffers: shared hit=200096`). Merge joins shine when both inputs arrive already sorted at little cost, or when a `Sort` is needed anyway.
 
 Semi and anti joins show up in plans as join nodes too. `EXPLAIN` of an `EXISTS` and a `NOT EXISTS` filter on the same tables:
 
@@ -782,7 +782,7 @@ Decide which table must always appear in the output, put it first, and `LEFT JOI
 - **"ON and WHERE are interchangeable."** Only for inner joins. In a `LEFT JOIN`, a `WHERE` on the right table turns it into an inner join (2 rows instead of 3 above).
 - **"NATURAL JOIN joins on the foreign key."** It joins on every same-named column, here `id` against `id`, pairing unrelated rows.
 - **"NULL = NULL matches in a join."** It never does; use `IS NOT DISTINCT FROM` when you mean it.
-- **"Hash join is always fastest."** The planner picks by cost: a nested loop took 0.17 ms for one customer, and forcing a merge join took 120 ms against the hash join's 68 ms for all of them.
+- **"Hash join is always fastest."** The planner picks by cost: a nested loop took 0.17 ms for one customer, and forcing a merge join took 116 ms against the hash join's 98 ms for all of them.
 
 export const quizJoins = [
   {

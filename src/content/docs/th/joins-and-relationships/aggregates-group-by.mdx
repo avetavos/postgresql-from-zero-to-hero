@@ -568,7 +568,7 @@ SELECT region, sum(copies) FROM big_sales GROUP BY region;
 (23 rows)
 ```
 
-อ่านจากด้านในออกมา: `Parallel Seq Scan` อ่านครึ่งหนึ่งของ table ในแต่ละสอง process (`loops=2`, `rows=250000.00` ต่อตัว) แต่ละตัวคำนวณ `Partial HashAggregate` ของ 5 กลุ่ม (hash table 32 kB) ผลบางส่วนห้า row ถูก sort และ merge โดย `Gather Merge` และ `Finalize GroupAggregate` รวมเข้าด้วยกัน ทั้ง query ใช้ 46 ms บน Mac เครื่องนี้ (500 000 row, 1 worker) มีเพียง 5 row ที่ออกจากการ aggregate จากที่ scan 500 000: นี่คือข้อโต้แย้งเรื่อง "ส่งข้อมูลผ่านเครือข่ายน้อย" ของการ aggregate ในฐานข้อมูล
+อ่านจากด้านในออกมา: `Parallel Seq Scan` อ่านครึ่งหนึ่งของ table ในแต่ละสอง process (`loops=2`, `rows=250000.00` ต่อตัว) แต่ละตัวคำนวณ `Partial HashAggregate` ของ 5 กลุ่ม (hash table 32 kB) ผลบางส่วนห้า row ถูก sort และ merge โดย `Gather Merge` และ `Finalize GroupAggregate` รวมเข้าด้วยกัน ทั้ง query ใช้ 65 ms บน Mac เครื่องนี้ (500 000 row, 1 worker) มีเพียง 5 row ที่ออกจากการ aggregate จากที่ scan 500 000: นี่คือข้อโต้แย้งเรื่อง "ส่งข้อมูลผ่านเครือข่ายน้อย" ของการ aggregate ในฐานข้อมูล
 
 แล้ว `HAVING` ทำงานที่ไหน? เงื่อนไขที่ไม่พูดถึง aggregate ถูกผลักลงไปใต้การ aggregate เข้าไปใน scan (`Filter: (region = 'East')` ใต้ `Parallel Seq Scan` อีกสี่ region จึงไม่เคยถูก aggregate) ส่วนเงื่อนไขที่ต้องใช้ aggregate ยังอยู่ด้านบนเป็น `Filter` บน node finalize:
 
