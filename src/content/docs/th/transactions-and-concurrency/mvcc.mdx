@@ -1,6 +1,6 @@
 ---
 title: MVCC
-description: Multi-Version Concurrency Control — วิธีที่ PostgreSQL ปล่อยให้ writer และ reader ทำงานโดยไม่ block กัน ด้วยการเก็บ row ไว้หลายเวอร์ชันและให้แต่ละ transaction มี snapshot
+description: Multi-Version Concurrency Control — ดู xmin, xmax และ ctid เปลี่ยน มองเข้าไปใน heap page ดู VACUUM และ HOT update และพิสูจน์ว่าทำไม transaction ยาวทำให้ table บวม
 sidebar:
   order: 4
 ---
@@ -10,51 +10,47 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-isolation level ในบทเรียนก่อนหน้าทั้งหมดตั้งอยู่บนเครื่องยนต์ตัวเดียว คือ **Multi-Version Concurrency Control** หรือ MVCC คำมั่นของ MVCC พูดง่ายแต่ทรงพลังในทางปฏิบัติ คือ writer ไม่ block reader และ reader ไม่ block writer รายงานยาว ๆ สามารถอ่านต่อไปได้ในขณะที่การ update หลั่งไหลเข้ามา และไม่มีฝ่ายใดต้องรออีกฝ่าย
+isolation level ในบทเรียนก่อนหน้าทั้งหมดตั้งอยู่บนกลไกเดียว: **Multi-Version Concurrency Control** หรือ MVCC คำสัญญาของมันบอกง่ายและทรงพลังในทางปฏิบัติ — ผู้เขียนไม่บล็อกผู้อ่าน และผู้อ่านไม่บล็อกผู้เขียน รายงานยาว ๆ อ่านต่อไปได้ในขณะที่ update หลั่งเข้ามา และไม่มีฝั่งไหนรอฝั่งไหน ([docs](https://www.postgresql.org/docs/18/mvcc-intro.html))
 
-## แนวคิดหลัก: ไม่เคยเขียนทับที่เดิม
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) transaction id และหมายเลข page ต่างกันในทุก cluster ดังนั้นให้อ่านตัวเลขเพื่อความสัมพันธ์ของมัน (อันนี้มากกว่าอันนั้นหนึ่ง) ไม่ใช่ค่า extension `pageinspect` ใช้ดู heap page ดิบ เป็นโมดูล contrib ที่มีแต่ superuser ติดตั้งได้ จึงเหมาะกับแล็บ ไม่ใช่ production
 
-เมื่อคุณ `UPDATE` row หนึ่ง PostgreSQL ไม่ได้แก้ byte เดิม แต่เขียน **เวอร์ชันใหม่** ของ row และทำเครื่องหมายเวอร์ชันเก่าว่าถูกแทนที่แล้ว ชั่วขณะหนึ่งทั้งสองเวอร์ชันมีอยู่บนดิสก์ transaction หนึ่ง ๆ จะเห็นเวอร์ชันใดขึ้นอยู่กับว่า transaction นั้นเริ่มเมื่อใด
+```sql
+-- sql/setup.sql
+CREATE EXTENSION pageinspect;  -- a contrib extension for looking inside pages; needs a superuser
 
-แต่ละเวอร์ชันของ row พก system column ที่ซ่อนอยู่สอง column คอยบันทึกช่วงชีวิตของเวอร์ชันนั้น
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+```
 
-- `xmin` — id ของ transaction ที่สร้างเวอร์ชันนี้
-- `xmax` — id ของ transaction ที่ลบหรือแทนที่เวอร์ชันนี้ (เป็นศูนย์ตราบใดที่เวอร์ชันยังมีชีวิตอยู่)
+## แนวคิดหลัก: ไม่เขียนทับที่เดิมเลย
 
-transaction จะเห็นเวอร์ชันหนึ่งก็ต่อเมื่อเวอร์ชันนั้นถูกสร้างโดย transaction ที่ committed ไปก่อน snapshot ของ transaction ที่กำลังอ่าน และยังไม่ถูกแทนที่ในมุมมองของ snapshot นั้น
+เมื่อคุณ `UPDATE` row PostgreSQL ไม่เปลี่ยน byte ที่มีอยู่ มันเขียน **version ใหม่** ของ row และทำเครื่องหมาย version เก่าว่าถูกแทนที่ ชั่วขณะหนึ่งทั้งสอง version อยู่บนดิสก์ version ไหนที่ transaction หนึ่งเห็นขึ้นกับว่า transaction นั้นเริ่มเมื่อไร
 
-## แต่ละ transaction อ่านจาก snapshot
+แต่ละ row version มี system column ซ่อนที่บันทึกช่วงชีวิตของมัน:
 
-**snapshot** คือชุดของข้อมูลที่ committed แล้วซึ่ง transaction ได้รับอนุญาตให้เห็น ภายใต้ Read Committed แต่ละคำสั่งจะหยิบ snapshot ใหม่ ภายใต้ Repeatable Read และ Serializable ทั้ง transaction ใช้ snapshot เดียวร่วมกัน เพราะการอ่านถูกตอบจาก snapshot `SELECT` ธรรมดาจึงไม่จำเป็นต้อง lock อะไรเลยและไม่เคยรอ writer
+- `xmin` — id ของ transaction ที่สร้าง version นี้
+- `xmax` — id ของ transaction ที่ลบหรือแทนที่มัน (ศูนย์ตราบใดที่ version ยัง live)
+- `ctid` — ตำแหน่งทางกายภาพของ version นี้: (หมายเลข page, line pointer)
 
-export const mvccDiagram = `flowchart TD
-  V1["Row version 1: balance 500, xmin 100, xmax 205"]
-  V2["Row version 2: balance 400, xmin 205, xmax 0"]
-  V1 -->|UPDATE by txn 205 creates| V2
-  S1["Snapshot A: started before txn 205 committed"]
-  S2["Snapshot B: started after txn 205 committed"]
-  S1 -->|reads| V1
-  S2 -->|reads| V2`;
-
-<Mermaid code={mvccDiagram} title="หนึ่ง row สองเวอร์ชัน สอง snapshot เห็นค่าต่างกัน" />
-
-ในแผนภาพ transaction 205 เปลี่ยน balance จาก 500 เป็น 400 reader ที่ snapshot เกิดก่อนการ commit ยังคงเห็น 500 จากเวอร์ชัน 1 reader ที่เริ่มหลังจากนั้นเห็น 400 จากเวอร์ชัน 2 ทั้งคู่กำลังอ่านโดยไม่มี lock ในเวลาเดียวกัน และทั้งคู่ถูกต้องสำหรับจุดเวลาของตัวเอง
-
-## ดู column ที่ซ่อนอยู่
-
-คุณสามารถขอ `xmin` และ `xmax` ได้โดยตรง ซึ่งทำให้กลไกนี้เป็นรูปธรรม รัน query เดียวกันก่อนและหลังการ update จาก session อื่นเพื่อดูเวอร์ชันเปลี่ยน
+transaction เห็น version ก็ต่อเมื่อมันถูกสร้างโดย transaction ที่ commit แล้วก่อน snapshot ของ transaction ที่อ่าน และยังไม่ถูกแทนที่ตามมุมมองของ snapshot นั้น
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT id, balance, xmin, xmax FROM accounts WHERE owner = 'Ada';
+    -- sql/hidden-columns.sql
+    SELECT ctid, xmin, xmax, owner, balance FROM accounts ORDER BY id;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(
-      'SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1',
+      'SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = $1',
       ['Ada'],
     );
     console.log(res.rows[0]);
@@ -62,44 +58,182 @@ export const mvccDiagram = `flowchart TD
   </TabItem>
   <TabItem label="Python">
     ```python
-    cur.execute("SELECT id, balance, xmin, xmax FROM accounts WHERE owner = %s", ("Ada",))
+    cur.execute("SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = %s", ("Ada",))
     row = cur.fetchone()
+    print(row)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    var id, xmin, xmax int64
-    var balance float64
-    conn.QueryRow(ctx,
-        "SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1", "Ada").
-        Scan(&id, &balance, &xmin, &xmax)
+    var ctid, xmin, xmax string
+    var balance string
+    err := conn.QueryRow(ctx,
+        "SELECT ctid::text, xmin::text, xmax::text, balance::text FROM accounts WHERE owner = $1", "Ada").
+        Scan(&ctid, &xmin, &xmax, &balance)
+    if err != nil {
+        return err
+    }
+    fmt.Println(ctid, xmin, xmax, balance)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let row = sqlx::query("SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1")
+    let row = sqlx::query("SELECT ctid::text AS ctid, xmin::text AS xmin, xmax::text AS xmax, balance::text AS balance FROM accounts WHERE owner = $1")
         .bind("Ada")
         .fetch_one(&pool)
         .await?;
+    println!("{} {} {} {}", row.get::<String, _>("ctid"), row.get::<String, _>("xmin"), row.get::<String, _>("xmax"), row.get::<String, _>("balance"));
     ```
   </TabItem>
 </Tabs>
 
 ```text
- id | balance |  xmin  | xmax
-----+---------+--------+------
-  1 |     400 | 100205 |    0
+ ctid  |  xmin  | xmax | owner | balance 
+-------+--------+------+-------+---------
+ (0,1) | 729142 |    0 | Ada   |     500
+ (0,2) | 729142 |    0 | Linus |     100
+(2 rows)
+```
+
+ทั้งสอง row ถูก insert โดย transaction เดียวกัน (`xmin` เดียวกัน) ทั้งคู่ live (`xmax` เป็น 0) และอยู่ที่ (0,1) กับ (0,2): page 0, line pointer 1 และ 2 driver ทั้งสี่อ่าน column เดียวกันได้ แต่ละการรันข้างล่างเป็นการเรียกแยกกัน ctid และ xmin จึงเดินหน้าไประหว่างการรัน:
+
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[hidden columns] Node.js (pg 8.23.0): { ctid: '(0,5)', xmin: '729130', xmax: '0', balance: '500' }
+[hidden columns] Python (psycopg 3.3.6): ('(0,6)', '729131', '0', Decimal('500'))
+[hidden columns] Go (pgx v5.11.0): (0,7) 729132 0 500
+[hidden columns] Rust (sqlx 0.9.0): (0,8) 729133 0 500
+```
+
+ทีนี้ update Ada row ไม่อยู่ที่ (0,1) แล้ว:
+
+```sql
+-- sql/update-new-version.sql
+UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+SELECT ctid, xmin, xmax, owner, balance FROM accounts ORDER BY id;
+```
+
+```text
+UPDATE 1
+ ctid  |  xmin  | xmax | owner | balance 
+-------+--------+------+-------+---------
+ (0,3) | 729143 |    0 | Ada   |     400
+ (0,2) | 729142 |    0 | Linus |     100
+(2 rows)
+```
+
+row ของ Ada ย้ายไป (0,3) และ `xmin` ของมันคือ id ของ transaction ที่ `UPDATE` version เก่าไม่ได้หายไปไหน `heap_page_items` อ่าน page ดิบ:
+
+```sql
+-- sql/heap-page.sql
+SELECT lp, lp_flags, t_xmin, t_xmax, t_ctid
+FROM heap_page_items(get_raw_page('accounts', 0));
+```
+
+```text
+ lp | lp_flags | t_xmin | t_xmax | t_ctid 
+----+----------+--------+--------+--------
+  1 |        1 | 729142 | 729143 | (0,3)
+  2 |        1 | 729142 |      0 | (0,2)
+  3 |        1 | 729143 |      0 | (0,3)
+(3 rows)
+```
+
+สาม line pointer สาม version version แรก (line pointer 1) มี `t_xmax` เท่ากับ transaction ที่ update และ `t_ctid` ชี้ไปข้างหน้าที่ (0,3) คือ version ใหม่ `SELECT` ธรรมดาข้ามมัน เพราะมันไม่มองเห็นสำหรับ snapshot ใหม่แล้ว แต่ทางกายภาพมันยังอยู่
+
+## แต่ละ transaction อ่าน snapshot
+
+**snapshot** คือชุดข้อมูลที่ commit แล้วที่ transaction มีสิทธิ์เห็น ภายใต้ Read Committed แต่ละ statement ถ่าย snapshot ใหม่ ภายใต้ Repeatable Read และ Serializable ทั้ง transaction ใช้ร่วมกันหนึ่งอัน เพราะการอ่านตอบจาก snapshot `SELECT` ธรรมดาจึงไม่ต้อง lock อะไรและไม่รอ writer เลย
+
+export const mvccDiagram = `flowchart TD
+  V1["Row version 1: balance 500, xmin T1, xmax T2"]
+  V2["Row version 2: balance 400, xmin T2, xmax 0"]
+  V1 -->|UPDATE by T2 creates| V2
+  S1["Snapshot A: taken before T2 committed"]
+  S2["Snapshot B: taken after T2 committed"]
+  S1 -->|reads| V1
+  S2 -->|reads| V2`;
+
+<Mermaid code={mvccDiagram} title="หนึ่ง row สอง version และสอง snapshot เห็นค่าต่างกัน" />
+
+ในแผนภาพ transaction T2 เปลี่ยนยอดจาก 500 เป็น 400 ผู้อ่านที่ snapshot มาก่อน commit ของ T2 ยังเห็น 500 จาก version 1 ผู้อ่านที่เริ่มหลังจากนั้นเห็น 400 จาก version 2 ทั้งคู่อ่านโดยไม่ lock พร้อมกัน และถูกต้องทั้งคู่ตามจุดเวลาของตน นี่คือเหตุการณ์นั้นกับสอง session จริง: A เปิด Repeatable Read snapshot และอ่าน row ของ Ada หนึ่งวินาทีต่อมา B update และ commit แล้ว A อ่านอีกครั้ง:
+
+```text
+-- session A: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = 'Ada';
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = 'Ada';
+COMMIT;
+SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = 'Ada';
+-- session A: psql output
+BEGIN
+ ctid  |  xmin  | xmax | balance 
+-------+--------+------+---------
+ (0,1) | 427048 |    0 |     500
+(1 row)
+
+ ctid  |  xmin  |  xmax  | balance 
+-------+--------+--------+---------
+ (0,1) | 427048 | 427049 |     500
+(1 row)
+
+COMMIT
+ ctid  |  xmin  | xmax | balance 
+-------+--------+------+---------
+ (0,3) | 427049 |    0 |     400
+(1 row)
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = 'Ada';
+-- session B: psql output
+UPDATE 1
+ ctid  |  xmin  | xmax | balance 
+-------+--------+------+---------
+ (0,3) | 427049 |    0 |     400
 (1 row)
 ```
 
-## dead tuple และ VACUUM
+การอ่านครั้งที่สองของ A แสดง version เก่าที่ `xmax` ถูกเติมแล้ว (id ของ transaction ของ B) แต่ A ยังเห็นมัน เพราะ commit ของ B ไม่ได้อยู่ใน snapshot ของ A หลัง `COMMIT` ของ A snapshot ใหม่เห็นเฉพาะ version ใหม่ที่ (0,3) ไม่มีใครรอใคร
 
-เวอร์ชันเก่าที่ถูกทิ้งไว้จากการ update และ delete เรียกว่า **dead tuple** เมื่อไม่มี snapshot ของ transaction ที่กำลังทำงานตัวใดต้องการเวอร์ชันนั้นอีกต่อไป เวอร์ชันนั้นก็เหลือเป็นแค่พื้นที่เสียเปล่า PostgreSQL ทวงคืนพื้นที่นั้นด้วย **VACUUM** ซึ่งรันอัตโนมัติในเบื้องหลัง (autovacuum) และยังรันด้วยมือได้ด้วย
+## Dead tuple และ VACUUM
+
+version เก่าที่ update และ delete ทิ้งไว้เรียกว่า **dead tuple** เมื่อไม่มี snapshot ของ transaction ที่รันอยู่จะต้องใช้ version นั้นอีก มันก็เป็นแค่พื้นที่เสียเปล่า PostgreSQL เรียกคืนพื้นที่ด้วย **VACUUM** ซึ่งรันอัตโนมัติเบื้องหลัง (autovacuum) และรันด้วยมือได้ view สถิตินับมัน `pg_stat_force_next_flush()` เผยแพร่ตัวนับที่ค้างของ session นี้เพื่อให้ view เป็นปัจจุบัน:
+
+```sql
+-- sql/dead-tuples.sql
+SELECT pg_stat_force_next_flush();  -- publish this session's pending counters now
+SELECT n_tup_upd, n_tup_hot_upd, n_live_tup, n_dead_tup
+FROM pg_stat_user_tables WHERE relname = 'accounts';
+```
+
+```text
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_tup_upd | n_tup_hot_upd | n_live_tup | n_dead_tup 
+-----------+---------------+------------+------------
+         1 |             1 |          2 |          1
+(1 row)
+```
+
+หนึ่ง update หนึ่ง dead tuple และ `n_tup_hot_upd` บอกว่ามันเป็น **HOT** (heap-only tuple) update: version ใหม่พอดีใน page เดิมและไม่มี column ที่ทำ index เปลี่ยน PostgreSQL จึงไม่ต้องแตะ index ใดเลย ทีนี้ vacuum:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/vacuum.sql
     VACUUM accounts;
+    SELECT lp, lp_flags, lp_off, t_xmin, t_xmax, t_ctid
+    FROM heap_page_items(get_raw_page('accounts', 0));
     -- check how many dead tuples a table is carrying:
     SELECT relname, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'accounts';
     ```
@@ -111,13 +245,14 @@ export const mvccDiagram = `flowchart TD
   </TabItem>
   <TabItem label="Python">
     ```python
-    conn.autocommit = True       # VACUUM cannot run inside a transaction
+    conn.autocommit = True  # VACUUM cannot run inside a transaction block
     cur.execute("VACUUM accounts")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     _, err := conn.Exec(ctx, "VACUUM accounts") // must not be inside a transaction
+    return err
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -128,74 +263,380 @@ export const mvccDiagram = `flowchart TD
 </Tabs>
 
 ```text
- relname  | n_dead_tup
+VACUUM
+ lp | lp_flags | lp_off | t_xmin | t_xmax | t_ctid 
+----+----------+--------+--------+--------+--------
+  1 |        2 |      3 |        |        | 
+  2 |        1 |   8144 | 729142 |      0 | (0,2)
+  3 |        1 |   8096 | 729143 |      0 | (0,3)
+(3 rows)
+
+ relname  | n_dead_tup 
 ----------+------------
  accounts |          0
 (1 row)
 ```
 
-**ใน pgAdmin:** คลิกขวาที่ table ในแผนผัง browser แล้วเลือก Maintenance เพื่อรัน `VACUUM` (หรือ `VACUUM ANALYZE`) ผ่านกล่องโต้ตอบแทนการพิมพ์เอง
+line pointer ของ version ที่ตายไม่ว่างเปล่า: `lp_flags = 2` แปลว่า **redirect** และ `lp_off = 3` บอกว่าไปที่ไหน: line pointer 1 ตอนนี้แค่ส่งต่อไปยัง version ที่ live ดังนั้น index entry ที่ยังชี้ (0,1) ทำงานต่อได้ `VACUUM accounts` เดียวกันจากแต่ละ driver หลัง update หนึ่งครั้งเพื่อสร้างพื้นที่ตาย:
+
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[VACUUM] Node.js (pg 8.23.0): n_dead_tup=0
+[VACUUM] Python (psycopg 3.3.6): n_dead_tup=0
+[VACUUM] Go (pgx v5.11.0): n_dead_tup=0
+[VACUUM] Rust (sqlx 0.9.0): n_dead_tup=0
+```
+
+**ใน pgAdmin:** คลิกขวาที่ table ใน browser tree และเลือก Maintenance เพื่อรัน `VACUUM` (หรือ `VACUUM ANALYZE`) ผ่าน dialog แทนการพิมพ์
+
+non-HOT update ทิ้งร่องรอยต่างออกไป เมื่อ update เปลี่ยน column ที่มี index version ใหม่ต้องมี index entry ใหม่ version เก่าจึงเป็น redirect ธรรมดาไม่ได้ หลัง `VACUUM` line pointer ของมันถูกปล่อย (`lp_flags = 0`, unused) และ insert ครั้งต่อไปใช้ซ้ำได้:
+
+```sql
+-- sql/non-hot.sql
+CREATE TABLE tagged (id int PRIMARY KEY, label text);
+CREATE INDEX tagged_label_idx ON tagged (label);
+INSERT INTO tagged VALUES (1, 'a');
+UPDATE tagged SET label = 'b' WHERE id = 1;   -- changes an indexed column: not a HOT update
+SELECT pg_stat_force_next_flush();
+SELECT relname, n_tup_upd, n_tup_hot_upd, n_dead_tup
+FROM pg_stat_user_tables WHERE relname IN ('accounts', 'tagged') ORDER BY 1;
+VACUUM tagged;
+SELECT lp, lp_flags, lp_off, t_xmin, t_xmax, t_ctid
+FROM heap_page_items(get_raw_page('tagged', 0));
+```
+
+```text
+CREATE TABLE
+CREATE INDEX
+INSERT 0 1
+UPDATE 1
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ relname  | n_tup_upd | n_tup_hot_upd | n_dead_tup 
+----------+-----------+---------------+------------
+ accounts |         1 |             1 |          0
+ tagged   |         1 |             0 |          1
+(2 rows)
+
+VACUUM
+ lp | lp_flags | lp_off | t_xmin | t_xmax | t_ctid 
+----+----------+--------+--------+--------+--------
+  1 |        0 |      0 |        |        | 
+  2 |        1 |   8160 | 729147 |      0 | (0,2)
+(2 rows)
+```
+
+`tagged` แสดง `n_tup_hot_upd = 0` และหลัง vacuum line pointer 1 เป็น `lp_flags = 0` ขณะที่ `accounts` มี redirect
+
+## Visibility map: ทำไมการนับไม่ฟรี
+
+ทุก row version ต้องถูกตรวจกับ snapshot ของผู้อ่าน นั่นคือเหตุผลที่ `count(*)` ใน PostgreSQL อ่าน table index-only scan ข้าม table ได้เฉพาะ page ที่ **visibility map** ทำเครื่องหมาย all-visible และ `VACUUM` คือสิ่งที่ตั้ง bit เหล่านั้น plan ข้างล่างนับ 100 000 row ผ่าน primary key index (planner จะเลือก sequential scan ที่นี่ จึงใช้ `enable_seqscan = off` บังคับ plan index-only เพื่อการสอนเท่านั้น):
+
+```sql
+-- sql/visibility-map.sql
+CREATE TABLE big AS SELECT g AS id, md5(g::text) AS payload FROM generate_series(1, 100000) g;
+ALTER TABLE big ADD PRIMARY KEY (id);
+ANALYZE big;
+SET enable_seqscan = off;  -- teaching switch only: force the index-only plan
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM big;
+VACUUM big;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM big;
+UPDATE big SET payload = payload WHERE id <= 1000;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM big;
+```
+
+```text
+SELECT 100000
+ALTER TABLE
+ANALYZE
+SET
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Index Only Scan using big_pkey on big (actual rows=100000.00 loops=1)
+         Heap Fetches: 100000
+         Index Searches: 1
+(4 rows)
+
+VACUUM
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Index Only Scan using big_pkey on big (actual rows=100000.00 loops=1)
+         Heap Fetches: 0
+         Index Searches: 1
+(4 rows)
+
+UPDATE 1000
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Index Only Scan using big_pkey on big (actual rows=100000.00 loops=1)
+         Heap Fetches: 2120
+         Index Searches: 1
+(4 rows)
+```
+
+สด ๆ จาก `CREATE TABLE AS` ไม่มีอะไรถูกทำเครื่องหมาย all-visible ดังนั้นทั้ง 100 000 index entry ต้อง fetch heap (`Heap Fetches: 100000`) หลัง `VACUUM` ไม่ต้องอีก (`Heap Fetches: 0`) หลัง update 1 000 row page ที่แตะเสีย bit อีกครั้ง และ fetch ราว 2 000 ครั้งกลับมา นี่คือเหตุผลที่ vacuum สำคัญต่อความเร็วอ่านด้วย ไม่ใช่แค่พื้นที่
+
+## transaction ยาวยับยั้งการเก็บกวาด
+
+version เก่าลบได้เมื่อ **ไม่มี** snapshot ใดในฐานข้อมูลที่ยังต้องใช้มัน snapshot ที่รันอยู่เก่าที่สุดจึงกำหนดขอบเขตการเก็บกวาด สองการรันของงานเดียวกัน: worker update หนึ่ง row 1 000 ครั้งและรัน `VACUUM (VERBOSE)` ขณะที่อีก session ถือ Repeatable Read transaction เปิดอยู่ ในการรันที่ 1 session นั้นเชื่อมต่อฐานข้อมูลอื่น ในการรันที่ 2 เชื่อมต่อฐานข้อมูลเดียวกัน:
+
+```text
+-- run 1: the open transaction is in ANOTHER database
+-- session holder (b3_h2): script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM t;
+\! sleep 5
+COMMIT;
+-- session worker (b3_h1): script
+\! sleep 1
+SELECT 'UPDATE t SET n = n + 1 WHERE id = 1;' FROM generate_series(1, 1000) \gexec
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) t;
+-- session worker: VACUUM output (three summary lines of the VERBOSE report)
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 187 removed, 1 remain, 0 are dead but not yet removable
+removable cutoff: 428058, which was 0 XIDs old when operation ended
+
+-- run 2: the open transaction is in the SAME database
+-- session holder (b3_h1): script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM t;
+\! sleep 5
+COMMIT;
+-- session worker (b3_h1): script
+\! sleep 1
+SELECT 'UPDATE t SET n = n + 1 WHERE id = 1;' FROM generate_series(1, 1000) \gexec
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) t;
+-- session worker: VACUUM output (three summary lines of the VERBOSE report)
+pages: 0 removed, 5 remain, 5 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 1001 remain, 1000 are dead but not yet removable
+removable cutoff: 428065, which was 1000 XIDs old when operation ended
+```
+
+ในการรันที่ 1 vacuum ของ worker ลบเท่าที่ลบได้และไม่พบอะไรที่ต้องเก็บ ในการรันที่ 2 ทั้ง 1 000 dead version เป็น "dead but not yet removable" และใช้ห้า page แทนหนึ่ง ขอบเขตเป็นต่อฐานข้อมูล (บวก shared catalog) ดังนั้น transaction ที่ลืมไว้ในฐานข้อมูลอื่นไม่เป็นอันตรายกับอันนี้ — แต่ transaction ที่ลืมไว้ที่นี่ถือทุกอย่างไว้ replication slot ก็ยับยั้งได้ด้วย: เอกสารอธิบาย `xmin` ของ slot ว่า "the oldest transaction that this slot needs the database to retain. `VACUUM` cannot remove tuples deleted by any later transaction" ([docs](https://www.postgresql.org/docs/18/view-pg-replication-slots.html)) และบทเรียน replication แสดงตัวอย่างในแล็บจริง
+
+## Bloat: snapshot ที่เปิดค้างมีต้นทุนเท่าไร
+
+table bloat คือพื้นที่ตายที่ค้างอยู่ในไฟล์ สร้างง่าย: ถือ snapshot หนึ่งอันเปิดไว้ขณะ update row ที่ร้อนซ้ำแล้วซ้ำอีก นี่คือ table counter หนึ่ง row ที่ update 50 000 ครั้งด้วย `pgbench` (script `UPDATE` คือ `UPDATE page_views SET views = views + 1 WHERE page = '/home';`) วัดบน Mac เครื่องนี้:
+
+```text
+-- run 1: nothing else is running
+$ pgbench -n -f pv.sql -t 50000 shop
+number of transactions actually processed: 50000/50000
+tps = 5220.507993 (without initial connection time)
+-- psql, right after pgbench
+SELECT pg_relation_size('page_views') / 8192 AS heap_pages, pg_size_pretty(pg_relation_size('page_views')) AS heap_size, views FROM page_views;
+ heap_pages | heap_size  | views 
+------------+------------+-------
+          1 | 8192 bytes | 50000
+(1 row)
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) page_views;
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 150 removed, 1 remain, 0 are dead but not yet removable
+
+-- run 2: session H holds a REPEATABLE READ snapshot open the whole time
+-- session H: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM page_views;
+\! sleep 45
+COMMIT;
+$ pgbench -n -f pv.sql -t 50000 shop
+number of transactions actually processed: 50000/50000
+tps = 2011.305710 (without initial connection time)
+-- psql, right after pgbench
+SELECT pg_relation_size('page_views') / 8192 AS heap_pages, pg_size_pretty(pg_relation_size('page_views')) AS heap_size, views FROM page_views;
+ heap_pages | heap_size | views 
+------------+-----------+-------
+        271 | 2168 kB   | 50000
+(1 row)
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) page_views;
+pages: 0 removed, 271 remain, 271 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 50001 remain, 50000 are dead but not yet removable
+
+-- run 3: session H reads inside a short transaction, then does its slow work outside it
+-- session H: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM page_views;
+COMMIT;
+\! sleep 45
+$ pgbench -n -f pv.sql -t 50000 shop
+number of transactions actually processed: 50000/50000
+tps = 7149.944781 (without initial connection time)
+-- psql, right after pgbench
+SELECT pg_relation_size('page_views') / 8192 AS heap_pages, pg_size_pretty(pg_relation_size('page_views')) AS heap_size, views FROM page_views;
+ heap_pages | heap_size  | views 
+------------+------------+-------
+          1 | 8192 bytes | 50000
+(1 row)
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) page_views;
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 34 removed, 1 remain, 0 are dead but not yet removable
+```
+
+การรันที่ 1 และ 3 จบด้วย page ขนาด 8 kB **หนึ่ง** page: HOT pruning ทำความสะอาด page ไปเรื่อย ๆ การรันที่ 2 มี snapshot เก่าเปิดอยู่ตลอด จึงไม่มีอะไร prune ได้: table โตเป็นหลายร้อย page ที่มี row live หนึ่งและ row ตายราว 50 000 `VACUUM` รายงาน `50000 are dead but not yet removable` และแม้แต่ throughput ก็เหลือราวหนึ่งในสาม เมื่อ snapshot จบ `VACUUM` เรียก version ที่ตายคืนให้ใช้ซ้ำ แต่ไฟล์ไม่ค่อยหดกลับ: มีแต่ page ที่ว่างสนิทตอนท้ายเท่านั้นที่ถูกตัด
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอให้ export counter ทุกคืน และต้องการให้สอดคล้องกัน จึงเปิด `REPEATABLE READ` transaction เดียวรอบทุกอย่าง:
+
+<SpotTheBug lang="python" code={`# AI comment: "one REPEATABLE READ transaction gives the export a consistent snapshot"
+conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+with conn.transaction():
+    rows = conn.execute("SELECT page, views FROM page_views").fetchall()
+    for page, views in rows:
+        upload_to_warehouse(page, views)  # slow network call, once per row`}>
+
+snapshot ถูกถือตั้งแต่ `SELECT` จนการอัปโหลดสุดท้ายเสร็จ และการเรียกเครือข่ายอาจใช้หลายนาที ตลอดเวลานั้นไม่มีอะไรในฐานข้อมูลนี้ถูกเก็บกวาดได้: นั่นคือการรันที่ 2 ข้างบน table counter โตเป็นหลายร้อย page และทุก update ช้าลง วิธีแก้คือให้ transaction สั้นเท่าการอ่าน (การรันที่ 3 ข้างบน): ดึง row ภายใน transaction ปิดมัน แล้วอัปโหลดทีหลัง `idle_in_transaction_session_timeout` คือตาข่ายนิรภัยสำหรับโค้ดที่ไม่ทำ
+
+```python
+with conn.transaction():
+    rows = conn.execute("SELECT page, views FROM page_views").fetchall()
+# the snapshot is gone here; do the slow work outside the transaction
+for page, views in rows:
+    upload_to_warehouse(page, views)
+```
+
+</SpotTheBug>
+
+## Freezing และ transaction id wraparound
+
+`xmin` และ `xmax` เป็นตัวนับ 32 บิต id จึงวนกลับในที่สุด PostgreSQL เปรียบเทียบมันแบบ modulo 2^31 ซึ่งหมายความว่า row ที่สร้าง "นานเกินไป" จะดูเหมือนอยู่ในอนาคตทันที เพื่อป้องกัน `VACUUM` **freeze** row version เก่า ทำเครื่องหมายว่ามองเห็นได้สำหรับทุกคนตลอดไป ([docs](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-WRAPAROUND)) เอกสารระบุว่าทุก table ต้อง vacuum อย่างน้อยหนึ่งครั้งทุกสองพันล้าน transaction, autovacuum บังคับรอบ freeze ที่ `autovacuum_freeze_max_age` (ค่า default 200 ล้าน) และเซิร์ฟเวอร์เริ่มเตือน 40 ล้าน transaction ก่อน wraparound และปฏิเสธการกำหนด id ใหม่เมื่อเหลือ 3 ล้าน อายุของ id ที่ยังไม่ freeze เก่าที่สุดดูได้:
+
+```sql
+-- sql/freeze.sql
+SELECT age(datfrozenxid) AS database_age FROM pg_database WHERE datname = current_database();
+SHOW autovacuum_freeze_max_age;
+SELECT relname, age(relfrozenxid) FROM pg_class WHERE relname = 'accounts';
+VACUUM (FREEZE) accounts;
+SELECT relname, age(relfrozenxid) FROM pg_class WHERE relname = 'accounts';
+SELECT lp, t_xmin, combined_flags
+FROM heap_page_items(get_raw_page('accounts', 0)),
+     LATERAL heap_tuple_infomask_flags(t_infomask, t_infomask2)
+WHERE lp = 2;
+```
+
+```text
+ datname |  age   
+---------+--------
+ b3_mvcc | 728408
+(1 row)
+
+ autovacuum_freeze_max_age 
+---------------------------
+ 200000000
+(1 row)
+
+ relname  | age 
+----------+-----
+ accounts |  11
+(1 row)
+
+VACUUM
+ relname  | age 
+----------+-----
+ accounts |   0
+(1 row)
+
+ lp | t_xmin |   combined_flags   
+----+--------+--------------------
+  2 | 729142 | {HEAP_XMIN_FROZEN}
+(1 row)
+```
+
+อายุของฐานข้อมูลมากบน cluster ทดลองนี้เพราะการรันก่อนหน้าทั้งหมด และต่ำกว่าขีดจำกัด 200 ล้านมาก `VACUUM (FREEZE)` ทำให้อายุของ table เป็น 0 และ flag ของ row เป็น `HEAP_XMIN_FROZEN`: `t_xmin` ของมันยังถูกเก็บแต่ตอนนี้ถูกละเลย `pg_current_xact_id()` คืน `xid8` 64 บิตที่ไม่ wrap ขณะที่ `xmin` คือ `xid` 32 บิต
+
+## Mental Model
+
+คิดว่า table คือสมุดบัญชีที่ไม่มีอะไรถูกลบเลย update ขีดฆ่ารายการเก่า (ตั้ง `xmax`) และเขียนรายการใหม่ข้างล่าง ผู้อ่านดูสมุดตามจังหวะเวลาเดียวและเพิกเฉยรายการที่เขียนทีหลังหรือถูกขีดฆ่าก่อนหน้านั้นได้ ต้องมีใครกลับมาลบบรรทัดที่ขีดฆ่าที่ไม่มีใครดูอยู่แล้ว: นั่นคือ VACUUM และผู้อ่านที่เก่าที่สุดทั่วฐานข้อมูลกำหนดว่ามันไปได้ไกลแค่ไหน
 
 ## เคล็ดลับและข้อควรระวัง
 
-- การอ่านธรรมดาไม่จับ row lock ภายใต้ MVCC ถ้าคุณต้องการให้การอ่านจอง row ไว้สำหรับการเขียนที่กำลังจะมา นั่นคือหน้าที่ของ `SELECT ... FOR UPDATE` ในบทเรียน locking
-- transaction ที่รันนานคือศัตรูของการ vacuuming ตราบใดที่ transaction ยังเปิดค้าง snapshot ของ transaction นั้นอาจยังต้องการเวอร์ชันเก่า dead tuple จึงถูกลบไม่ได้และ table จะบวม
-- `VACUUM` ทวงคืนพื้นที่เพื่อใช้ซ้ำภายใน table ปกติแล้วไม่ได้ลดขนาดไฟล์บนดิสก์ ส่วน `VACUUM FULL` ที่หนักกว่าทำได้ แต่ต้อง lock table ตลอดเวลาที่ทำงาน
-- การ update row เดิมซ้ำ ๆ บ่อย ๆ สร้างหลายเวอร์ชัน จับตา `n_dead_tup` ใน `pg_stat_user_tables` แล้วปล่อยให้ autovacuum ตามทัน หรือปรับจูน autovacuum เพิ่มสำหรับ table ที่ร้อน
+- การอ่านธรรมดาไม่ถือ row lock ภายใต้ MVCC ถ้าต้องการให้การอ่านจอง row สำหรับการเขียนที่จะมา นั่นคือหน้าที่ของ `SELECT ... FOR UPDATE` ในบทเรียน locking
+- transaction ที่รันนานคือศัตรูของ vacuum ขณะที่ transaction เปิดอยู่ snapshot ของมันอาจยังต้องใช้ version เก่า dead tuple จึงลบไม่ได้และ table บวม (271 page แทนหนึ่งข้างบน)
+- `VACUUM` เรียกพื้นที่คืนให้ใช้ซ้ำภายใน table ปกติไม่ทำให้ไฟล์บนดิสก์หด (ตัดเฉพาะ page ว่างตอนท้าย) `VACUUM FULL` เขียน table ใหม่ แต่ lock มันตลอดที่รัน
+- update ถี่ที่ row เดิมสร้าง version มาก ดู `n_dead_tup` ใน `pg_stat_user_tables` และให้ autovacuum ตามทัน หรือปรับจูนสำหรับ table ที่ร้อน
+- update column ที่มี index ทำให้ HOT ใช้ไม่ได้และเสียต้นทุนดูแล index หลีกเลี่ยงการทำ index column ที่เปลี่ยนตลอดเวลา
 
-<Callout title="ทำไม SELECT ของคุณจึงไม่เคยรอ">
-เหตุที่ analytics query ที่ช้าและการ update ที่หลั่งไหลสามารถรันด้วยกันได้อย่างมีความสุขก็คือ MVCC reader เห็น snapshot ที่ถูกตรึงไว้ ส่วน writer ต่อท้ายเวอร์ชันใหม่ไว้ข้างเวอร์ชันเก่า ไม่มีใคร block ใคร ราคาที่ต้องจ่ายคือ dead tuple ที่ทิ้งไว้ข้างหลัง และนั่นคือเหตุผลที่ VACUUM มีอยู่
+<Callout title="ทำไม SELECT ของคุณไม่เคยรอ">
+เหตุผลที่ query วิเคราะห์ช้า ๆ กับ update ที่ไหลเข้ามารันด้วยกันได้อย่างมีความสุขคือ MVCC ผู้อ่านเห็น snapshot ที่หยุดนิ่ง ผู้เขียนต่อ version ใหม่ข้าง version เก่า ไม่มีใครบล็อกใคร ราคาคือ dead tuple ที่ทิ้งไว้ ซึ่งเป็นเหตุผลว่าทำไมมี VACUUM
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| MVCC (reader ไม่บล็อก writer, writer ไม่บล็อก reader) | concurrency สูงมาก analytics query ยาว ๆ รันพร้อมกับ write load ได้โดยไม่ต้องรอกัน | ต้องเก็บ row เวอร์ชันเก่าไว้เป็น dead tuple ใช้พื้นที่เพิ่มและต้องมี VACUUM คอยเก็บกวาด |
-| lock-based concurrency control (ฐานข้อมูลอื่นบางตัว) | ไม่มี dead tuple สะสม ไม่ต้อง vacuum | reader กับ writer บล็อกกันเอง throughput ต่ำกว่าภายใต้ workload อ่าน-เขียนผสมกัน |
+| MVCC (ผู้อ่านไม่บล็อกผู้เขียน ผู้เขียนไม่บล็อกผู้อ่าน) | concurrency สูงมาก query ยาวรันคู่กับโหลดเขียนโดยไม่มีใครรอ (A อ่าน version เก่าขณะ B update) | ต้องเก็บ row version เก่าเป็น dead tuple ต้องมี `VACUUM` และการเฝ้าดู snapshot เก่าอันเดียวทำให้ table บวมราว 270 เท่า (271 page แทนหนึ่ง) |
+| HOT update | ไม่ต้องดูแล index และ prune page ได้ในที่ (8 kB หลัง 50 000 update) | เฉพาะเมื่อไม่มี column ที่ทำ index เปลี่ยน และ version ใหม่พอดีใน page เดิม |
+| Lock-based concurrency control (ที่ฐานข้อมูลอื่นบางตัวใช้) | ไม่มี dead tuple สะสม ไม่ต้อง vacuum | ผู้อ่านและผู้เขียนบล็อกกัน ทำให้ throughput ต่ำลงเมื่อ workload ผสม |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า `UPDATE` เขียนทับ row เดิมแบบไม่มีผลข้างเคียง** — ภายใต้ MVCC `UPDATE` สร้างเวอร์ชันใหม่เสมอและทิ้งเวอร์ชันเก่าไว้เป็น dead tuple ไม่ใช่การเขียนทับ byte เดิม
-- **ไม่รู้ว่า transaction ที่รันนานหน่วง VACUUM ทั้งฐานข้อมูล** — snapshot ของ transaction ที่ยังเปิดอยู่อาจยังต้องการเวอร์ชันเก่า ทำให้ VACUUM ลบ dead tuple ไม่ได้ ไม่ใช่แค่ table ของ transaction นั้นเอง แต่กระทบทั้งระบบ
-- **ลืมว่า `SELECT` อาจกำลังอ่านจาก snapshot เก่า** — ขณะที่ transaction อื่น commit การเปลี่ยนแปลงไปแล้ว transaction ของคุณอาจยังเห็นค่าก่อนหน้า ถ้าตรรกะแอปพลิเคชันคาดหวังค่าล่าสุดเสมอ ต้องออกแบบ isolation level ให้เหมาะสม
-
-> 💡 ตัวอย่างจากของจริง
->
-> **Dashboard และ analytics แบบ real-time** — สามารถรัน query ที่ใช้เวลาหลายวินาทีบน table เดียวกับที่แอปพลิเคชันกำลังเขียนอยู่ตลอดเวลา ได้โดยไม่บล็อกการเขียน เพราะ MVCC ให้แต่ละฝ่ายทำงานจาก snapshot ของตัวเอง นี่เป็นเหตุผลหลักที่หลายทีมเลือก PostgreSQL สำหรับ workload อ่าน-เขียนผสมกัน
->
-> **ทีม SRE ที่ tune autovacuum** — บริษัทที่มี table ขนาดใหญ่และ update ถี่ ๆ (เช่น session store หรือ counter table) มักต้องปรับจูน `autovacuum_vacuum_scale_factor` ให้ aggressive ขึ้นเพื่อป้องกัน table bloat จาก dead tuple ที่สะสมเร็วกว่าที่ autovacuum เริ่มทำงาน
+- **"UPDATE เขียนทับ row ที่เดิม"** มันเขียน version ใหม่ที่ `ctid` ใหม่ (0,1 กลายเป็น 0,3) และทิ้งของเก่าไว้
+- **"transaction ที่รันนานหยุด vacuum ทั้งระบบ"** ขอบเขตการเก็บกวาดเป็นต่อฐานข้อมูล: การรันที่ 1 ข้างบนไม่ได้รับผลจาก transaction ในฐานข้อมูลอื่น แต่มันหยุดทั้งฐานข้อมูลที่มันอยู่
+- **"VACUUM ทำให้ไฟล์หด"** มันคืนพื้นที่ให้ใช้ซ้ำ ไฟล์ 271 page ยังเป็น 271 page
+- **"count(*) ควรเป็นทันที"** ทุก version ต้องถูกตรวจกับ snapshot ของคุณ ข้ามได้เฉพาะ page ที่ visibility map ทำเครื่องหมาย all-visible
+- **"SELECT เห็นข้อมูลล่าสุด"** มันเห็น snapshot ของมัน ซึ่งเก่ากว่า commit ล่าสุดได้ (Repeatable Read แสดง 500 ขณะที่ row บอก 400 แล้ว)
 
 export const quizMvcc = [
   {
-    q: 'ภายใต้ MVCC เกิดอะไรขึ้นกับ row เมื่อเราสั่ง UPDATE?',
+    q: 'ภายใต้ MVCC เกิดอะไรกับ row เมื่อคุณ UPDATE มัน?',
     options: [
-      'byte เดิมถูกเขียนทับที่ตำแหน่งเดิม',
-      'เวอร์ชันใหม่ถูกเขียนและเวอร์ชันเก่าถูกทำเครื่องหมายว่าถูกแทนที่',
-      'row ถูก lock จนกว่าจะ VACUUM ครั้งถัดไป',
+      'byte ถูกเขียนทับที่เดิม',
+      'เขียน version ใหม่และ version เก่าถูกทำเครื่องหมายว่าถูกแทนที่',
+      'row ถูก lock จนกว่า VACUUM ครั้งถัดไป',
       'table ถูกเขียนใหม่ทั้งหมด',
     ],
     answer: 1,
+    explain: 'row ของ Ada ย้ายจาก ctid (0,1) ไป (0,3) version เก่าอยู่ใน page พร้อม `xmax` ที่ตั้งแล้ว ดูได้ใน `heap_page_items`',
   },
   {
-    q: 'ทำไม SELECT ธรรมดาถึงไม่ต้องรอ writer?',
+    q: 'ทำไม SELECT ธรรมดาไม่ต้องรอ writer?',
     options: [
-      'เพราะ writer ถูกหยุดชั่วคราวในระหว่างการอ่าน',
-      'เพราะ reader ตอบจาก snapshot ที่สอดคล้องกันของข้อมูลที่ committed แล้ว',
+      'เพราะ writer ถูกหยุดระหว่างการอ่าน',
+      'เพราะผู้อ่านตอบจาก snapshot ที่สอดคล้องของข้อมูลที่ commit แล้ว',
       'เพราะ SELECT อ่านจาก cache เสมอ',
       'เพราะ PostgreSQL ไม่มี writer',
     ],
     answer: 1,
+    explain: 'ในการรันสอง session A อ่าน version เก่าต่อไปขณะที่ B update และ commit และไม่มีใครรอ',
   },
   {
-    q: 'transaction ที่รันนาน ๆ สร้างปัญหาอะไรให้กับ MVCC?',
+    q: 'transaction ที่รันนานสร้างปัญหาอะไรให้ MVCC?',
     options: [
       'ทำให้ snapshot เสียหาย',
-      'กัน VACUUM ไม่ให้ลบเวอร์ชันเก่าของ row จน table บวม',
-      'ปิด autovacuum อย่างถาวร',
-      'ลด isolation level ลง',
+      'ขัดขวาง VACUUM ไม่ให้ลบ row version เก่า ทำให้เกิด bloat',
+      'ปิด autovacuum ถาวร',
+      'ลด isolation level',
     ],
     answer: 1,
+    explain: 'เมื่อถือ snapshot หนึ่งเปิดไว้ 50 000 update ที่ row เดียวทำให้ table โตเป็นหลายร้อย page และ `VACUUM` รายงาน dead tuple 50000 ที่ยังลบไม่ได้',
+  },
+  {
+    q: 'transaction ถูกทิ้งเปิดไว้ในฐานข้อมูล A มันยับยั้ง VACUUM ของ table ในฐานข้อมูล B ใน cluster เดียวกันได้ไหม?',
+    options: [
+      'ได้ ขอบเขตเป็นระดับ cluster',
+      'ไม่ได้ สำหรับ table ธรรมดาขอบเขตเป็นต่อฐานข้อมูล (replication slot และ standby feedback เป็นข้อยกเว้น)',
+      'เฉพาะเมื่ออยู่ที่ Serializable',
+      'เฉพาะเมื่อ table ชื่อเดียวกัน',
+    ],
+    answer: 1,
+    explain: 'การรันที่ 1 ของการทดลอง horizon: เมื่อผู้ถืออยู่ในฐานข้อมูลอื่น worker ลบ 187 tuple และไม่มีอันไหน "not yet removable"',
+  },
+  {
+    q: 'หลัง VACUUM index-only scan รายงาน Heap Fetches: 0 อะไรทำให้เป็นไปได้?',
+    options: [
+      'index เก็บทั้ง row แล้ว',
+      'VACUUM ตั้ง bit ของ visibility map จึงไม่ต้องเข้า page ของ table',
+      'planner cache ผลลัพธ์',
+      'autovacuum freeze table',
+    ],
+    answer: 1,
+    explain: 'visibility map ทำเครื่องหมาย page ที่ทุก row มองเห็นได้สำหรับทุกคน ก่อน VACUUM query เดียวกันต้อง fetch heap 100000 ครั้ง หลัง update 1000 row ราว 2000 ครั้งกลับมา',
   },
 ];
 

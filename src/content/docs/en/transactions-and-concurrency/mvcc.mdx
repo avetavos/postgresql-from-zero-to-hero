@@ -1,6 +1,6 @@
 ---
 title: MVCC
-description: Multi-Version Concurrency Control — how PostgreSQL lets writers and readers run without blocking each other by keeping multiple row versions and giving each transaction a snapshot.
+description: Multi-Version Concurrency Control — see xmin, xmax and ctid change, look inside a heap page, watch VACUUM and HOT updates, and prove why a long transaction bloats a table.
 sidebar:
   order: 4
 ---
@@ -10,51 +10,47 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-The isolation levels in the previous lesson all rest on one engine: **Multi-Version Concurrency Control**, or MVCC. Its promise is simple to state and powerful in practice — writers do not block readers, and readers do not block writers. A long report can keep reading while updates pour in, and neither side waits on the other.
+The isolation levels in the previous lesson all rest on one engine: **Multi-Version Concurrency Control**, or MVCC. Its promise is simple to state and powerful in practice — writers do not block readers, and readers do not block writers. A long report can keep reading while updates pour in, and neither side waits on the other ([docs](https://www.postgresql.org/docs/18/mvcc-intro.html)).
+
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). Transaction ids and page numbers are different on every cluster, so read the numbers for their relationships (this one is one higher than that one), not for their values. The `pageinspect` extension is used to look at raw heap pages; it is a contrib module that only a superuser can install, so it belongs in a lab, not in production.
+
+```sql
+-- sql/setup.sql
+CREATE EXTENSION pageinspect;  -- a contrib extension for looking inside pages; needs a superuser
+
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+```
 
 ## The core idea: never overwrite in place
 
 When you `UPDATE` a row, PostgreSQL does not change the existing bytes. It writes a **new version** of the row and marks the old version as superseded. For a moment both versions exist on disk. Which one a given transaction sees depends on when that transaction started.
 
-Each row version carries two hidden system columns that record its lifetime:
+Each row version carries hidden system columns that record its lifetime:
 
 - `xmin` — the id of the transaction that created this version.
-- `xmax` — the id of the transaction that deleted or replaced it (zero while the version is still live).
+- `xmax` — the id of the transaction that deleted or replaced it (zero while the version is live).
+- `ctid` — where this version physically lives: (page number, line pointer).
 
 A transaction sees a version only if it was created by a transaction that had committed before the reading transaction's snapshot, and not yet replaced as far as that snapshot is concerned.
-
-## Each transaction reads a snapshot
-
-A **snapshot** is the set of committed data a transaction is allowed to see. Under Read Committed each statement takes a new snapshot; under Repeatable Read and Serializable the whole transaction shares one. Because reads are answered from the snapshot, an ordinary `SELECT` never needs to lock anything and never waits for a writer.
-
-export const mvccDiagram = `flowchart TD
-  V1["Row version 1: balance 500, xmin 100, xmax 205"]
-  V2["Row version 2: balance 400, xmin 205, xmax 0"]
-  V1 -->|UPDATE by txn 205 creates| V2
-  S1["Snapshot A: started before txn 205 committed"]
-  S2["Snapshot B: started after txn 205 committed"]
-  S1 -->|reads| V1
-  S2 -->|reads| V2`;
-
-<Mermaid code={mvccDiagram} title="One row, two versions, two snapshots seeing different values" />
-
-In the diagram, transaction 205 changes a balance from 500 to 400. A reader whose snapshot predates the commit still sees 500 from version 1; a reader who started afterwards sees 400 from version 2. Both are reading without locks, at the same time, and both are correct for their point in time.
-
-## Seeing the hidden columns
-
-You can ask for `xmin` and `xmax` directly, which makes the mechanism concrete. Run the same query before and after an update from another session to watch the version change.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT id, balance, xmin, xmax FROM accounts WHERE owner = 'Ada';
+    -- sql/hidden-columns.sql
+    SELECT ctid, xmin, xmax, owner, balance FROM accounts ORDER BY id;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(
-      'SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1',
+      'SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = $1',
       ['Ada'],
     );
     console.log(res.rows[0]);
@@ -62,44 +58,182 @@ You can ask for `xmin` and `xmax` directly, which makes the mechanism concrete. 
   </TabItem>
   <TabItem label="Python">
     ```python
-    cur.execute("SELECT id, balance, xmin, xmax FROM accounts WHERE owner = %s", ("Ada",))
+    cur.execute("SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = %s", ("Ada",))
     row = cur.fetchone()
+    print(row)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    var id, xmin, xmax int64
-    var balance float64
-    conn.QueryRow(ctx,
-        "SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1", "Ada").
-        Scan(&id, &balance, &xmin, &xmax)
+    var ctid, xmin, xmax string
+    var balance string
+    err := conn.QueryRow(ctx,
+        "SELECT ctid::text, xmin::text, xmax::text, balance::text FROM accounts WHERE owner = $1", "Ada").
+        Scan(&ctid, &xmin, &xmax, &balance)
+    if err != nil {
+        return err
+    }
+    fmt.Println(ctid, xmin, xmax, balance)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let row = sqlx::query("SELECT id, balance, xmin, xmax FROM accounts WHERE owner = $1")
+    let row = sqlx::query("SELECT ctid::text AS ctid, xmin::text AS xmin, xmax::text AS xmax, balance::text AS balance FROM accounts WHERE owner = $1")
         .bind("Ada")
         .fetch_one(&pool)
         .await?;
+    println!("{} {} {} {}", row.get::<String, _>("ctid"), row.get::<String, _>("xmin"), row.get::<String, _>("xmax"), row.get::<String, _>("balance"));
     ```
   </TabItem>
 </Tabs>
 
 ```text
- id | balance |  xmin  | xmax
-----+---------+--------+------
-  1 |     400 | 100205 |    0
+ ctid  |  xmin  | xmax | owner | balance 
+-------+--------+------+-------+---------
+ (0,1) | 729142 |    0 | Ada   |     500
+ (0,2) | 729142 |    0 | Linus |     100
+(2 rows)
+```
+
+Both rows were inserted by the same transaction (same `xmin`), both are live (`xmax` is 0), and they sit at (0,1) and (0,2): page 0, line pointers 1 and 2. All four drivers can read the same columns; each run below is a separate call, so the ctid and xmin move on between runs:
+
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[hidden columns] Node.js (pg 8.23.0): { ctid: '(0,5)', xmin: '729130', xmax: '0', balance: '500' }
+[hidden columns] Python (psycopg 3.3.6): ('(0,6)', '729131', '0', Decimal('500'))
+[hidden columns] Go (pgx v5.11.0): (0,7) 729132 0 500
+[hidden columns] Rust (sqlx 0.9.0): (0,8) 729133 0 500
+```
+
+Now update Ada. The row does not stay at (0,1):
+
+```sql
+-- sql/update-new-version.sql
+UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+SELECT ctid, xmin, xmax, owner, balance FROM accounts ORDER BY id;
+```
+
+```text
+UPDATE 1
+ ctid  |  xmin  | xmax | owner | balance 
+-------+--------+------+-------+---------
+ (0,3) | 729143 |    0 | Ada   |     400
+ (0,2) | 729142 |    0 | Linus |     100
+(2 rows)
+```
+
+Ada's row moved to (0,3) and its `xmin` is the id of the `UPDATE` transaction. The old version has not gone anywhere. `heap_page_items` reads the raw page:
+
+```sql
+-- sql/heap-page.sql
+SELECT lp, lp_flags, t_xmin, t_xmax, t_ctid
+FROM heap_page_items(get_raw_page('accounts', 0));
+```
+
+```text
+ lp | lp_flags | t_xmin | t_xmax | t_ctid 
+----+----------+--------+--------+--------
+  1 |        1 | 729142 | 729143 | (0,3)
+  2 |        1 | 729142 |      0 | (0,2)
+  3 |        1 | 729143 |      0 | (0,3)
+(3 rows)
+```
+
+Three line pointers, three versions. The first version (line pointer 1) has `t_xmax` equal to the updating transaction, and its `t_ctid` points forward to (0,3), the new version. A plain `SELECT` skips it because it is no longer visible to new snapshots, but it is physically still there.
+
+## Each transaction reads a snapshot
+
+A **snapshot** is the set of committed data a transaction is allowed to see. Under Read Committed each statement takes a new snapshot; under Repeatable Read and Serializable the whole transaction shares one. Because reads are answered from the snapshot, an ordinary `SELECT` never needs to lock anything and never waits for a writer.
+
+export const mvccDiagram = `flowchart TD
+  V1["Row version 1: balance 500, xmin T1, xmax T2"]
+  V2["Row version 2: balance 400, xmin T2, xmax 0"]
+  V1 -->|UPDATE by T2 creates| V2
+  S1["Snapshot A: taken before T2 committed"]
+  S2["Snapshot B: taken after T2 committed"]
+  S1 -->|reads| V1
+  S2 -->|reads| V2`;
+
+<Mermaid code={mvccDiagram} title="One row, two versions, two snapshots seeing different values" />
+
+In the diagram, transaction T2 changes a balance from 500 to 400. A reader whose snapshot predates T2's commit still sees 500 from version 1; a reader who started afterwards sees 400 from version 2. Both read without locks, at the same time, and both are correct for their point in time. Here is that with two real sessions: A opens a Repeatable Read snapshot and reads Ada's row; one second later B updates it and commits; A reads again:
+
+```text
+-- session A: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = 'Ada';
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = 'Ada';
+COMMIT;
+SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = 'Ada';
+-- session A: psql output
+BEGIN
+ ctid  |  xmin  | xmax | balance 
+-------+--------+------+---------
+ (0,1) | 427048 |    0 |     500
+(1 row)
+
+ ctid  |  xmin  |  xmax  | balance 
+-------+--------+--------+---------
+ (0,1) | 427048 | 427049 |     500
+(1 row)
+
+COMMIT
+ ctid  |  xmin  | xmax | balance 
+-------+--------+------+---------
+ (0,3) | 427049 |    0 |     400
+(1 row)
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance - 100 WHERE owner = 'Ada';
+SELECT ctid, xmin, xmax, balance FROM accounts WHERE owner = 'Ada';
+-- session B: psql output
+UPDATE 1
+ ctid  |  xmin  | xmax | balance 
+-------+--------+------+---------
+ (0,3) | 427049 |    0 |     400
 (1 row)
 ```
 
+A's second read shows the old version with its `xmax` already filled in (B's transaction id), yet A still sees it, because B's commit is not part of A's snapshot. After A's `COMMIT`, a new snapshot sees only the new version at (0,3). Nobody waited for anybody.
+
 ## Dead tuples and VACUUM
 
-The old versions left behind by updates and deletes are called **dead tuples**. Once no running transaction's snapshot could possibly need a version any more, it is just wasted space. PostgreSQL reclaims that space with **VACUUM**, which runs automatically in the background (autovacuum) and can also be run by hand.
+The old versions left behind by updates and deletes are called **dead tuples**. Once no running transaction's snapshot could possibly need a version any more, it is just wasted space. PostgreSQL reclaims that space with **VACUUM**, which runs automatically in the background (autovacuum) and can also be run by hand. The statistics view counts them; `pg_stat_force_next_flush()` publishes this session's pending counters so the view is current:
+
+```sql
+-- sql/dead-tuples.sql
+SELECT pg_stat_force_next_flush();  -- publish this session's pending counters now
+SELECT n_tup_upd, n_tup_hot_upd, n_live_tup, n_dead_tup
+FROM pg_stat_user_tables WHERE relname = 'accounts';
+```
+
+```text
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ n_tup_upd | n_tup_hot_upd | n_live_tup | n_dead_tup 
+-----------+---------------+------------+------------
+         1 |             1 |          2 |          1
+(1 row)
+```
+
+One update, one dead tuple, and `n_tup_hot_upd` says it was a **HOT** (heap-only tuple) update: the new version fit on the same page and no indexed column changed, so PostgreSQL did not have to touch any index. Now vacuum it:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/vacuum.sql
     VACUUM accounts;
+    SELECT lp, lp_flags, lp_off, t_xmin, t_xmax, t_ctid
+    FROM heap_page_items(get_raw_page('accounts', 0));
     -- check how many dead tuples a table is carrying:
     SELECT relname, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'accounts';
     ```
@@ -111,13 +245,14 @@ The old versions left behind by updates and deletes are called **dead tuples**. 
   </TabItem>
   <TabItem label="Python">
     ```python
-    conn.autocommit = True       # VACUUM cannot run inside a transaction
+    conn.autocommit = True  # VACUUM cannot run inside a transaction block
     cur.execute("VACUUM accounts")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     _, err := conn.Exec(ctx, "VACUUM accounts") // must not be inside a transaction
+    return err
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -128,20 +263,304 @@ The old versions left behind by updates and deletes are called **dead tuples**. 
 </Tabs>
 
 ```text
- relname  | n_dead_tup
+VACUUM
+ lp | lp_flags | lp_off | t_xmin | t_xmax | t_ctid 
+----+----------+--------+--------+--------+--------
+  1 |        2 |      3 |        |        | 
+  2 |        1 |   8144 | 729142 |      0 | (0,2)
+  3 |        1 |   8096 | 729143 |      0 | (0,3)
+(3 rows)
+
+ relname  | n_dead_tup 
 ----------+------------
  accounts |          0
 (1 row)
 ```
 
+The dead version's line pointer is not empty: `lp_flags = 2` means **redirect**, and `lp_off = 3` says where to: line pointer 1 now just forwards to the live version, so an index entry that still points at (0,1) keeps working. The same `VACUUM accounts` from each driver, after one update to create dead space:
+
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[VACUUM] Node.js (pg 8.23.0): n_dead_tup=0
+[VACUUM] Python (psycopg 3.3.6): n_dead_tup=0
+[VACUUM] Go (pgx v5.11.0): n_dead_tup=0
+[VACUUM] Rust (sqlx 0.9.0): n_dead_tup=0
+```
+
 **In pgAdmin:** right-click a table in the browser tree and choose Maintenance to run `VACUUM` (or `VACUUM ANALYZE`) through a dialog instead of typing it.
+
+A non-HOT update leaves a different trail. When the update changes an indexed column, the new version needs new index entries, so the old one cannot be a simple redirect. After `VACUUM` its line pointer is freed (`lp_flags = 0`, unused) and can be reused by the next insert:
+
+```sql
+-- sql/non-hot.sql
+CREATE TABLE tagged (id int PRIMARY KEY, label text);
+CREATE INDEX tagged_label_idx ON tagged (label);
+INSERT INTO tagged VALUES (1, 'a');
+UPDATE tagged SET label = 'b' WHERE id = 1;   -- changes an indexed column: not a HOT update
+SELECT pg_stat_force_next_flush();
+SELECT relname, n_tup_upd, n_tup_hot_upd, n_dead_tup
+FROM pg_stat_user_tables WHERE relname IN ('accounts', 'tagged') ORDER BY 1;
+VACUUM tagged;
+SELECT lp, lp_flags, lp_off, t_xmin, t_xmax, t_ctid
+FROM heap_page_items(get_raw_page('tagged', 0));
+```
+
+```text
+CREATE TABLE
+CREATE INDEX
+INSERT 0 1
+UPDATE 1
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ relname  | n_tup_upd | n_tup_hot_upd | n_dead_tup 
+----------+-----------+---------------+------------
+ accounts |         1 |             1 |          0
+ tagged   |         1 |             0 |          1
+(2 rows)
+
+VACUUM
+ lp | lp_flags | lp_off | t_xmin | t_xmax | t_ctid 
+----+----------+--------+--------+--------+--------
+  1 |        0 |      0 |        |        | 
+  2 |        1 |   8160 | 729147 |      0 | (0,2)
+(2 rows)
+```
+
+`tagged` shows `n_tup_hot_upd = 0`, and after the vacuum line pointer 1 is `lp_flags = 0`, while `accounts` had a redirect.
+
+## The visibility map: why counting is not free
+
+Every row version has to be checked against the reader's snapshot, which is why `count(*)` in PostgreSQL reads the table. An index-only scan can skip the table only for pages the **visibility map** marks all-visible, and `VACUUM` is what sets those bits. The plans below count 100 000 rows through the primary key index (the planner would pick a sequential scan here, so `enable_seqscan = off` forces the index-only plan for teaching only):
+
+```sql
+-- sql/visibility-map.sql
+CREATE TABLE big AS SELECT g AS id, md5(g::text) AS payload FROM generate_series(1, 100000) g;
+ALTER TABLE big ADD PRIMARY KEY (id);
+ANALYZE big;
+SET enable_seqscan = off;  -- teaching switch only: force the index-only plan
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM big;
+VACUUM big;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM big;
+UPDATE big SET payload = payload WHERE id <= 1000;
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) SELECT count(*) FROM big;
+```
+
+```text
+SELECT 100000
+ALTER TABLE
+ANALYZE
+SET
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Index Only Scan using big_pkey on big (actual rows=100000.00 loops=1)
+         Heap Fetches: 100000
+         Index Searches: 1
+(4 rows)
+
+VACUUM
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Index Only Scan using big_pkey on big (actual rows=100000.00 loops=1)
+         Heap Fetches: 0
+         Index Searches: 1
+(4 rows)
+
+UPDATE 1000
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Index Only Scan using big_pkey on big (actual rows=100000.00 loops=1)
+         Heap Fetches: 2120
+         Index Searches: 1
+(4 rows)
+```
+
+Fresh from `CREATE TABLE AS`, nothing is marked all-visible, so all 100 000 index entries need a heap fetch (`Heap Fetches: 100000`). After `VACUUM` none do (`Heap Fetches: 0`). After 1 000 rows are updated, the pages they touched lose their bit again and about 2 000 fetches come back. This is also why vacuum matters for read speed, not only for space.
+
+## Long transactions hold back cleanup
+
+An old version can only be removed when **no** snapshot in the database can still need it. The oldest running snapshot therefore sets the cleanup horizon. Two runs of the same job: a worker updates one row 1 000 times and runs `VACUUM (VERBOSE)`, while another session holds a Repeatable Read transaction open. In run 1 that session is connected to a different database; in run 2 to the same one:
+
+```text
+-- run 1: the open transaction is in ANOTHER database
+-- session holder (b3_h2): script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM t;
+\! sleep 5
+COMMIT;
+-- session worker (b3_h1): script
+\! sleep 1
+SELECT 'UPDATE t SET n = n + 1 WHERE id = 1;' FROM generate_series(1, 1000) \gexec
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) t;
+-- session worker: VACUUM output (three summary lines of the VERBOSE report)
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 187 removed, 1 remain, 0 are dead but not yet removable
+removable cutoff: 428058, which was 0 XIDs old when operation ended
+
+-- run 2: the open transaction is in the SAME database
+-- session holder (b3_h1): script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM t;
+\! sleep 5
+COMMIT;
+-- session worker (b3_h1): script
+\! sleep 1
+SELECT 'UPDATE t SET n = n + 1 WHERE id = 1;' FROM generate_series(1, 1000) \gexec
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) t;
+-- session worker: VACUUM output (three summary lines of the VERBOSE report)
+pages: 0 removed, 5 remain, 5 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 1001 remain, 1000 are dead but not yet removable
+removable cutoff: 428065, which was 1000 XIDs old when operation ended
+```
+
+In run 1 the worker's vacuum removes what it can and finds nothing it must keep; in run 2 all 1 000 dead versions are "dead but not yet removable" and five pages have been consumed instead of one. The horizon is per database (plus the shared catalogs), so a forgotten transaction in another database is harmless to this one — but a forgotten transaction here holds everything. A replication slot can hold it back too: the documentation describes a slot's `xmin` as "the oldest transaction that this slot needs the database to retain. `VACUUM` cannot remove tuples deleted by any later transaction" ([docs](https://www.postgresql.org/docs/18/view-pg-replication-slots.html)), and the replication lesson shows one in a live lab.
+
+## Bloat: what an open snapshot costs
+
+Table bloat is dead space that stays in the file. It is easy to produce: keep one snapshot open while a hot row is updated over and over. This is a one-row counter table updated 50 000 times with `pgbench` (the `UPDATE` script is `UPDATE page_views SET views = views + 1 WHERE page = '/home';`), measured on this Mac:
+
+```text
+-- run 1: nothing else is running
+$ pgbench -n -f pv.sql -t 50000 shop
+number of transactions actually processed: 50000/50000
+tps = 5220.507993 (without initial connection time)
+-- psql, right after pgbench
+SELECT pg_relation_size('page_views') / 8192 AS heap_pages, pg_size_pretty(pg_relation_size('page_views')) AS heap_size, views FROM page_views;
+ heap_pages | heap_size  | views 
+------------+------------+-------
+          1 | 8192 bytes | 50000
+(1 row)
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) page_views;
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 150 removed, 1 remain, 0 are dead but not yet removable
+
+-- run 2: session H holds a REPEATABLE READ snapshot open the whole time
+-- session H: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM page_views;
+\! sleep 45
+COMMIT;
+$ pgbench -n -f pv.sql -t 50000 shop
+number of transactions actually processed: 50000/50000
+tps = 2011.305710 (without initial connection time)
+-- psql, right after pgbench
+SELECT pg_relation_size('page_views') / 8192 AS heap_pages, pg_size_pretty(pg_relation_size('page_views')) AS heap_size, views FROM page_views;
+ heap_pages | heap_size | views 
+------------+-----------+-------
+        271 | 2168 kB   | 50000
+(1 row)
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) page_views;
+pages: 0 removed, 271 remain, 271 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 50001 remain, 50000 are dead but not yet removable
+
+-- run 3: session H reads inside a short transaction, then does its slow work outside it
+-- session H: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM page_views;
+COMMIT;
+\! sleep 45
+$ pgbench -n -f pv.sql -t 50000 shop
+number of transactions actually processed: 50000/50000
+tps = 7149.944781 (without initial connection time)
+-- psql, right after pgbench
+SELECT pg_relation_size('page_views') / 8192 AS heap_pages, pg_size_pretty(pg_relation_size('page_views')) AS heap_size, views FROM page_views;
+ heap_pages | heap_size  | views 
+------------+------------+-------
+          1 | 8192 bytes | 50000
+(1 row)
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) page_views;
+pages: 0 removed, 1 remain, 1 scanned (100.00% of total), 0 eagerly scanned
+tuples: 34 removed, 1 remain, 0 are dead but not yet removable
+```
+
+Run 1 and run 3 finish with **one** 8 kB page: HOT pruning cleans the page as it goes. Run 2 has an old snapshot open the whole time, so nothing can be pruned: the table grows to hundreds of pages holding one live row and about 50 000 dead ones, `VACUUM` reports `50000 are dead but not yet removable`, and even the throughput is about a third. When the snapshot ends, `VACUUM` reclaims the dead versions for reuse, but a file rarely shrinks back: only completely empty pages at the end are truncated.
+
+## Reading AI-generated code
+
+An assistant is asked for a nightly export of the counters and wants it consistent, so it opens one `REPEATABLE READ` transaction around everything:
+
+<SpotTheBug lang="python" code={`# AI comment: "one REPEATABLE READ transaction gives the export a consistent snapshot"
+conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+with conn.transaction():
+    rows = conn.execute("SELECT page, views FROM page_views").fetchall()
+    for page, views in rows:
+        upload_to_warehouse(page, views)  # slow network call, once per row`}>
+
+The snapshot is held from the `SELECT` until the last upload finishes, and the network calls can take minutes. For all of that time nothing in this database can be cleaned up: that is run 2 above, with the counters table growing to hundreds of pages and every update slowing down. The fix is to keep the transaction as short as the read (run 3 above): fetch the rows inside the transaction, close it, and upload afterwards. `idle_in_transaction_session_timeout` is the safety net for code that does not.
+
+```python
+with conn.transaction():
+    rows = conn.execute("SELECT page, views FROM page_views").fetchall()
+# the snapshot is gone here; do the slow work outside the transaction
+for page, views in rows:
+    upload_to_warehouse(page, views)
+```
+
+</SpotTheBug>
+
+## Freezing and transaction id wraparound
+
+`xmin` and `xmax` are 32-bit counters, so ids eventually wrap around; PostgreSQL compares them modulo 2^31, which means a row created "too long ago" would suddenly look like it is in the future. To prevent that, `VACUUM` **freezes** old row versions, marking them as visible to everyone forever ([docs](https://www.postgresql.org/docs/18/routine-vacuuming.html#VACUUM-FOR-WRAPAROUND)). The documentation states that every table must be vacuumed at least once every two billion transactions, that autovacuum forces a freeze pass at `autovacuum_freeze_max_age` (200 million by default), and that the server starts warning 40 million transactions before wraparound and refuses to assign new ids at 3 million. The age of the oldest unfrozen id is visible:
+
+```sql
+-- sql/freeze.sql
+SELECT age(datfrozenxid) AS database_age FROM pg_database WHERE datname = current_database();
+SHOW autovacuum_freeze_max_age;
+SELECT relname, age(relfrozenxid) FROM pg_class WHERE relname = 'accounts';
+VACUUM (FREEZE) accounts;
+SELECT relname, age(relfrozenxid) FROM pg_class WHERE relname = 'accounts';
+SELECT lp, t_xmin, combined_flags
+FROM heap_page_items(get_raw_page('accounts', 0)),
+     LATERAL heap_tuple_infomask_flags(t_infomask, t_infomask2)
+WHERE lp = 2;
+```
+
+```text
+ datname |  age   
+---------+--------
+ b3_mvcc | 728408
+(1 row)
+
+ autovacuum_freeze_max_age 
+---------------------------
+ 200000000
+(1 row)
+
+ relname  | age 
+----------+-----
+ accounts |  11
+(1 row)
+
+VACUUM
+ relname  | age 
+----------+-----
+ accounts |   0
+(1 row)
+
+ lp | t_xmin |   combined_flags   
+----+--------+--------------------
+  2 | 729142 | {HEAP_XMIN_FROZEN}
+(1 row)
+```
+
+The database's age is large on this scratch cluster because of all the earlier runs, and far below the 200 million limit. `VACUUM (FREEZE)` brought the table's age to 0 and the row's flags to `HEAP_XMIN_FROZEN`: its `t_xmin` is still stored but is now ignored. `pg_current_xact_id()` returns the 64-bit `xid8`, which does not wrap, while `xmin` is the 32-bit `xid`.
+
+## Mental Model
+
+Think of a table as a ledger where nothing is ever erased. An update strikes a line through the old entry (sets its `xmax`) and writes a new one below. A reader looks at the ledger as of one moment and simply ignores entries that were written later or struck through earlier. Someone has to come back and remove the struck-through lines nobody can be looking at any more: that is VACUUM, and the oldest reader anywhere in the database decides how far it may go.
 
 ## Tips / gotchas
 
 - Ordinary reads take no row locks under MVCC. If you need a read to also reserve a row for a coming write, that is what the locking lesson's `SELECT ... FOR UPDATE` is for.
-- Long-running transactions are the enemy of vacuuming. While a transaction stays open, its snapshot may still need old versions, so dead tuples cannot be removed and tables bloat.
-- `VACUUM` reclaims space for reuse within the table; it does not normally shrink the file on disk. The heavier `VACUUM FULL` does, but it locks the table while it runs.
+- Long-running transactions are the enemy of vacuuming. While a transaction stays open, its snapshot may still need old versions, so dead tuples cannot be removed and tables bloat (271 pages instead of one above).
+- `VACUUM` reclaims space for reuse within the table; it does not normally shrink the file on disk (only empty pages at the end are truncated). `VACUUM FULL` rewrites the table, but locks it while it runs.
 - Frequent updates to the same rows create many versions. Watch `n_dead_tup` in `pg_stat_user_tables` and let autovacuum keep up, or tune it for hot tables.
+- Updating an indexed column defeats HOT and costs index maintenance; avoid indexing columns that change constantly.
 
 <Callout title="Why your SELECTs never wait">
 The reason a slow analytics query and a flood of updates can run together happily is MVCC. The reader sees a frozen snapshot; the writers append new versions beside the old ones. Nobody blocks anybody. The price is the dead tuples left behind, which is exactly why VACUUM exists.
@@ -151,20 +570,17 @@ The reason a slow analytics query and a flood of updates can run together happil
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| MVCC (readers do not block writers, writers do not block readers) | Very high concurrency; a long analytics query can run alongside write load with neither waiting on the other | Must retain old row versions as dead tuples, using extra space and requiring `VACUUM` to clean up |
-| Lock-based concurrency control (used by some other databases) | No accumulating dead tuples, no vacuum needed | Readers and writers block each other, lowering throughput under a mixed read-write workload |
+| MVCC (readers do not block writers, writers do not block readers) | Very high concurrency; a long query runs alongside write load with neither waiting (A read the old version while B updated) | Must retain old row versions as dead tuples, needing `VACUUM` and monitoring; one old snapshot can bloat a table about 270-fold (271 pages instead of one) |
+| HOT updates | No index maintenance, and pages can be pruned in place (8 kB after 50 000 updates) | Only when no indexed column changes and the new version fits on the same page |
+| Lock-based concurrency control (used by some other databases) | No accumulating dead tuples, no vacuum needed | Readers and writers block each other, lowering throughput under a mixed workload |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming `UPDATE` overwrites the row in place with no side effect** — under MVCC, `UPDATE` always creates a new version and leaves the old one behind as a dead tuple; it is not an in-place byte overwrite.
-- **Not realizing a long-running transaction stalls vacuuming for the whole database** — an open transaction's snapshot may still need old versions, so `VACUUM` cannot remove those dead tuples — not just in that transaction's own table, but system-wide.
-- **Forgetting a `SELECT` may be reading from an old snapshot** — while another transaction has already committed a change, yours may still see the earlier value. If your application logic expects the latest value, design the isolation level accordingly.
-
-> 💡 Real-world example
->
-> **Real-time dashboards and analytics** — can run a query that takes several seconds against the same table an application is continuously writing to, without blocking those writes, because MVCC lets each side work from its own snapshot. This is a major reason many teams choose PostgreSQL for mixed read-write workloads.
->
-> **SRE teams tuning autovacuum** — companies with large, frequently updated tables (a session store or a counter table) often need a more aggressive `autovacuum_vacuum_scale_factor` to prevent table bloat from dead tuples accumulating faster than autovacuum starts working.
+- **"UPDATE overwrites the row in place."** It writes a new version at a new `ctid` (0,1 became 0,3) and leaves the old one behind.
+- **"A long-running transaction stalls vacuuming system-wide."** The cleanup horizon is per database: run 1 above was unaffected by a transaction in another database. It does stall the whole database it lives in.
+- **"VACUUM shrinks the file."** It frees space for reuse; the 271-page file stayed 271 pages.
+- **"count(*) should be instant."** Every version must be checked against your snapshot; only pages the visibility map marks all-visible can be skipped.
+- **"A SELECT sees the latest data."** It sees its snapshot, which can be older than the latest commit (Repeatable Read showed 500 while the row already said 400).
 
 export const quizMvcc = [
   {
@@ -176,6 +592,7 @@ export const quizMvcc = [
       'The table is rewritten entirely',
     ],
     answer: 1,
+    explain: 'Ada\'s row moved from ctid (0,1) to (0,3); the old version stayed on the page with `xmax` set, visible in `heap_page_items`.',
   },
   {
     q: 'Why does an ordinary SELECT not need to wait for a writer?',
@@ -186,6 +603,7 @@ export const quizMvcc = [
       'Because PostgreSQL has no writers',
     ],
     answer: 1,
+    explain: 'In the two-session run A kept reading the old version while B updated and committed, and neither waited.',
   },
   {
     q: 'What problem do long-running transactions cause for MVCC?',
@@ -196,6 +614,29 @@ export const quizMvcc = [
       'They lower the isolation level',
     ],
     answer: 1,
+    explain: 'With one snapshot held open, 50 000 updates to a single row grew the table to hundreds of pages and `VACUUM` reported 50000 dead tuples not yet removable.',
+  },
+  {
+    q: 'A transaction is left open in database A. Can it hold back VACUUM of a table in database B in the same cluster?',
+    options: [
+      'Yes, the horizon is cluster-wide',
+      'No, for ordinary tables the horizon is per database (replication slots and standby feedback are the exceptions)',
+      'Only if it is at Serializable',
+      'Only if the tables have the same name',
+    ],
+    answer: 1,
+    explain: 'Run 1 of the horizon experiment: with the holder in another database, the worker removed 187 tuples and none were "not yet removable".',
+  },
+  {
+    q: 'After VACUUM, an index-only scan reports Heap Fetches: 0. What made that possible?',
+    options: [
+      'The index now stores the whole row',
+      'VACUUM set the visibility map bits, so the table pages need not be visited',
+      'The planner cached the result',
+      'Autovacuum froze the table',
+    ],
+    answer: 1,
+    explain: 'The visibility map marks pages where every row is visible to everyone. Before VACUUM the same query needed 100000 heap fetches; after 1000 updates about 2000 came back.',
   },
 ];
 
