@@ -1,6 +1,6 @@
 ---
 title: Replication
-description: คัดลอกการเปลี่ยนแปลงจาก primary server ไปยัง read replica ด้วย streaming replication เลือกระหว่างโหมด synchronous และ asynchronous เข้าใจ failover และใช้ logical replication เพื่อคัดลอก table ที่เลือก
+description: คัดลอกการเปลี่ยนแปลงของเซิร์ฟเวอร์หลักไปยัง read replica ด้วย streaming replication เลือกระหว่างโหมด synchronous กับ asynchronous ทำ failover ด้วย pg_promote และคัดลอกบาง table ด้วย logical replication — ทั้งหมดทำซ้ำในแล็บสองคอนเทนเนอร์จริง
 sidebar:
   order: 2
 ---
@@ -10,16 +10,23 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-server ตัวเดียวคือจุดล้มเหลวจุดเดียว ถ้าดิสก์พังหรือเครื่อง reboot ฐานข้อมูลของคุณก็หายไปจนกว่าจะมีคนมาแก้ไข **Replication** ขจัดความเสี่ยงนั้นด้วยการเก็บสำเนาข้อมูลหนึ่งชุดหรือมากกว่าไว้บนเครื่องอื่น โดยอัปเดตอย่างต่อเนื่องตามที่ต้นฉบับเปลี่ยนแปลง สำเนาเหล่านั้นยังช่วยให้คุณกระจาย traffic การอ่านไปยัง server หลายตัวได้
+เซิร์ฟเวอร์เดียวคือจุดล้มเหลวจุดเดียว ถ้าดิสก์พังหรือเครื่อง reboot ฐานข้อมูลของคุณหายไปจนกว่าจะมีคนแก้ **Replication** ขจัดความเสี่ยงนี้ด้วยการเก็บสำเนาข้อมูลตั้งแต่หนึ่งชุดขึ้นไปบนเครื่องอื่น ที่อัปเดตต่อเนื่องเมื่อต้นฉบับเปลี่ยน สำเนาเหล่านั้นยังให้คุณกระจายทราฟฟิกอ่านไปหลายเซิร์ฟเวอร์ได้
 
-PostgreSQL มีให้สองรูปแบบ: **streaming replication** ที่คัดลอกทั้ง cluster แบบ byte-for-byte และ **logical replication** ที่คัดลอก table ที่เลือกทีละ row ทั้งสองแก้ปัญหาที่แตกต่างกัน บทเรียนนี้จึงครอบคลุมทั้งคู่
+PostgreSQL มีสองแบบ: **streaming replication** ที่คัดลอกทั้ง cluster แบบ byte ต่อ byte และ **logical replication** ที่คัดลอกบาง table แบบ row ต่อ row ทั้งสองแก้ปัญหาต่างกัน บทเรียนนี้จึงครอบคลุมทั้งคู่ ([docs](https://www.postgresql.org/docs/18/warm-standby.html))
 
-## write-ahead log คือแหล่งความจริง
+ทุกอย่างด้านล่างรันจริงบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) แล็บคือสองคอนเทนเนอร์บนเครือข่าย Docker ที่สร้างด้วย `--internal` จึงคุยกันเองได้และไม่คุยกับใครอื่น คอนเทนเนอร์ volume และเครือข่ายทั้งหมดตั้งชื่อ `postgresql-b3-*` และถูกลบเมื่อบทเรียนเสร็จ รหัสผ่าน `<your-password>` แทนค่าใดก็ได้ที่คุณเลือก ส่วนที่อยู่และ process id ในผลลัพธ์มาจากการรันนั้น คำสั่งและผลลัพธ์ถูกวางตามที่ตอบกลับมา ไม่มีอะไรในหน้านี้เป็นแค่ภาพร่าง
 
-ก่อนที่การเปลี่ยนแปลงจะแตะไฟล์ของ table PostgreSQL จะบันทึกการเปลี่ยนแปลงนั้นลงใน **write-ahead log** (WAL): stream แบบ append-only ของทุกการแก้ไข log นี้มีไว้สำหรับ crash recovery แต่ก็เป็นสิ่งที่ replica ต้องการพอดี ถ้า server ตัวที่สอง replay WAL record ชุดเดียวกันตามลำดับเดียวกัน ก็จะได้สำเนาข้อมูลที่เหมือนกันทุกประการ
+<Callout title="ความปลอดภัยของแล็บ">
+Docker Desktop แบ่งหน่วยความจำให้ทุกคอนเทนเนอร์ร่วมกัน รันแล็บนี้เมื่อไม่มีอะไรหนักอื่นรันอยู่ และลบมัน (บล็อกสุดท้ายของบทเรียน) เมื่อเสร็จ ไม่มีอะไรที่นี่เปิดพอร์ตไปยังเครื่องโฮสต์ของคุณ
+</Callout>
 
-Streaming replication ทำแบบนั้นเป๊ะ ๆ คือ primary ส่ง WAL ไปยัง replica แต่ละตัวผ่าน connection ของเครือข่าย และ replica แต่ละตัวก็ apply record เหล่านั้นอย่างต่อเนื่องเพื่อให้ตามทัน
+## Write-ahead log คือแหล่งความจริง
+
+ก่อนการเปลี่ยนแปลงแตะไฟล์ table PostgreSQL บันทึกมันลงใน **write-ahead log** (WAL): สตรีมแบบ append-only ของทุกการแก้ไข log นี้มีไว้กู้คืนหลัง crash แต่ก็เป็นสิ่งที่ replica ต้องการพอดี ถ้าเซิร์ฟเวอร์ที่สอง replay record WAL เดียวกันตามลำดับเดียวกัน มันจะได้สำเนาข้อมูลที่เหมือนกันทุกประการ
+
+streaming replication ทำเช่นนั้นเป๊ะ primary ส่ง WAL ไปยังแต่ละ replica ผ่านการเชื่อมต่อเครือข่าย และแต่ละ replica apply record เหล่านั้นต่อเนื่องเพื่อให้ตามทัน
 
 export const streamDiagram = `flowchart LR
   C[Client write] --> P[(Primary)]
@@ -29,166 +36,815 @@ export const streamDiagram = `flowchart LR
   RC1[Read query] --> R1
   RC2[Read query] --> R2`;
 
-<Mermaid code={streamDiagram} title="primary ส่ง WAL ไปยัง read replica" />
+<Mermaid code={streamDiagram} title="Primary ส่ง WAL ไปยัง read replica" />
 
-Replica เป็นแบบอ่านอย่างเดียว คือ apply การเปลี่ยนแปลงจาก primary และตอบ query แบบ `SELECT` ได้ แต่ปฏิเสธการเขียน จึงเหมาะอย่างยิ่งสำหรับการรับภาระงานรายงาน analytics หรือ workload ที่เน้นการอ่านใด ๆ ออกจาก primary
+replica เป็น read-only: มัน apply การเปลี่ยนแปลงของ primary และตอบ `SELECT` แต่ปฏิเสธการเขียน จึงเหมาะกับการยกงานรายงาน วิเคราะห์ หรือ workload หนักฝั่งอ่านออกจาก primary
 
-## การตั้งค่า streaming replication
+## ตั้งค่า streaming replication
 
-Streaming replication ถูกตั้งค่าบน primary ด้วยการตั้งค่าเพียงไม่กี่อย่างและบัญชีหนึ่งที่ replica ใช้เชื่อมต่อ ไฟล์ที่เกี่ยวข้องอยู่ใน data directory ของคุณ
+บน PostgreSQL 18 ค่าที่ streaming replication ต้องการเป็นค่า default อยู่แล้ว primary เริ่มด้วย `wal_level = replica` ที่ว่างให้ WAL sender 10 ตัวและ replication slot 10 อัน และ `hot_standby = on` ส่วน `wal_keep_size` เป็น 0 แปลว่า WAL เก่าไม่ถูกเก็บให้ replica เว้นแต่คุณใช้ slot สิ่งที่ไม่เปิดโดย default คือประตู: คุณต้องมี role ที่มี attribute `REPLICATION` และบรรทัด `pg_hba.conf` สำหรับชื่อฐานข้อมูลพิเศษ `replication` บรรทัด `host all all all` ไม่ครอบคลุม เพราะ `all` ไม่รวม `replication`
 
-```conf
-# postgresql.conf on the primary
-wal_level = replica
-max_wal_senders = 10
-wal_keep_size = 512MB
+```text
+# 1. one internal network (no route out), one named volume, one primary
+
+$ docker network create --internal postgresql-b3-net
+
+$ docker run -d --name postgresql-b3-primary --network postgresql-b3-net -e POSTGRES_PASSWORD=<your-password> -v postgresql-b3-primary-data:/var/lib/postgresql postgres:18.6
+
+-- primary: script
+SELECT name, setting FROM pg_settings
+WHERE name IN ('wal_level', 'max_wal_senders', 'max_replication_slots', 'wal_keep_size', 'hot_standby')
+ORDER BY name;
+-- primary: psql output
+         name          | setting 
+-----------------------+---------
+ hot_standby           | on
+ max_replication_slots | 10
+ max_wal_senders       | 10
+ wal_keep_size         | 0
+ wal_level             | replica
+(5 rows)
+
+# 2. a replication role, and a pg_hba.conf line that lets it connect for replication from the network
+
+-- primary: script
+CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '<your-password>';
+-- primary: psql output
+CREATE ROLE
+
+$ docker exec postgresql-b3-primary sh -c "echo 'host replication replicator 172.22.0.0/16 scram-sha-256' >> /var/lib/postgresql/18/docker/pg_hba.conf"
+
+-- primary: script
+SELECT pg_reload_conf();
+SELECT type, database, user_name, address, auth_method
+FROM pg_hba_file_rules WHERE database = '{replication}';
+-- primary: psql output
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+ type  |   database    |  user_name   |  address   |  auth_method  
+-------+---------------+--------------+------------+---------------
+ local | {replication} | {all}        |            | trust
+ host  | {replication} | {all}        | 127.0.0.1  | trust
+ host  | {replication} | {all}        | ::1        | trust
+ host  | {replication} | {replicator} | 172.22.0.0 | scram-sha-256
+(4 rows)
+
+-- primary: script
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+-- primary: psql output
+CREATE TABLE
+INSERT 0 2
 ```
 
-```conf
-# pg_hba.conf on the primary: allow the replication account to connect
-host    replication    replicator    10.0.0.0/24    scram-sha-256
-```
-
-คุณสร้าง replica ด้วยการทำ base backup ของ primary แล้วชี้ replica กลับไปที่ primary เพื่อ stream WAL ที่กำลังไหลอยู่ เครื่องมือที่คัดลอกสถานะเริ่มต้นคือ `pg_basebackup`
+แล็บใช้คำสั่งเหล่านี้ (บล็อกแรกสร้าง primary ที่เหลือคือการ clone ที่อธิบายต่อไป):
 
 ```bash
-# Run on the new replica machine to clone the primary and start streaming
-pg_basebackup \
-  --host=primary.internal \
-  --username=replicator \
-  --pgdata=/var/lib/postgresql/data \
-  --wal-method=stream \
-  --write-recovery-conf
+# scripts/replication-lab.sh
+docker network create --internal postgresql-b3-net
+docker volume create postgresql-b3-primary-data
+docker run -d --name postgresql-b3-primary --network postgresql-b3-net \
+  -e POSTGRES_PASSWORD=<your-password> \
+  -v postgresql-b3-primary-data:/var/lib/postgresql postgres:18.6
+
+# ... create the replicator role and the pg_hba.conf line (transcript below), then clone:
+docker volume create postgresql-b3-replica-data
+docker run --rm --network postgresql-b3-net --user postgres \
+  -v postgresql-b3-replica-data:/var/lib/postgresql -e PGPASSWORD=<your-password> postgres:18.6 \
+  pg_basebackup -d "host=postgresql-b3-primary user=replicator application_name=replica1" \
+    -D /var/lib/postgresql/18/docker -R -X stream -v
+docker run -d --name postgresql-b3-replica --network postgresql-b3-net \
+  -v postgresql-b3-replica-data:/var/lib/postgresql postgres:18.6
 ```
 
-แฟล็ก `--write-recovery-conf` บันทึกรายละเอียดการเชื่อมต่อไว้เพื่อให้ replica รู้ว่าต้องเริ่ม stream ทันทีที่บูตขึ้นมา จากนั้น replica จะไล่ตาม primary เองโดยอัตโนมัติ
+replica ถูกสร้างโดยทำ base backup ของ primary แล้วชี้มันไปที่ primary เพื่อ stream WAL ต่อเนื่อง เครื่องมือที่คัดลอกสถานะเริ่มต้นคือ `pg_basebackup` ([docs](https://www.postgresql.org/docs/18/app-pgbasebackup.html)) สามแฟล็กที่สำคัญ: `-X stream` เปิดการเชื่อมต่อที่สองเพื่อ stream WAL ที่เกิดระหว่างการคัดลอก backup จึงสอดคล้องกัน `-R` เขียนรายละเอียดการเชื่อมต่อเพื่อให้เซิร์ฟเวอร์ใหม่เริ่มเป็น standby และ `application_name` ใน connection string ตั้งชื่อ standby นี้ ซึ่งสำคัญกับ synchronous replication image ของ Docker เก็บ PGDATA ใน `/var/lib/postgresql/18/docker` และ volume ถูก mount สูงกว่ามันหนึ่งระดับ
 
-## synchronous เทียบกับ asynchronous
+```text
+$ docker run --rm --network postgresql-b3-net --user postgres -v postgresql-b3-replica-data:/var/lib/postgresql -e PGPASSWORD=<your-password> postgres:18.6 pg_basebackup -d "host=postgresql-b3-primary user=replicator application_name=replica1" -D /var/lib/postgresql/18/docker -R -X stream -v
+pg_basebackup: initiating base backup, waiting for checkpoint to complete
+pg_basebackup: checkpoint completed
+pg_basebackup: write-ahead log start point: 0/2000028 on timeline 1
+pg_basebackup: starting background WAL receiver
+pg_basebackup: created temporary replication slot "pg_basebackup_131"
+pg_basebackup: write-ahead log end point: 0/2000120
+pg_basebackup: waiting for background process to finish streaming ...
+pg_basebackup: syncing data to disk ...
+pg_basebackup: renaming backup_manifest.tmp to backup_manifest
+pg_basebackup: base backup completed
 
-ตัวเลือกใหญ่ใน streaming replication คือ *เมื่อใด* ที่ primary จะถือว่าการเขียนเสร็จสิ้น
+$ docker run -d --name postgresql-b3-replica --network postgresql-b3-net -v postgresql-b3-replica-data:/var/lib/postgresql postgres:18.6
 
-| โหมด         | primary ยืนยันการ commit เมื่อ...                 | ข้อแลกเปลี่ยน                               |
+$ docker exec postgresql-b3-replica sh -c "ls /var/lib/postgresql/18/docker | grep standby; sed -E \"s/password=''[^']*''/password=<hidden>/\" /var/lib/postgresql/18/docker/postgresql.auto.conf | cut -c1-120"
+standby.signal
+primary_conninfo = 'user=replicator password=<hidden> channel_binding=prefer host=''postgresql-b3-primary'' port=5432 application_name=repli
+```
+
+ดูสิ่งที่ `-R` ทิ้งไว้: ไฟล์ `standby.signal` ที่ทำให้เซิร์ฟเวอร์เริ่มใน recovery และ `primary_conninfo` ใน `postgresql.auto.conf` conninfo นั้นมีรหัสผ่าน replication เป็นข้อความธรรมดา จึงควรปกป้องไฟล์นั้นเหมือน secret (หรือเก็บรหัสผ่านใน passfile) แล้วดูจากทั้งสองฝั่ง:
+
+```text
+-- primary: script
+SELECT pid, usename, application_name, client_addr, state, sync_state,
+       sent_lsn, replay_lsn, replay_lag
+FROM pg_stat_replication;
+SELECT pg_is_in_recovery() AS primary_in_recovery;
+-- primary: psql output
+ pid |  usename   | application_name | client_addr |   state   | sync_state | sent_lsn  | replay_lsn |   replay_lag    
+-----+------------+------------------+-------------+-----------+------------+-----------+------------+-----------------
+ 132 | replicator | replica1         | 172.22.0.3  | streaming | async      | 0/3000000 | 0/3000000  | 00:00:00.000052
+(1 row)
+
+ primary_in_recovery 
+---------------------
+ f
+(1 row)
+
+-- replica: script
+SELECT pg_is_in_recovery() AS replica_in_recovery;
+SELECT * FROM accounts ORDER BY id;
+INSERT INTO accounts (owner, balance) VALUES ('Nobody', 1);
+-- replica: psql output
+ replica_in_recovery 
+---------------------
+ t
+(1 row)
+
+ id | owner | balance 
+----+-------+---------
+  1 | Ada   |     500
+  2 | Linus |     100
+(2 rows)
+
+ERROR:  cannot execute INSERT in a read-only transaction
+```
+
+บน primary `pg_stat_replication` มีหนึ่งแถวสำหรับ standby: `state = streaming`, `sync_state = async` บน replica `pg_is_in_recovery()` เป็นจริง ข้อมูลอยู่ที่นั่นแล้ว และ `INSERT` ถูกปฏิเสธด้วย `cannot execute INSERT in a read-only transaction`
+
+## Replication lag
+
+asynchronous replication ไม่ทันที เพื่อให้ช่องว่างมองเห็นได้ ให้หยุดการ replay WAL บน replica (`pg_wal_replay_pause()`) เขียนบน primary และอ่านจากทั้งสอง replica ได้รับ WAL ใหม่แต่ยังไม่ apply:
+
+```text
+-- replica: script
+SELECT pg_wal_replay_pause();
+-- replica: psql output
+ pg_wal_replay_pause 
+---------------------
+ 
+(1 row)
+
+-- primary: script
+INSERT INTO accounts (owner, balance) VALUES ('Grace', 300);
+-- primary: psql output
+INSERT 0 1
+
+-- replica: script
+SELECT count(*) AS rows_on_replica FROM accounts;
+SELECT pg_last_wal_receive_lsn() AS received, pg_last_wal_replay_lsn() AS replayed;
+-- replica: psql output
+ rows_on_replica 
+-----------------
+               2
+(1 row)
+
+ received  | replayed  
+-----------+-----------
+ 0/3000248 | 0/3000000
+(1 row)
+
+-- primary: script
+SELECT application_name, state, pg_wal_lsn_diff(sent_lsn, replay_lsn) AS replay_lag_bytes
+FROM pg_stat_replication;
+-- primary: psql output
+ application_name |   state   | replay_lag_bytes 
+------------------+-----------+------------------
+ replica1         | streaming |              584
+(1 row)
+
+-- replica: script
+SELECT pg_wal_replay_resume();
+-- replica: psql output
+ pg_wal_replay_resume 
+----------------------
+ 
+(1 row)
+
+-- replica: script
+SELECT count(*) AS rows_on_replica FROM accounts;
+-- replica: psql output
+ rows_on_replica 
+-----------------
+               3
+(1 row)
+```
+
+replica ยังคืนสองแถวขณะที่ primary มีสาม และตำแหน่ง receive กับ replay ต่างกัน 584 byte หลัง `pg_wal_replay_resume()` มันตามทัน ในชีวิตจริงช่องว่างไม่ใช่ปุ่ม pause แต่คือดิสก์ช้า query ยาวบน replica หรือเครือข่ายสะดุด คอลัมน์ `write_lag`, `flush_lag` และ `replay_lag` ของ `pg_stat_replication` วัดมันเป็นเวลา
+
+## Synchronous เทียบกับ asynchronous
+
+ทางเลือกใหญ่ใน streaming replication คือ *เมื่อไร* ที่ primary ถือว่าการเขียนเสร็จ
+
+| โหมด         | Primary ยืนยัน commit เมื่อ...                 | ข้อแลกเปลี่ยน                                  |
 |--------------|---------------------------------------------------|--------------------------------------------|
-| Asynchronous | WAL ถูกเขียนในเครื่อง                              | เร็ว แต่ replica อาจล้าหลังได้             |
-| Synchronous  | replica อย่างน้อยหนึ่งตัวเก็บ WAL ไว้แล้วด้วย      | ไม่สูญข้อมูลตอน failover แต่เขียนช้ากว่า    |
+| Asynchronous | WAL ถูกเขียนในเครื่อง                        | เร็ว แต่ replica อาจตามหลัง         |
+| Synchronous  | อย่างน้อยหนึ่ง standby ที่ระบุชื่อเก็บ WAL ด้วย | ไม่เสียข้อมูลตอน failover แต่เขียนช้ากว่า |
 
-Asynchronous เป็นค่าเริ่มต้นและเป็นตัวเลือกที่ใช้กันทั่วไป การเขียนไม่เคยต้องรอเครือข่าย primary จึงยังเร็วอยู่ — แต่ replica อาจล้าหลังไปเล็กน้อย เรียกว่า **replication lag** query ที่ส่งไปยัง replica ที่ล้าหลังอาจยังไม่เห็น commit ล่าสุด
+Asynchronous เป็น default และเป็นตัวเลือกทั่วไป การเขียนไม่รอเครือข่าย primary จึงเร็ว — แต่ replica ตามหลังได้เล็กน้อย เรียก **replication lag** query ที่ส่งไป replica ที่ตามหลังอาจยังไม่เห็น commit ล่าสุด
 
-Synchronous replication ทำให้ primary รอให้ replica ตอบรับทุกการ commit เปิดใช้ด้วยการระบุชื่อ replica ที่ต้องยืนยัน
+Synchronous replication ทำให้ primary รอ standby ตอบรับแต่ละ commit คุณเปิดมันโดยระบุ standby ที่ต้องยืนยัน และชื่อต้องตรงกับ `application_name` ของ standby (เราตั้งเป็น `replica1` ตอน clone):
 
 ```conf
-# postgresql.conf on the primary
-synchronous_standby_names = 'replica1'
+# postgresql.conf (or ALTER SYSTEM) on the primary
+synchronous_standby_names = 'replica1'   # must equal the standby's application_name
 ```
 
-สิ่งนี้รับประกันว่า commit ที่ตอบรับแล้วจะรอดจากการสูญเสีย primary โดยแลกกับ write latency ที่สูงขึ้น
+ถ้าชื่อไม่ตรงกับ standby ที่เชื่อมต่อใด ทุก commit จะรอตลอดไป การตั้งค่านี้จึงควรทดสอบ ด้านล่าง standby ถูกหยุด และ client insert หนึ่งแถว statement ของมันเสร็จ แต่ commit ไม่: `pg_stat_activity` ของผู้ดูแลแสดง client อยู่ใน wait event `SyncRep` ทางออกมีแค่ เอา standby กลับมา ลบการตั้งค่า หรือยกเลิกการรอ:
+
+```text
+-- primary: script
+ALTER SYSTEM SET synchronous_standby_names = 'replica1';
+SELECT pg_reload_conf();
+-- primary: psql output
+ALTER SYSTEM
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+-- primary: script
+SELECT application_name, state, sync_state FROM pg_stat_replication;
+-- primary: psql output
+ application_name |   state   | sync_state 
+------------------+-----------+------------
+ replica1         | streaming | sync
+(1 row)
+
+# the standby goes away
+
+$ docker stop postgresql-b3-replica
+postgresql-b3-replica
+
+-- session A (client): script
+\timing on
+INSERT INTO accounts (owner, balance) VALUES ('Hopper', 10);
+-- session A (client): psql output
+Timing is on.
+WARNING:  canceling wait for synchronous replication due to user request
+DETAIL:  The transaction has already committed locally, but might not have been replicated to the standby.
+INSERT 0 1
+Time: 3009.119 ms (00:03.009)
+
+-- session B (operator): script
+\! sleep 3
+SELECT wait_event_type, wait_event, left(query, 50) AS query
+FROM pg_stat_activity WHERE wait_event = 'SyncRep';
+SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE wait_event = 'SyncRep';
+-- session B (operator): psql output
+ wait_event_type | wait_event |                       query                        
+-----------------+------------+----------------------------------------------------
+ IPC             | SyncRep    | INSERT INTO accounts (owner, balance) VALUES ('Hop
+(1 row)
+
+ pg_cancel_backend 
+-------------------
+ t
+(1 row)
+
+-- primary: script
+SELECT owner FROM accounts ORDER BY id;
+-- primary: psql output
+ owner  
+--------
+ Ada
+ Linus
+ Grace
+ Hopper
+(4 rows)
+
+$ docker start postgresql-b3-replica
+postgresql-b3-replica
+
+-- primary: script
+SELECT application_name, state, sync_state FROM pg_stat_replication;
+-- primary: psql output
+ application_name |   state   | sync_state 
+------------------+-----------+------------
+ replica1         | streaming | sync
+(1 row)
+```
+
+อ่านคำเตือน: transaction นั้น **commit ในเครื่องไปแล้ว** ใครก็เห็น row `Hopper` บน primary ได้ ทั้งที่ client ไม่เคยได้รับการยืนยัน นั่นคือราคาของ synchronous replication เมื่อ standby ล้ม: การเขียนหยุดเว้นแต่คุณตัดสินใจเป็นอย่างอื่น
+
+primary รอมากแค่ไหนควบคุมด้วย `synchronous_commit` ต่อ session หรือต่อ transaction ([docs](https://www.postgresql.org/docs/18/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT)) เมื่อ replay ถูกหยุดบน standby อีกครั้ง `local` ไม่รอ standby เลย `remote_write` รอจน standby เขียน WAL ให้ระบบปฏิบัติการ `on` (default) รอจนมัน flush ลงดิสก์ และ `remote_apply` รอจน replay แล้วและ query บน standby จะเห็น:
+
+```text
+-- replica: script
+SELECT pg_wal_replay_pause();
+-- replica: psql output
+ pg_wal_replay_pause 
+---------------------
+ 
+(1 row)
+
+-- primary: script
+\timing on
+SET synchronous_commit = local;
+INSERT INTO accounts (owner, balance) VALUES ('local', 1);
+SET synchronous_commit = remote_write;
+INSERT INTO accounts (owner, balance) VALUES ('remote_write', 1);
+SET synchronous_commit = on;
+INSERT INTO accounts (owner, balance) VALUES ('on', 1);
+-- primary: psql output
+Timing is on.
+SET
+Time: 0.160 ms
+INSERT 0 1
+Time: 1.172 ms
+SET
+Time: 0.094 ms
+INSERT 0 1
+Time: 0.619 ms
+SET
+Time: 0.050 ms
+INSERT 0 1
+Time: 0.596 ms
+
+-- session A (client): script
+\timing on
+SET synchronous_commit = remote_apply;
+INSERT INTO accounts (owner, balance) VALUES ('remote_apply', 1);
+-- session A (client): psql output
+Timing is on.
+SET
+Time: 0.149 ms
+INSERT 0 1
+Time: 3018.110 ms (00:03.018)
+WARNING:  canceling wait for synchronous replication due to user request
+DETAIL:  The transaction has already committed locally, but might not have been replicated to the standby.
+
+-- session B (operator): script
+\! sleep 3
+SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE wait_event = 'SyncRep';
+-- session B (operator): psql output
+ pg_cancel_backend 
+-------------------
+ t
+(1 row)
+
+-- replica: script
+SELECT pg_wal_replay_resume();
+-- replica: psql output
+ pg_wal_replay_resume 
+----------------------
+ 
+(1 row)
+```
+
+สามแบบแรก commit ใน ~1 มิลลิวินาทีแม้ standby ไม่ apply อะไร: WAL ปลอดภัยบนดิสก์ของ standby ซึ่งคือสิ่งที่ปกป้องคุณถ้า primary หาย `remote_apply` เป็นระดับเดียวที่ให้ read-your-writes บน standby และมันบล็อกจนเรายกเลิกหลัง 3 วินาที เลือกระดับที่อ่อนที่สุดที่ให้การรับประกันที่ต้องการ
+
+## Replication ยับยั้ง vacuum
+
+standby ที่รัน query ยาวอาจขัดแย้งกับการเก็บกวาดของ primary เมื่อ `hot_standby_feedback = on` (และลด `wal_receiver_status_interval` เป็น 1 วินาทีเพื่อให้เดโมเร็ว) standby รายงาน snapshot เก่าสุดของมันไปยัง primary ซึ่งจะปฏิเสธการลบ row ที่ snapshot นั้นอาจยังต้องใช้ รายงานหนึ่งรันบน replica สิบวินาทีขณะที่ primary update หนึ่ง row 1 000 ครั้งและ vacuum:
+
+```text
+-- replica: script
+ALTER SYSTEM SET hot_standby_feedback = on;
+ALTER SYSTEM SET wal_receiver_status_interval = '1s';
+SELECT pg_reload_conf();
+-- replica: psql output
+ALTER SYSTEM
+ALTER SYSTEM
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+-- primary: script
+ALTER SYSTEM RESET synchronous_standby_names;
+SELECT pg_reload_conf();
+CREATE TABLE t (id int PRIMARY KEY, n int NOT NULL);
+INSERT INTO t VALUES (1, 0);
+-- primary: psql output
+ALTER SYSTEM
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 1
+
+-- replica (a report is running): script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM t;
+\! sleep 10
+COMMIT;
+-- replica (a report is running): psql output
+BEGIN
+ count 
+-------
+     1
+(1 row)
+
+COMMIT
+
+-- primary: script
+\! sleep 2
+SELECT application_name, backend_xmin IS NOT NULL AS standby_holds_xmin FROM pg_stat_replication;
+\o /dev/null
+SELECT 'UPDATE t SET n = n + 1 WHERE id = 1;' FROM generate_series(1, 1000) \gexec
+\o
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) t;
+\! sleep 12
+VACUUM (VERBOSE, INDEX_CLEANUP OFF) t;
+-- primary: psql output
+ application_name | standby_holds_xmin 
+------------------+--------------------
+ replica1         | t
+(1 row)
+
+pages: 0 removed, 5 remain, 5 scanned (100.00% of total), 0 eagerly scanned
+tuples: 0 removed, 1001 remain, 1000 are dead but not yet removable
+removable cutoff: 764, which was 1000 XIDs old when operation ended
+new relfrozenxid: 763, which is 1 XIDs ahead of previous value
+VACUUM
+pages: 0 removed, 5 remain, 5 scanned (100.00% of total), 0 eagerly scanned
+tuples: 1000 removed, 1 remain, 0 are dead but not yet removable
+removable cutoff: 1764, which was 0 XIDs old when operation ended
+new relfrozenxid: 1763, which is 1000 XIDs ahead of previous value
+VACUUM
+```
+
+vacuum แรก (ขณะรายงานรัน) พบ dead tuple 1 000 อันที่ลบไม่ได้ และ `pg_stat_replication.backend_xmin` แสดงว่า standby คือเหตุผล หลังรายงานจบ vacuum ที่สองลบพวกมัน นี่คือข้อแลกเปลี่ยนเบื้องหลังฟีเจอร์: query บน replica ถูกยกเลิกน้อยลง ความเสี่ยง bloat บน primary มากขึ้น
 
 ## Failover
 
-ถ้า primary ตาย replica หนึ่งตัวต้องถูก **promote** ให้เป็น primary ตัวใหม่เพื่อให้การเขียนกลับมาทำงานได้ การ promote บอก replica ให้หยุดตามและเริ่มรับการเขียน
+ถ้า primary ตาย ต้อง **promote** replica หนึ่งให้เป็น primary ใหม่เพื่อให้การเขียนกลับมา การ promote บอก replica ให้หยุดตามและเริ่มรับการเขียน: `pg_promote()` ใน SQL หรือ `pg_ctl promote` จาก shell นี่คือบน replica ในแล็บ:
 
-```bash
-# On the chosen replica, promote it to primary
-pg_ctl promote --pgdata=/var/lib/postgresql/data
+```text
+-- primary: script
+SELECT pg_walfile_name(pg_current_wal_lsn()) AS primary_wal_file;
+-- primary: psql output
+     primary_wal_file     
+--------------------------
+ 000000010000000000000003
+(1 row)
+
+-- replica: script
+SELECT pg_promote();
+-- replica: psql output
+ pg_promote 
+------------
+ t
+(1 row)
+
+-- replica: script
+SELECT pg_is_in_recovery() AS still_a_standby;
+INSERT INTO accounts (owner, balance) VALUES ('after-promote', 1) RETURNING id, owner;
+SELECT pg_walfile_name(pg_current_wal_lsn()) AS promoted_wal_file;
+-- replica: psql output
+ still_a_standby 
+-----------------
+ f
+(1 row)
+
+ id |     owner     
+----+---------------
+ 36 | after-promote
+(1 row)
+
+INSERT 0 1
+    promoted_wal_file     
+--------------------------
+ 000000020000000000000003
+(1 row)
+
+-- primary: script
+SELECT count(*) AS after_promote_rows_on_old_primary FROM accounts WHERE owner = 'after-promote';
+-- primary: psql output
+ after_promote_rows_on_old_primary 
+-----------------------------------
+                                 0
+(1 row)
 ```
 
-ในโปรดักชัน เรื่องนี้มักจัดการโดยเครื่องมืออัตโนมัติที่ตรวจจับความล้มเหลวและ promote standby ให้คุณ แต่การกระทำที่อยู่เบื้องหลังก็คือขั้นตอนเดียวเดิมนี้
+หลัง promote replica รับการเขียน และชื่อไฟล์ WAL เปลี่ยนจาก `000000010...` เป็น `000000020...`: แปดตัวแรกคือ **timeline** ที่ PostgreSQL เพิ่มทุกครั้งที่ promote เพื่อไม่ให้ประวัติปะปน primary เก่าที่ยังรันอยู่ไม่รู้เรื่อง: row ที่เขียนหลัง promote (`after-promote`) มีเฉพาะบนตัวใหม่ ถ้า client เขียนทั้งสองที่ คุณจะมีสอง primary ที่แยกทางกัน (**split brain**) เหตุผลที่การ deploy จริงต้องมีอะไรมา fence primary เก่า เครื่องมือ failover เช่น [Patroni](https://github.com/patroni/patroni) ที่อธิบายตัวเองว่าเป็น Python template สำหรับสร้าง cluster PostgreSQL high availability และประสานการเลือก leader ผ่าน ZooKeeper, etcd, Consul หรือ Kubernetes มีไว้ตัดสินใจนั้นอย่างปลอดภัย ตัว promote เองยังเป็นขั้นตอนเดียวเหมือนเดิม
 
-## logical replication: คัดลอก table ที่เลือก
+## Logical replication: คัดลอกบาง table
 
-Streaming replication คัดลอก *ทั้ง cluster* และไหลทางเดียวไปยัง read-only standby เท่านั้น บางครั้งคุณต้องการน้อยกว่านั้น — แค่ table ไม่กี่ table — หรือคุณต้องการคัดลอกระหว่าง PostgreSQL major version ที่ต่างกัน เช่นระหว่างการอัปเกรด นั่นคือ **logical replication** ที่สร้างบนโมเดลแบบ publish-and-subscribe
+streaming replication คัดลอก *ทั้ง cluster* และไหลทางเดียวไปยัง standby แบบ read-only บางครั้งคุณอยากได้น้อยกว่านั้น — แค่ไม่กี่ table — หรืออยากคัดลอกข้าม major version เช่นตอน upgrade นั่นคือ **logical replication** สร้างบนโมเดล publish-and-subscribe ([docs](https://www.postgresql.org/docs/18/logical-replication.html))
 
-บนต้นทางคุณสร้าง **publication** ที่ระบุชื่อ table ที่จะแชร์ บนปลายทางคุณสร้าง **subscription** ที่เชื่อมเข้ามาแล้วคัดลอก table เหล่านั้น
-
-```sql
--- On the source database: publish two tables
-CREATE PUBLICATION analytics_pub FOR TABLE orders, customers;
-```
-
-```sql
--- On the destination database: subscribe to that publication
-CREATE SUBSCRIPTION analytics_sub
-  CONNECTION 'host=source.internal dbname=shop user=repl password=secret'
-  PUBLICATION analytics_pub;
-```
-
-Subscriber คัดลอก row ที่มีอยู่เดิมก่อน แล้วค่อย apply การเปลี่ยนแปลงใหม่ตามมาเรื่อย ๆ ต่างจาก streaming replica ตรงที่ logical subscriber เป็นฐานข้อมูลที่เขียนได้เต็มรูปแบบ จะเพิ่ม table และ index ของตัวเองก็ได้ จุดนี้เองที่ทำให้เหมาะกับการคัดลอกเฉพาะบาง table และการ staging ตอนอัปเกรดเวอร์ชัน
+ที่ต้นทางคุณสร้าง **publication** ระบุ table ที่จะแชร์ ที่ปลายทางคุณสร้าง **subscription** ที่เชื่อมต่อและคัดลอกมัน
 
 export const logicalDiagram = `flowchart LR
-  S[(Source database)] -->|CREATE PUBLICATION| Pub[Publication: orders, customers]
+  S[(Source database)] -->|CREATE PUBLICATION| Pub[Publication: orders]
   Pub -->|row changes| Sub[Subscription]
   Sub --> D[(Destination database - writable)]`;
 
-<Mermaid code={logicalDiagram} title="logical replication เผยแพร่ table ที่เลือกไปยัง subscriber" />
+<Mermaid code={logicalDiagram} title="Logical replication publish บาง table ไปยัง subscriber" />
 
-Logical replication ก็ต้องการให้ยกระดับ `wal_level` เช่นกัน คราวนี้เป็น `logical` บนต้นทาง
+logical replication ต้องการ `wal_level = logical` ที่ต้นทาง ซึ่งเปลี่ยนสิ่งที่เข้า WAL และต้อง restart บนเซิร์ฟเวอร์ default publication ถูกสร้างอยู่ดี แต่พร้อมคำเตือน และการเขียนไปยัง table ที่ไม่มี **replica identity** ล้มเหลว:
 
-```conf
-# postgresql.conf on the source
-wal_level = logical
+```text
+$ docker rm -f postgresql-b3-replica && docker volume rm postgresql-b3-replica-data
+postgresql-b3-replica
+postgresql-b3-replica-data
+
+-- publisher: script
+CREATE TABLE orders (id int, item text NOT NULL, qty int NOT NULL);
+CREATE PUBLICATION shop_pub FOR TABLE orders;
+INSERT INTO orders VALUES (1, 'lamp', 2);
+UPDATE orders SET qty = 3 WHERE id = 1;
+-- publisher: psql output
+CREATE TABLE
+WARNING:  "wal_level" is insufficient to publish logical changes
+HINT:  Set "wal_level" to "logical" before creating subscriptions.
+CREATE PUBLICATION
+INSERT 0 1
+ERROR:  cannot update table "orders" because it does not have a replica identity and publishes updates
+HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.
+
+-- publisher: script
+ALTER SYSTEM SET wal_level = logical;
+-- publisher: psql output
+ALTER SYSTEM
+
+$ docker restart postgresql-b3-primary
+postgresql-b3-primary
+
+-- publisher: script
+SHOW wal_level;
+ALTER TABLE orders ADD PRIMARY KEY (id);
+UPDATE orders SET qty = 3 WHERE id = 1;
+INSERT INTO orders VALUES (2, 'desk', 1);
+GRANT SELECT ON orders TO replicator;
+-- publisher: psql output
+ wal_level 
+-----------
+ logical
+(1 row)
+
+ALTER TABLE
+UPDATE 1
+INSERT 0 1
+GRANT
 ```
+
+`UPDATE` ล้มเพราะ table ไม่มี primary key: logical subscriber ต้องการวิธีหา row ที่จะ update การเพิ่ม primary key (หรือ `REPLICA IDENTITY FULL`) แก้ได้ subscriber เป็นเซิร์ฟเวอร์แยก table ต้องมีอยู่ที่นั่นแล้ว เพราะ schema ไม่ถูก replicate `CREATE SUBSCRIPTION` คัดลอก row ที่มีอยู่ก่อน แล้ว apply การเปลี่ยนแปลงใหม่ต่อเนื่อง:
+
+```text
+$ docker run -d --name postgresql-b3-subscriber --network postgresql-b3-net -e POSTGRES_PASSWORD=<your-password> -v postgresql-b3-sub-data:/var/lib/postgresql postgres:18.6
+
+-- subscriber: script
+CREATE TABLE orders (id int PRIMARY KEY, item text NOT NULL, qty int NOT NULL);
+CREATE SUBSCRIPTION shop_sub
+  CONNECTION 'host=postgresql-b3-primary dbname=postgres user=replicator password=<your-password>'
+  PUBLICATION shop_pub;
+\! sleep 2
+SELECT * FROM orders ORDER BY id;
+-- subscriber: psql output
+CREATE TABLE
+NOTICE:  created replication slot "shop_sub" on publisher
+CREATE SUBSCRIPTION
+ id | item | qty 
+----+------+-----
+  1 | lamp |   3
+  2 | desk |   1
+(2 rows)
+
+-- publisher: script
+INSERT INTO orders VALUES (3, 'chair', 4);
+UPDATE orders SET qty = 9 WHERE id = 2;
+-- publisher: psql output
+INSERT 0 1
+UPDATE 1
+
+-- subscriber: script
+SELECT * FROM orders ORDER BY id;
+INSERT INTO orders VALUES (100, 'subscriber-only', 1);
+-- subscriber: psql output
+ id | item  | qty 
+----+-------+-----
+  1 | lamp  |   3
+  2 | desk  |   9
+  3 | chair |   4
+(3 rows)
+
+INSERT 0 1
+```
+
+subscriber เป็นฐานข้อมูลที่เขียนได้เต็มที่: row `subscriber-only` insert ที่นั่นได้ มันไม่ใช่สำเนา read-only ทีนี้ข้อจำกัดที่ทำให้คนแปลกใจ DDL ไม่ถูก replicate ([docs](https://www.postgresql.org/docs/18/logical-replication-restrictions.html)) sequence และ large object ก็ไม่เช่นกัน เพิ่ม column บน publisher และ insert row ที่ใช้มัน:
+
+```text
+-- publisher: script
+ALTER TABLE orders ADD COLUMN note text;
+INSERT INTO orders VALUES (4, 'lamp', 1, 'gift');
+-- publisher: psql output
+ALTER TABLE
+INSERT 0 1
+
+$ docker logs postgresql-b3-subscriber 2>&1 | grep -E "ERROR|CONTEXT" | tail -2
+2026-09-30 08:12:23.351 UTC [108] ERROR:  logical replication target relation "public.orders" is missing replicated column: "note"
+2026-09-30 08:12:23.351 UTC [108] CONTEXT:  processing remote data for replication origin "pg_16394" during message type "INSERT" in transaction 1774, finished at 0/30796D0
+
+-- subscriber: script
+SELECT subname, apply_error_count FROM pg_stat_subscription_stats;
+ALTER TABLE orders ADD COLUMN note text;
+\! sleep 6
+SELECT * FROM orders ORDER BY id;
+-- subscriber: psql output
+ subname  | apply_error_count 
+----------+-------------------
+ shop_sub |                 2
+(1 row)
+
+ALTER TABLE
+ id  |      item       | qty | note 
+-----+-----------------+-----+------
+   1 | lamp            |   3 | 
+   2 | desk            |   9 | 
+   3 | chair           |   4 | 
+   4 | lamp            |   1 | gift
+ 100 | subscriber-only |   1 | 
+(5 rows)
+```
+
+apply worker apply row ไม่ได้ (`missing replicated column: "note"`) ลองใหม่ทุกไม่กี่วินาที และไม่ไปต่อจนกว่า subscriber ได้ column เดียวกัน แก้ schema บน subscriber แล้ว replication ตามทันเอง
+
+มีต้นทุนที่สอง และเป็นอันที่ทำให้ดิสก์เต็ม publisher ต้องเก็บทุก segment ของ WAL ที่ subscriber ยังไม่ได้ใช้ โดย **replication slot** เมื่อ subscriber หยุด WAL กองสะสม:
+
+```text
+-- publisher: script
+SELECT slot_name, slot_type, active, wal_status,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained
+FROM pg_replication_slots;
+-- publisher: psql output
+ slot_name | slot_type | active | wal_status | retained 
+-----------+-----------+--------+------------+----------
+ shop_sub  | logical   | t      | reserved   | 56 bytes
+(1 row)
+
+$ docker stop postgresql-b3-subscriber
+postgresql-b3-subscriber
+
+-- publisher: script
+INSERT INTO orders SELECT g + 1000, 'bulk', 1, NULL FROM generate_series(1, 200000) g;
+SELECT slot_name, active, wal_status,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained
+FROM pg_replication_slots;
+-- publisher: psql output
+INSERT 0 200000
+ slot_name | active | wal_status | retained 
+-----------+--------+------------+----------
+ shop_sub  | f      | reserved   | 26 MB
+(1 row)
+
+-- publisher: script
+ALTER SYSTEM SET max_slot_wal_keep_size = '32MB';
+SELECT pg_reload_conf();
+INSERT INTO orders SELECT g + 2000000, 'bulk2', 1, NULL FROM generate_series(1, 600000) g;
+CHECKPOINT;
+SELECT slot_name, active, wal_status, invalidation_reason FROM pg_replication_slots;
+-- publisher: psql output
+ALTER SYSTEM
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+INSERT 0 600000
+CHECKPOINT
+ slot_name | active | wal_status | invalidation_reason 
+-----------+--------+------------+---------------------
+ shop_sub  | f      | lost       | wal_removed
+(1 row)
+
+$ docker start postgresql-b3-subscriber
+postgresql-b3-subscriber
+
+$ docker logs postgresql-b3-subscriber 2>&1 | grep -E "ERROR|DETAIL" | tail -2
+2026-09-30 08:12:38.504 UTC [44] ERROR:  could not start WAL streaming: ERROR:  can no longer access replication slot "shop_sub"
+	DETAIL:  This replication slot has been invalidated due to "wal_removed".
+```
+
+เก็บไว้ 26 MB หลัง 200 000 row subscriber ที่หยุดและไม่กลับมาจะทำให้ดิสก์ของ primary เต็มในที่สุด `max_slot_wal_keep_size` ใส่เพดาน: หลังตั้งเป็น 32 MB และเขียนอีก 600 000 row slot ถูกทำให้ใช้ไม่ได้ (`wal_status = lost`, `invalidation_reason = wal_removed`) และ subscriber ต่อไม่ได้ ต้องคัดลอกเริ่มต้นใหม่ เฝ้าดู `pg_replication_slots` และ drop slot ที่ไม่ใช้แล้ว ([docs](https://www.postgresql.org/docs/18/view-pg-replication-slots.html))
+
+เมื่อเสร็จ ลบทุกอย่างที่แล็บสร้าง:
+
+```bash
+# scripts/replication-cleanup.sh
+docker rm -f postgresql-b3-primary postgresql-b3-replica postgresql-b3-subscriber
+docker volume rm postgresql-b3-primary-data postgresql-b3-replica-data postgresql-b3-sub-data
+docker network rm postgresql-b3-net
+```
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอให้ตั้ง logical replication ของ table `orders` และเขียนสอง statement พร้อมคอมเมนต์ที่มั่นใจ:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "publish orders; a subscriber will pick up every change"
+CREATE TABLE orders (id int, item text NOT NULL, qty int NOT NULL);
+CREATE PUBLICATION shop_pub FOR TABLE orders;`}>
+
+ทั้งสอง statement รันโดยไม่มี error บนเซิร์ฟเวอร์ default และคอมเมนต์ผิดสองครั้ง `wal_level` เป็น `replica` โดย default จึงไม่มีอะไรถูก decode ให้ subscriber: PostgreSQL พิมพ์ `WARNING: "wal_level" is insufficient to publish logical changes` ตอน `CREATE PUBLICATION` ซึ่งพลาดง่ายใน log ของ migration แย่กว่านั้น table ไม่มี primary key `UPDATE` แรกจึงล้มด้วย `cannot update table "orders" because it does not have a replica identity and publishes updates` ทั้งสองปรากฏในบล็อกแรกของ transcript logical replication ข้างบน: publication ถูกสร้างพร้อมคำเตือน `INSERT` ใช้ได้ และ `UPDATE` ล้ม วิธีแก้คือ `wal_level = logical` (restart) primary key (หรือ `REPLICA IDENTITY FULL` เมื่อไม่มี key) และนิยาม table เดียวกันบน subscriber ก่อน `CREATE SUBSCRIPTION` หลังเพิ่ม primary key `UPDATE` เดียวกันสำเร็จในแล็บ
+
+</SpotTheBug>
+
+## Mental Model
+
+standby คือเซิร์ฟเวอร์ที่สองที่อ่านไดอารี่เล่มเดียวกับที่ primary กำลังเขียน physical replication คัดลอกทุกบรรทัดตรงตัวและ standby เขียนลงไปไม่ได้เลย logical replication อ่านไดอารี่เฉพาะบทที่เลือกและแสดงซ้ำในสมุดอีกเล่มที่เป็นอิสระ synchronous replication แปลว่า "อย่าบอก client ว่าสำเร็จจนกว่าผู้อ่านคนที่สองมีบรรทัดนั้น" ทุกคำถามด้านการออกแบบคือ: ผู้อ่านคนที่สองตามหลังได้นานเท่าไร และเกิดอะไรเมื่อเขาหายไป
 
 ## เคล็ดลับและข้อควรระวัง
 
-- Replica มีไว้สำหรับการอ่านและความพร้อมใช้งาน ส่งทุกการเขียนไปที่ primary เพราะ replica จะปฏิเสธการเขียนทั้งหมด
-- เมื่อใช้ asynchronous replication ให้คาดหวังว่าจะมี lag บ้าง ถ้าการอ่านต้องสะท้อนการเขียนที่เพิ่งเกิดขึ้น ให้ส่งไปที่ primary หรือรอให้ replica ตามทัน
-- Synchronous replication แลก latency กับความปลอดภัย ใช้เมื่อการสูญเสีย transaction ที่ตอบรับแล้วแม้เพียงรายการเดียวเป็นสิ่งที่รับไม่ได้ ไม่ใช่ใช้เป็นค่าเริ่มต้นแบบเหมารวม
-- Streaming replication คัดลอกทั้ง cluster และต้องตรงเวอร์ชันกัน; logical replication คัดลอก table ที่เลือกและข้าม major version ได้ จึงเหมาะกับงานอัปเกรดเป็นพิเศษ
-- Logical replication ต้องการ replica identity — โดยปกติคือ primary key — บนทุก table ที่เผยแพร่ เพื่อให้ subscriber จับคู่ row สำหรับการ update และ delete ได้
+- replica มีไว้อ่านและความพร้อมใช้งาน ส่งทุกการเขียนไป primary; replica จะปฏิเสธ (`read-only transaction`)
+- กับ asynchronous replication คาดว่าจะมี lag ถ้าการอ่านต้องสะท้อนการเขียนที่เพิ่งเกิด ส่งไป primary รอให้ replica ตามทัน หรือใช้ `remote_apply` สำหรับ transaction นั้น
+- synchronous replication แลก latency และความพร้อมใช้งานกับความปลอดภัย ตั้งชื่อ standby ให้ถูก ทดสอบว่าเกิดอะไรเมื่อมันล่ม และใช้เมื่อเสีย transaction ที่ยืนยันแล้วแม้แต่หนึ่งรายการก็รับไม่ได้ ไม่ใช่ default ทั่วไป
+- streaming replication คัดลอกทั้ง cluster และต้องตรง version; logical replication คัดลอก table ที่เลือกและข้าม major version ได้ จึงเด่นสำหรับ upgrade
+- logical replication ต้องมี replica identity — มักเป็น primary key — บนทุก table ที่ publish และต้องรักษา schema ให้ตรงกันด้วยมือ
+- เฝ้าดู `pg_replication_slots` slot ที่ไม่มีใครใช้ทำให้ดิสก์เต็มในที่สุด เว้นแต่ตั้ง `max_slot_wal_keep_size`
 
-<Callout title="log เดียว สองการใช้งาน">
-write-ahead log ถูกคิดค้นขึ้นเพื่อให้ PostgreSQL กู้คืนได้หลังจาก crash ด้วยการ replay การเปลี่ยนแปลงล่าสุด Replication นำ log เดียวกันนั้นมาใช้ซ้ำ: replica เป็นเพียง server อีกตัวที่ replay WAL ของ primary ตลอดไปและผ่านเครือข่าย การเข้าใจ WAL คือการเข้าใจ replication
+<Callout title="หนึ่ง log สองการใช้งาน">
+write-ahead log ถูกประดิษฐ์เพื่อให้ PostgreSQL กู้คืนหลัง crash ได้ด้วยการ replay การเปลี่ยนแปลงล่าสุด replication นำ log เดียวกันมาใช้ซ้ำ: replica ก็คือเซิร์ฟเวอร์อีกตัวที่ replay WAL ของ primary ตลอดไปและผ่านเครือข่าย เข้าใจ WAL คือเข้าใจ replication
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Synchronous replication | ไม่สูญข้อมูลตอน failover เพราะ replica มี WAL ก่อน commit จะตอบรับ | ทุกการเขียนต้องรอ round-trip เครือข่ายไปยัง replica ทำให้ latency สูงขึ้น |
-| Asynchronous replication | เขียนเร็ว เพราะ primary ไม่ต้องรอ replica | replica อาจล้าหลัง (replication lag) และมีโอกาสสูญข้อมูลเล็กน้อยตอน failover |
+| Synchronous replication | ไม่เสียข้อมูลตอน failover เพราะ standby มี WAL ก่อน commit ตอบรับ | ทุกการเขียนรอ round trip เครือข่าย; ถ้า standby ติดต่อไม่ได้ การเขียนค้าง (รอ 3 วินาทีข้างบนจนยกเลิก) |
+| Asynchronous replication | เขียนเร็ว เพราะ primary ไม่รอ replica | replica ตามหลังได้ (2 แถวเทียบ 3 ข้างบน) และมีโอกาสเล็กน้อยที่ข้อมูลหายตอน failover |
+| Logical replication | table ที่เลือก subscriber ที่เขียนได้ ข้าม major version | DDL ไม่ถูก replicate ต้องมี replica identity slot ที่ไม่มีใครใช้เก็บ WAL (26 MB ข้างบน) |
+| `hot_standby_feedback` | query บน replica ถูกยกเลิกน้อยลง | primary vacuum สิ่งที่ standby ยังต้องใช้ไม่ได้ (dead tuple 1 000 ข้างบน) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **สมมติว่า replica ตามทันเสมอ แล้วอ่านข้อมูลที่เพิ่งเขียนจาก replica ทันที** — เจอปัญหา "read-your-writes" เพราะ asynchronous replication มี lag ให้ส่ง read ที่ต้องสดใหม่ไปที่ primary
-- **ไม่เคยทดสอบ failover จริง** — ไม่มีใครรู้ว่าจะเกิดอะไรขึ้นจริงเมื่อ primary ล้มจนกว่าจะซ้อมจริง ควร drill การ promote replica เป็นประจำ
-- **ถือว่า replica ตัวเดียวคือแผน disaster recovery ที่สมบูรณ์** — replica ไม่ใช่ backup เพราะคัดลอกทั้งความผิดพลาดและการลบข้อมูลตามไปด้วย ยังต้องมี backup แยกต่างหาก
-
-> 💡 ตัวอย่างจากของจริง
->
-> **[Patroni](https://github.com/zalando/patroni)** — เครื่องมือ open-source ที่เริ่มต้นจาก Zalando และตอนนี้ดูแลโดยชุมชน ใช้กันแพร่หลายสำหรับจัดการ automated failover ของ PostgreSQL cluster ในโปรดักชัน
->
-> **[Neon](https://neon.com/docs/introduction/branching) และ Supabase** — สร้างฟีเจอร์อย่าง database branching และ read replica ไว้บน primitive การทำ replication ของ PostgreSQL เอง
+- **"replica คือ backup"** มันคัดลอกความผิดพลาดด้วย: `DROP TABLE` บน primary ไปถึง replica ภายในมิลลิวินาที replica คือความพร้อมใช้งาน ไม่ใช่การกู้คืน
+- **"synchronous replication แปลว่า replica แสดงการเขียนของฉันเสมอ"** มีแต่ `remote_apply`; `on` แปลว่า WAL ถูก flush ที่นั่น ไม่ใช่ replay แล้ว
+- **"promote replica ปลอดภัยขณะ primary เก่ายังอยู่"** ทั้งสองรับการเขียนและ timeline แยกทางกัน
+- **"logical replication replicate schema"** ไม่ใช่; row ของ column ใหม่ทำให้ apply worker ค้าง
+- **"streaming replication ต้องตั้งค่ามาก"** บน PostgreSQL 18 ค่า default พอ; ชิ้นที่ขาดคือ role และบรรทัด `pg_hba.conf`
 
 export const quizReplication = [
   {
     q: 'streaming replica ทำอะไรกับ WAL ที่ได้รับจาก primary?',
     options: [
-      'เก็บไว้เป็น backup แต่ไม่เคยอ่าน',
-      'replay record เพื่อรักษาสำเนาข้อมูลที่เหมือนกันและอ่านอย่างเดียว',
+      'เก็บเป็น backup แต่ไม่เคยอ่าน',
+      'replay record เพื่อรักษาสำเนาข้อมูลที่เหมือนกันและ read-only',
       'แปลงเป็นการเปลี่ยนแปลง row แบบ logical',
-      'ส่งกลับไปที่ primary เพื่อยืนยัน',
+      'ส่งกลับไป primary เพื่อยืนยัน',
     ],
     answer: 1,
+    explain: 'standby replay WAL ต่อเนื่อง การหยุด replay ในแล็บทำให้ replica เหลือ 2 แถวขณะที่ primary มี 3 จนกว่า replay จะต่อ',
   },
   {
-    q: 'ข้อแลกเปลี่ยนหลักของ synchronous replication เมื่อเทียบกับ asynchronous คืออะไร?',
+    q: 'ข้อแลกเปลี่ยนหลักของ synchronous replication เทียบกับ asynchronous คืออะไร?',
     options: [
-      'สูญข้อมูลมากกว่าแต่เร็วกว่า',
-      'commit ช้ากว่าแต่รับประกันว่าการเขียนที่ตอบรับแล้วจะรอดจากการสูญเสีย primary',
-      'ทำงานได้เฉพาะข้าม major version เท่านั้น',
-      'ตัดความจำเป็นที่ต้องมี primary ออกไป',
+      'เสียข้อมูลมากกว่าแต่เร็วกว่า',
+      'commit ช้ากว่าแต่รับประกันว่าการเขียนที่ยืนยันแล้วรอดจากการสูญเสีย primary',
+      'ใช้ได้เฉพาะข้าม major version',
+      'ไม่ต้องมี primary',
     ],
     answer: 1,
+    explain: 'primary รอ standby ที่ระบุชื่อ เมื่อ standby หยุด commit บล็อกใน `SyncRep` จนถูกยกเลิก',
   },
   {
-    q: 'คุณจะเลือก logical replication แทน streaming replication เมื่อใด?',
+    q: 'เมื่อไรคุณจะเลือก logical replication แทน streaming replication?',
     options: [
-      'เมื่อคุณต้องการสำเนาแบบ byte-for-byte ที่แม่นยำของทั้ง cluster',
-      'เมื่อคุณต้องการคัดลอกเฉพาะ table ที่เลือกหรือ replicate ข้าม major version ที่ต่างกัน',
-      'เมื่อคุณต้องการการเขียนที่เร็วที่สุดเท่าที่จะเป็นไปได้',
-      'เมื่อคุณไม่จำเป็นต้องอ่านจากสำเนาเลย',
+      'เมื่อต้องการสำเนาแบบ byte ต่อ byte ของทั้ง cluster',
+      'เมื่ออยากคัดลอกเฉพาะบาง table หรือ replicate ข้าม major version',
+      'เมื่ออยากได้การเขียนที่เร็วที่สุด',
+      'เมื่อไม่ต้องอ่านจากสำเนาเลย',
     ],
     answer: 1,
+    explain: 'logical replication publish table ที่เลือกไปยัง subscriber ที่เขียนได้ และข้าม major version ได้ streaming คัดลอกทั้ง cluster',
+  },
+  {
+    q: 'synchronous_standby_names ตั้งเป็น replica1 แต่ standby เชื่อมต่อด้วย application_name default ว่า walreceiver เกิดอะไรกับ commit บน primary?',
+    options: [
+      'สำเร็จ และใช้ standby อยู่ดี',
+      'รอ synchronous standby ที่ไม่เคยปรากฏ',
+      'PostgreSQL เปลี่ยนชื่อ standby ให้อัตโนมัติ',
+      'ล้มด้วย connection error',
+    ],
+    answer: 1,
+    explain: 'ชื่อต้องตรงกับ standby ที่เชื่อมต่ออยู่ ไม่งั้น commit รอเหมือนในแล็บ (wait event SyncRep) เหตุผลที่ clone ตั้ง application_name=replica1',
+  },
+  {
+    q: 'logical subscriber หยุดไปหนึ่งวัน เกิดอะไรบน publisher?',
+    options: [
+      'ไม่มีอะไร publisher ลืม subscriber',
+      'WAL ถูกเก็บให้ slot ของ subscriber และทำให้ดิสก์เต็มได้ เว้นแต่ max_slot_wal_keep_size จำกัด',
+      'publisher กลายเป็น read-only',
+      'subscriber ถูก drop อัตโนมัติหลัง 60 วินาที',
+    ],
+    answer: 1,
+    explain: 'slot ถือ WAL จน subscriber ใช้: 26 MB หลัง 200 000 row ในแล็บ เมื่อจำกัดที่ 32 MB slot ถูกทำให้ใช้ไม่ได้แทน',
   },
 ];
 
