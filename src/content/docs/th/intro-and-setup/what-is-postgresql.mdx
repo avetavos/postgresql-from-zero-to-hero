@@ -9,32 +9,82 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-PostgreSQL คือ relational database ที่เก็บข้อมูลเป็น **table** และให้คุณอธิบายความสัมพันธ์ระหว่าง table เหล่านั้นได้ บนรากฐานนี้ยังเพิ่มการรับประกันความถูกต้องที่แข็งแกร่งและความยืดหยุ่นระดับที่ไม่ธรรมดา สองอย่างรวมกันคือคำอธิบายว่าทำไม PostgreSQL จึงเป็นตัวเลือกเริ่มต้นของโปรเจกต์จำนวนมาก บทเรียนนี้ปูแนวคิดหลักไว้ให้ เพื่อให้ส่วนที่เหลือของคอร์สมีพื้นฐานที่มั่นคง
+PostgreSQL คือ relational database ที่เก็บข้อมูลเป็น **table** และให้คุณอธิบายความสัมพันธ์ระหว่าง table เหล่านั้นได้ บนรากฐานนี้ยังเพิ่มการรับประกันความถูกต้องที่แข็งแกร่งและความยืดหยุ่นระดับที่ไม่ธรรมดา สองอย่างรวมกันคือคำอธิบายว่าทำไม PostgreSQL จึงเป็นตัวเลือกเริ่มต้นของโปรเจกต์จำนวนมาก บทเรียนนี้ปูแนวคิดหลักแล้วพิสูจน์แต่ละข้อกับเซิร์ฟเวอร์จริง เพื่อให้ส่วนที่เหลือของคอร์สมีพื้นฐานที่มั่นคง
+
+> ทุก output ในบทเรียนนี้มาจากการรัน fence จริงบน **PostgreSQL 18.6** (Docker image `postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) fence แรกคือชุดข้อมูลมาตรฐานของคอร์ส ทุกบทเรียนที่ต้องใช้ข้อมูลนี้จะเริ่มด้วย fence เดียวกัน
 
 ## relational model
 
-ใน relational model ข้อมูลอยู่ใน table โดย **table** คือ table ที่มีชื่อ แต่ละ **column** มีชื่อและ type ที่ตายตัว และแต่ละ **row** คือหนึ่ง record ที่มีค่าสำหรับทุก column table ของลูกค้าอาจมี column สำหรับ id, ชื่อ และอีเมล โดยแต่ละ row คือลูกค้าหนึ่งราย
+ใน relational model ข้อมูลอยู่ใน table โดย **table** คือตารางที่มีชื่อ แต่ละ **column** มีชื่อและ type ที่ตายตัว และแต่ละ **row** คือหนึ่ง record ที่มีค่าสำหรับทุก column table ของผู้เขียนอาจมี column สำหรับ id, ชื่อ และปีเกิด โดยแต่ละ row คือผู้เขียนหนึ่งคน
 
-พลังนั้นมาจาก **ความสัมพันธ์ (relationship)** row ใน table หนึ่งชี้ไปยัง row ใน table อีกตัวได้ด้วยการเก็บ key ของ row นั้นไว้ เช่น table `orders` เก็บ `customer_id` ของลูกค้าที่สั่งซื้อในแต่ละ order ซึ่งเชื่อมโยง table ทั้งสองเข้าด้วยกัน แผนภาพด้านล่างแสดง table สอง table ที่สัมพันธ์กันในลักษณะนี้
+พลังนั้นมาจาก **ความสัมพันธ์ (relationship)** row ใน table หนึ่งชี้ไปยัง row ใน table อีกตัวได้ด้วยการเก็บ key ของ row นั้นไว้ เช่น table `books` เก็บ `author_id` ของผู้เขียนแต่ละเล่ม ซึ่งเชื่อมโยง table ทั้งสองเข้าด้วยกัน แผนภาพด้านล่างแสดง table สองตัวที่สัมพันธ์กันในลักษณะนี้
 
 export const relationDiagram = `flowchart LR
-  subgraph customers
-    C1[id: 1, name: Mira]
-    C2[id: 2, name: Devon]
+  subgraph authors
+    A1["id 1 - Mara Linde"]
+    A2["id 2 - Owen Pryce"]
   end
-  subgraph orders
-    O1[id: 100, customer_id: 1]
-    O2[id: 101, customer_id: 1]
-    O3[id: 102, customer_id: 2]
+  subgraph books
+    B1["id 1 - Quiet Harbors, author_id 1"]
+    B2["id 2 - The Glass Orchard, author_id 1"]
+    B3["id 3 - Tidal Notes, author_id 2"]
   end
-  O1 -->|customer_id references id| C1
-  O2 -->|customer_id references id| C1
-  O3 -->|customer_id references id| C2`;
+  B1 -->|"author_id references id"| A1
+  B2 -->|"author_id references id"| A1
+  B3 -->|"author_id references id"| A2`;
 
-<Mermaid code={relationDiagram} title="table สองอันที่สัมพันธ์กันด้วย key" />
+<Mermaid code={relationDiagram} title="table สองตัวที่สัมพันธ์กันด้วย key" />
 
-id ที่ระบุ row ได้แบบไม่ซ้ำเรียกว่า **primary key** ส่วน column ใน table อีกตัวที่ชี้กลับมาหา row นั้นคือ **foreign key** คุณจะได้ออกแบบ table และ key ในโมดูลถัดไป แล้วค่อยเอามารวมกันด้วย join ทีหลัง สำหรับตอนนี้สิ่งที่ต้องจำคือความสัมพันธ์ถูกเก็บเป็นค่าธรรมดา ไม่ใช่ pointer ที่ซ่อนอยู่
+id ที่ระบุ row ได้แบบไม่ซ้ำเรียกว่า **primary key** ส่วน column ใน table อีกตัวที่ชี้กลับมาหา row นั้นคือ **foreign key** ด้านล่างคือชุดข้อมูลมาตรฐานที่ทั้งคอร์สใช้ซ้ำ สร้างสามตารางแล้วใส่ข้อมูล รันในฐานข้อมูลเปล่าเพื่อทำตามได้
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+ความสัมพันธ์ถูกเก็บเป็นค่าธรรมดา ไม่ใช่ pointer ที่ซ่อนอยู่ การ join ก็คือการเทียบค่าเหล่านั้น และหนังสือที่ `author_id` เป็น NULL (`Unlinked Draft`) ก็ถูกต้องตามกฎ เพราะ column ที่เป็น foreign key อนุญาตให้เป็น NULL:
+
+```sql
+-- sql/relationships.sql
+SELECT b.id, b.title, b.author_id, a.name AS author
+FROM books b
+LEFT JOIN authors a ON a.id = b.author_id
+ORDER BY b.id;
+```
+
+```text
+ id |       title       | author_id |   author   
+----+-------------------+-----------+------------
+  1 | Quiet Harbors     |         1 | Mara Linde
+  2 | The Glass Orchard |         1 | Mara Linde
+  3 | Tidal Notes       |         2 | Owen Pryce
+  4 | Unlinked Draft    |           | 
+(4 rows)
+```
 
 ## การรับประกันแบบ ACID
 
@@ -47,11 +97,37 @@ PostgreSQL รับประกันว่าข้อมูลของคุ
 | I | Isolation | transaction ที่เกิดพร้อมกันจะไม่ทำให้กันและกันเสียหาย |
 | D | Durability | เมื่อ commit แล้ว การเปลี่ยนแปลงจะอยู่รอดผ่านการล่ม |
 
-หน่วยที่นำพาการรับประกันเหล่านี้คือ **transaction** — กลุ่มของ statement ที่ถูกปฏิบัติเสมือนเป็นการทำงานแบบทั้งหมดหรือไม่ทำเลยหนึ่งเดียว transaction จะมีโมดูลเต็มในภายหลัง สำหรับตอนนี้ให้รู้ไว้ว่า PostgreSQL จะไม่ทิ้งข้อมูลของคุณไว้ในสภาพที่เปลี่ยนไปเพียงครึ่งเดียว
+หน่วยที่นำพาการรับประกันเหล่านี้คือ **transaction** — กลุ่มของ statement ที่ถูกปฏิบัติเสมือนเป็นการทำงานแบบทั้งหมดหรือไม่ทำเลยหนึ่งเดียว transaction จะมีโมดูลเต็มในภายหลัง ตรงนี้ขอดู atomicity ในสิบวินาที: ภายใน transaction จะเห็น row ใหม่ แต่หลัง `ROLLBACK` มันไม่เคยมีอยู่
+
+```sql
+-- sql/atomicity.sql
+BEGIN;
+INSERT INTO books (title, author_id, published) VALUES ('Half Written', 1, 2024);
+SELECT count(*) AS books_inside_tx FROM books;
+ROLLBACK;
+SELECT count(*) AS books_after_rollback FROM books;
+```
+
+```text
+BEGIN
+INSERT 0 1
+ books_inside_tx 
+-----------------
+               5
+(1 row)
+
+ROLLBACK
+ books_after_rollback 
+----------------------
+                    4
+(1 row)
+```
+
+Consistency คือ constraint ที่คุณประกาศไว้ (โมดูลถัดไป), isolation คือ MVCC (ด้านล่าง), และ durability มาจาก write-ahead log ที่ flush ตอน `COMMIT` (อยู่ในโมดูล operations) สามข้อนี้แสดงใน psql session เดียวโดยไม่ทำให้เซิร์ฟเวอร์ล่มไม่ได้ บทเรียนนี้จึงอ้างเฉพาะสิ่งที่รันแล้วเท่านั้น
 
 ## MVCC ในหนึ่งบรรทัด
 
-PostgreSQL บรรลุ isolation ผ่าน **MVCC** หรือ multi-version concurrency control: แทนที่จะ lock row ให้ผู้อ่าน PostgreSQL เก็บ row ไว้หลายเวอร์ชันเพื่อให้ผู้อ่านเห็น snapshot ที่สอดคล้องกันในขณะที่ผู้เขียนทำงาน และผู้อ่านไม่เคยขวางผู้เขียน
+PostgreSQL บรรลุ isolation ผ่าน **MVCC** หรือ multi-version concurrency control: แทนที่จะ lock row ให้ผู้อ่าน PostgreSQL เก็บ row ไว้หลายเวอร์ชันเพื่อให้ผู้อ่านเห็น snapshot ที่สอดคล้องกันในขณะที่ผู้เขียนทำงาน คู่มือระบุไว้ตรง ๆ ว่า "reading never blocks writing and writing never blocks reading" ([PostgreSQL 18 docs, Concurrency Control - Introduction](https://www.postgresql.org/docs/18/mvcc-intro.html)) ราคาที่ต้องจ่ายคือ row เวอร์ชันเก่าที่ต้องให้ `VACUUM` เก็บกวาด โมดูล transactions และ indexes จะแสดงให้ดูสด ๆ
 
 ## ความสามารถในการขยาย (Extensibility)
 
@@ -59,9 +135,78 @@ PostgreSQL บรรลุ isolation ผ่าน **MVCC** หรือ multi-ve
 
 - **type ที่หลากหลายและกำหนดเองได้** — นอกเหนือจากตัวเลขและข้อความ Postgres มาพร้อมกับ date, array, geometric type, network address และอื่น ๆ และคุณสามารถนิยาม type ของคุณเองได้
 - **JSONB** — เก็บและสร้าง index ให้เอกสาร JSON จริงภายใน column ได้ ผสมผสานสไตล์ relational และ document ไว้ในฐานข้อมูลเดียว
-- **Extension** — แพ็กเกจแบบเสียบใช้งานได้ทันทีเพิ่มความสามารถทั้งชุด เช่น `postgis` สำหรับข้อมูลทางภูมิศาสตร์ หรือ `pg_trgm` สำหรับการจับคู่ข้อความแบบ fuzzy ติดตั้งได้ด้วยคำสั่ง `CREATE EXTENSION` เพียงคำสั่งเดียว
+- **Extension** — แพ็กเกจที่เพิ่มความสามารถทั้งชุด ติดตั้งได้ด้วยคำสั่ง `CREATE EXTENSION` เพียงคำสั่งเดียว
 
-ความยืดหยุ่นนี้หมายความว่า PostgreSQL instance เดียวมักจะแทนที่เครื่องมือเฉพาะทางหลายตัวได้ ทำให้ stack ของคุณเรียบง่ายขึ้น
+เซิร์ฟเวอร์มาตรฐานมี extension วางอยู่บนดิสก์กี่ตัว? ถามมันตรง ๆ:
+
+```sql
+-- sql/version.sql
+SELECT version();
+SELECT count(*) AS available_extensions FROM pg_available_extensions;
+```
+
+```text
+                                                         version                                                          
+--------------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+(1 row)
+
+ available_extensions 
+----------------------
+                   46
+(1 row)
+```
+
+นั่นคือ `postgres:18.6` บน aarch64 ที่มี extension พร้อมใช้ 46 ตัวใน Docker image `postgres` (ชุด contrib รายการในเครื่องของคุณขึ้นกับ package ที่ติดตั้ง ดู [บท contrib](https://www.postgresql.org/docs/18/contrib.html)) "พร้อมใช้" ไม่ใช่ "ติดตั้งแล้ว": `CREATE EXTENSION` เปิดใช้ใน database เดียว `pg_trgm` ให้การจับคู่ข้อความแบบ fuzzy จึงพิมพ์ผิดเล็กน้อยก็ยังเจอหนังสือที่ถูกต้อง:
+
+```sql
+-- sql/pg-trgm.sql
+CREATE EXTENSION pg_trgm;
+SELECT title, round(similarity(title, 'Glas Orchad')::numeric, 3) AS sim
+FROM books
+ORDER BY sim DESC
+LIMIT 2;
+```
+
+```text
+CREATE EXTENSION
+       title       |  sim  
+-------------------+-------
+ The Glass Orchard | 0.429
+ Quiet Harbors     | 0.000
+(2 rows)
+```
+
+และ JSONB ทำให้ column เดียวเก็บเอกสารได้ ขณะที่ส่วนที่เหลือของ row ยังเป็น relational:
+
+```sql
+-- sql/jsonb.sql
+CREATE TABLE reviews (id int PRIMARY KEY, doc jsonb NOT NULL);
+INSERT INTO reviews VALUES (1, '{"book": "Tidal Notes", "stars": 5, "tags": ["sea", "quiet"]}');
+SELECT doc ->> 'book' AS book, (doc ->> 'stars')::int AS stars, doc -> 'tags' ->> 0 AS first_tag
+FROM reviews;
+```
+
+```text
+CREATE TABLE
+INSERT 0 1
+    book     | stars | first_tag 
+-------------+-------+-----------
+ Tidal Notes |     5 | sea
+(1 row)
+```
+
+ความยืดหยุ่นนี้หมายความว่า PostgreSQL instance เดียวมักจะแทนที่เครื่องมือเฉพาะทางหลายตัวได้ ทำให้ stack ของคุณเรียบง่ายขึ้น แต่ extension ต้องมีอยู่บนเซิร์ฟเวอร์ก่อน `postgis` ไม่อยู่ใน image มาตรฐาน:
+
+```sql
+-- @expect-error 0A000
+CREATE EXTENSION postgis;
+```
+
+```text
+ERROR:  extension "postgis" is not available
+HINT:  The extension must first be installed on the system where PostgreSQL is running.
+```
 
 ## เมื่อใดที่ PostgreSQL เหมาะสม
 
@@ -69,13 +214,50 @@ PostgreSQL เป็นตัวเลือกเริ่มต้นที่
 
 จะเหมาะน้อยลงเมื่อคุณต้องการ in-memory cache ล้วน ๆ สำหรับข้อมูลชั่วคราว หรือ engine เฉพาะทางสำหรับ workload สุดขั้วเพียงอย่างเดียว เช่น time-series ที่อัตราการรับเข้าข้อมูลมหาศาล — แม้แต่ในกรณีนั้น extension มักจะช่วยปิดช่องว่างได้ สำหรับโปรเจกต์ส่วนใหญ่อย่างท่วมท้น การหยิบ PostgreSQL ขึ้นมาก่อนเป็นตัวเลือกที่ปลอดภัยและยืนยง
 
+## Reading AI-generated code
+
+ถ้าขอให้ผู้ช่วย AI เขียน "ที่ตั้งร้านพร้อม geo query" มันจะเขียน migration แบบนี้ให้อย่างเต็มใจ อ่านก่อนรันเสมอ:
+
+<SpotTheBug lang="sql" code={`-- migration: 0007_add_store_locations.sql
+-- AI comment: "store locations need geo queries, enabling PostGIS"
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+CREATE TABLE stores (
+  id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name     text NOT NULL,
+  location geography(Point, 4326) NOT NULL
+);`}>
+
+คอมเมนต์ฟังดูสมเหตุสมผล และ `CREATE EXTENSION IF NOT EXISTS` ดูรอบคอบ แต่ bug คือเซิร์ฟเวอร์มาตรฐานไม่มี `postgis` เลย statement แรกจึงพังทันที (reproduce ไว้ด้านบน): `ERROR:  extension "postgis" is not available` พร้อม `HINT:  The extension must first be installed on the system where PostgreSQL is running.` `IF NOT EXISTS` ข้ามเฉพาะ extension ที่ *ติดตั้งแล้ว* ไม่ได้ติดตั้ง package ให้ ทางแก้ไม่ได้อยู่ใน SQL: ใช้ image ที่มี extension นั้น (เช่น image `postgis/postgis`) หรือ managed service ที่ระบุว่ามี และเช็ก `pg_available_extensions` ก่อนเขียน migration:
+
+```sql
+-- sql/fix-extension.sql
+-- Stock postgres:18.6 ships contrib only. pg_available_extensions is the truth:
+SELECT count(*) FILTER (WHERE name = 'postgis') AS postgis_available,
+       count(*) FILTER (WHERE name = 'pg_trgm') AS pg_trgm_available
+FROM pg_available_extensions;
+```
+
+```text
+ postgis_available | pg_trgm_available 
+-------------------+-------------------
+                 0 |                 1
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+คิดว่า PostgreSQL มีสามชั้น **Table และ constraint** เก็บข้อเท็จจริงและปฏิเสธความขัดแย้ง **Transaction กับ MVCC** ให้หลายคนอ่านเขียนพร้อมกันได้โดยทุกคนเห็นภาพที่สอดคล้องกัน **Extension, type และ JSONB** คือวิธีที่ engine เติบโตโดยไม่กลายเป็นผลิตภัณฑ์อื่น เกือบทุกบทเรียนถัดไปคือหนึ่งในสามชั้นนี้แบบเจาะลึก
+
 ## เคล็ดลับและข้อควรระวัง
 
 - คิดในรูปของ table และความสัมพันธ์ตั้งแต่แรก การออกแบบข้อมูลให้ดีตั้งแต่เนิ่น ๆ ช่วยลดความเจ็บปวดในภายหลัง
 - primary key ระบุ row ได้แบบไม่ซ้ำ ส่วน foreign key ใน table อีกตัวชี้กลับมาที่ row นั้น
 - ACID ไม่ใช่เวทมนตร์ที่คุณเปิดสวิตช์ — เปิดอยู่ตลอดเวลา ผ่านการทำงานของ transaction
 - หยิบ JSONB มาใช้เมื่อส่วนหนึ่งของข้อมูลของคุณเป็น schemaless อย่างแท้จริง แต่ให้เก็บส่วนที่มีโครงสร้างไว้ใน column ปกติ
-- ก่อนที่จะรับเอาฐานข้อมูลเฉพาะทางแยกต่างหากมาใช้ ให้ตรวจดูว่ามี extension ของ PostgreSQL ที่ครอบคลุมความต้องการนั้นอยู่แล้วหรือไม่
+- ก่อนที่จะรับเอาฐานข้อมูลเฉพาะทางแยกต่างหากมาใช้ ให้ตรวจดูว่ามี extension ของ PostgreSQL ที่ครอบคลุมความต้องการนั้นอยู่แล้วหรือไม่ และเช็ก `pg_available_extensions` บนเซิร์ฟเวอร์ที่จะรันจริง
 
 <Callout title="relational ก่อน ยืดหยุ่นเสมอ">
 relational model มอบความถูกต้องและโครงสร้างที่ชัดเจนให้คุณ ACID มอบความไว้วางใจ ส่วน extensibility มอบพื้นที่ให้เติบโต PostgreSQL เป็นเครื่องมือที่หาได้ยากที่มอบทั้งสามอย่างพร้อมกัน และนั่นคือเหตุผลที่คอร์สนี้ส่วนใหญ่เป็นเพียงการเรียนรู้ที่จะใช้ฐานข้อมูลตัวเดียวให้ดีจริง ๆ
@@ -86,27 +268,24 @@ relational model มอบความถูกต้องและโครง
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
 | Self-hosted PostgreSQL | ควบคุม config, extension และ version ได้เต็มที่ | ต้องดูแล backup, patching และ tuning เอง |
-| Managed service เช่น RDS หรือ Supabase | ลดภาระ ops, ได้ backup และ failover มาให้ | ค่าใช้จ่ายสูงขึ้นและถูกจำกัด extension บางตัว |
+| Managed service (RDS, Cloud SQL, Supabase, ...) | ลดภาระ ops, ได้ backup และ failover มาให้ | ค่าใช้จ่ายสูงขึ้นและถูกจำกัด extension บางตัว |
 | ใช้ extensibility ของ Postgres (JSONB, extension) | engine เดียวรองรับหลาย workload | schema และ query ซับซ้อนขึ้นถ้าใช้พร่ำเพรื่อ |
 | ฐานข้อมูลเฉพาะทางแยกต่างหาก | ประสิทธิภาพที่ดีที่สุดสำหรับงานนั้นโดยเฉพาะ | เพิ่มจำนวนระบบที่ต้องดูแลและ sync ข้อมูล |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คิดว่า PostgreSQL "ก็เหมือน MySQL"** — ทั้งสองเป็น relational database ก็จริง แต่ MVCC, type system และพฤติกรรม transaction ต่างกันพอสมควร อย่าย้าย mental model มาตรง ๆ โดยไม่เช็คก่อน
-- **เลือก managed provider โดยไม่เช็ค version หรือ extension ที่รองรับ** — บาง provider lock version ไว้เก่ากว่าหรือไม่เปิด extension ที่คุณต้องการ (เช่น `postgis`) เช็ค compatibility ก่อนผูกมัดกับ provider
-- **ประเมินภาระงานของการ self-host ต่ำเกินไป** — backup, monitoring, patching และ scaling เป็นงานต่อเนื่อง ไม่ใช่ตั้งค่าครั้งเดียวจบ
-
-> 💡 ตัวอย่างจากของจริง
->
-> **[Instagram](https://instagram-engineering.com/sharding-ids-at-instagram-1cf5a71e5a5c)** — สเกล PostgreSQL แบบ vanilla ให้รองรับผู้ใช้หลายร้อยล้านคนได้ด้วยเทคนิค sharding ที่ layer แอปพลิเคชัน แสดงให้เห็นว่า Postgres ธรรมดาไปได้ไกลแค่ไหนเมื่อออกแบบ schema และ scaling strategy ดี
->
-> **[Supabase](https://supabase.com/docs/guides/getting-started/architecture)** — สร้าง developer platform ทั้งชุดขึ้นบน PostgreSQL โดยใช้ extensibility ของ PostgreSQL (realtime, auth, storage) เป็นแกนหลัก แทนที่จะสร้างฐานข้อมูลของตัวเองใหม่
+- **"PostgreSQL ก็เหมือน MySQL"** ทั้งสองเป็น relational database ก็จริง แต่ MVCC, type system และพฤติกรรม transaction ต่างกันพอสมควร อย่าย้าย mental model มาตรง ๆ โดยไม่เช็คก่อน
+- **"ถ้าเป็น extension ของ PostgreSQL ก็ `CREATE EXTENSION` ได้เลย"** มีเฉพาะ extension ที่ติดตั้งบนเซิร์ฟเวอร์เท่านั้นที่โผล่ใน `pg_available_extensions` `postgis` ไม่อยู่ใน image มาตรฐาน (พิสูจน์ไว้ด้านบน)
+- **"rollback เป็นโหมดพิเศษ"** ทุก statement รันใน transaction อยู่แล้ว `BEGIN` เพียงทำให้มันครอบหลาย statement
+- **"การ self-host ตั้งค่าครั้งเดียวจบ"** backup, monitoring, patching และ scaling เป็นงานต่อเนื่อง
+- **"JSONB มาแทน column ได้"** มันเป็นส่วนเสริม: key ที่ใช้ filter และ join ควรเป็น column จริง
 
 export const quizWhatIs = [
   {
     q: 'ใน relational model อะไรเป็นที่เก็บข้อมูล?',
     options: ['Document', 'Table ที่ประกอบด้วย row และ column', 'คู่ key-value', 'Graph ของ node'],
     answer: 1,
+    explain: 'table คือตารางของ column ที่มี type และ row ความสัมพันธ์เก็บเป็นค่าธรรมดา (foreign key เช่น `books.author_id`) ไม่ใช่ pointer ที่ซ่อนอยู่',
   },
   {
     q: '"D" ใน ACID รับประกันอะไร?',
@@ -117,11 +296,30 @@ export const quizWhatIs = [
       'row ที่ซ้ำกันจะถูกปฏิเสธ',
     ],
     answer: 1,
+    explain: 'Durability: หลัง COMMIT คืนค่า การเปลี่ยนแปลงปลอดภัยอยู่ใน write-ahead log และอยู่รอดผ่านการล่ม ทศนิยมแม่นยำคือ type `numeric` ส่วนการปฏิเสธ row ซ้ำคือ constraint',
   },
   {
     q: 'ฟีเจอร์ใดให้คุณเก็บและสร้าง index ให้เอกสาร JSON จริงภายใน column ได้?',
     options: ['MVCC', 'JSONB', 'Foreign key', 'Atomicity'],
     answer: 1,
+    explain: 'JSONB เก็บเอกสาร JSON แบบ binary ที่ parse แล้ว query ได้ (`doc ->> \'book\'`) และสร้าง index ได้ อยู่ข้าง column relational ปกติ',
+  },
+  {
+    q: 'คุณรัน `BEGIN; INSERT ...; ROLLBACK;` แล้ว `SELECT count(*)` row ที่ insert ไปเป็นอย่างไร?',
+    options: ['ยังอยู่แต่ถูกซ่อน', 'ไม่เคยมีอยู่: count กลับไปเท่าเดิม', 'ถูกเก็บลง temporary table', 'rollback ล้มเหลวเพราะ row ถูกอ่านแล้ว'],
+    answer: 1,
+    explain: 'Atomicity: transaction คือทั้งหมดหรือไม่เลย บทเรียนแสดง 5 row ภายใน transaction และ 4 row หลัง `ROLLBACK`',
+  },
+  {
+    q: '`CREATE EXTENSION IF NOT EXISTS postgis;` ล้มเหลวบน image `postgres:18.6` มาตรฐาน เพราะอะไร?',
+    options: [
+      'IF NOT EXISTS ไม่ใช่ syntax ที่ถูกต้อง',
+      'PostGIS ไม่ได้ติดตั้งบนเซิร์ฟเวอร์นั้น จึงไม่อยู่ใน `pg_available_extensions`',
+      'มีแต่ superuser ที่ติดตั้ง extension ได้',
+      'PostgreSQL 18 ถอด PostGIS ออกแล้ว',
+    ],
+    answer: 1,
+    explain: '`IF NOT EXISTS` ข้ามเฉพาะ extension ที่ติดตั้งใน database แล้ว ไม่สามารถดึง package มาให้ เซิร์ฟเวอร์ต้องมีไฟล์ extension อยู่ก่อน (เช่นจาก image `postgis/postgis`)',
   },
 ];
 

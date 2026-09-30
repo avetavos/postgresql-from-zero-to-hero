@@ -9,32 +9,82 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-PostgreSQL is a relational database: it stores data as **tables** and lets you describe relationships between those tables. On top of that foundation it adds strong correctness guarantees and an unusual amount of flexibility, which together explain why it is a default choice for so many projects. This lesson explains the core ideas so the rest of the course has solid ground to stand on.
+PostgreSQL is a relational database: it stores data as **tables** and lets you describe relationships between those tables. On top of that foundation it adds strong correctness guarantees and an unusual amount of flexibility, which together explain why it is a default choice for so many projects. This lesson explains the core ideas and then proves each one against a real server, so the rest of the course has solid ground to stand on.
+
+> Every output in this lesson was produced by running the fences on **PostgreSQL 18.6** (the `postgres:18.6` Docker image, aarch64, Docker Desktop on a Mac, September 2026). The first fence is the course's canonical dataset; every lesson that needs it starts with the same fence.
 
 ## The relational model
 
-In the relational model, data lives in tables. A **table** is a named grid. Each **column** has a name and a fixed type, and each **row** is one record with a value for every column. A table of customers might have columns for an id, a name, and an email; each row is one customer.
+In the relational model, data lives in tables. A **table** is a named grid. Each **column** has a name and a fixed type, and each **row** is one record with a value for every column. A table of authors might have columns for an id, a name, and a birth year; each row is one author.
 
-The power comes from **relationships**. A row in one table can point at a row in another by storing its key. An `orders` table stores the `customer_id` of the customer who placed each order, linking the two tables together. The diagram below shows two tables related this way.
+The power comes from **relationships**. A row in one table can point at a row in another by storing its key. A `books` table stores the `author_id` of the author who wrote each book, linking the two tables together. The diagram below shows two tables related this way.
 
 export const relationDiagram = `flowchart LR
-  subgraph customers
-    C1[id: 1, name: Mira]
-    C2[id: 2, name: Devon]
+  subgraph authors
+    A1["id 1 - Mara Linde"]
+    A2["id 2 - Owen Pryce"]
   end
-  subgraph orders
-    O1[id: 100, customer_id: 1]
-    O2[id: 101, customer_id: 1]
-    O3[id: 102, customer_id: 2]
+  subgraph books
+    B1["id 1 - Quiet Harbors, author_id 1"]
+    B2["id 2 - The Glass Orchard, author_id 1"]
+    B3["id 3 - Tidal Notes, author_id 2"]
   end
-  O1 -->|customer_id references id| C1
-  O2 -->|customer_id references id| C1
-  O3 -->|customer_id references id| C2`;
+  B1 -->|"author_id references id"| A1
+  B2 -->|"author_id references id"| A1
+  B3 -->|"author_id references id"| A2`;
 
 <Mermaid code={relationDiagram} title="Two tables related by a key" />
 
-The id that uniquely identifies a row is its **primary key**. The column in another table that points back at it is a **foreign key**. You will design tables and keys in the next module and combine them with joins later; for now the takeaway is that relationships are stored as plain values, not hidden pointers.
+The id that uniquely identifies a row is its **primary key**. The column in another table that points back at it is a **foreign key**. Here is the canonical dataset that the whole course reuses. It creates three tables and seeds them; run it in an empty database to follow along.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+Relationships are stored as plain values, not hidden pointers. Joining is just comparing those values, and a book with a NULL `author_id` (`Unlinked Draft`) is legal because the foreign key column allows NULL:
+
+```sql
+-- sql/relationships.sql
+SELECT b.id, b.title, b.author_id, a.name AS author
+FROM books b
+LEFT JOIN authors a ON a.id = b.author_id
+ORDER BY b.id;
+```
+
+```text
+ id |       title       | author_id |   author   
+----+-------------------+-----------+------------
+  1 | Quiet Harbors     |         1 | Mara Linde
+  2 | The Glass Orchard |         1 | Mara Linde
+  3 | Tidal Notes       |         2 | Owen Pryce
+  4 | Unlinked Draft    |           | 
+(4 rows)
+```
 
 ## ACID guarantees
 
@@ -47,11 +97,37 @@ PostgreSQL promises that your data stays correct through crashes, errors, and co
 | I | Isolation | Concurrent transactions do not corrupt each other |
 | D | Durability | Once committed, a change survives a crash |
 
-The unit that carries these guarantees is the **transaction** — a group of statements treated as one all-or-nothing operation. Transactions get a full module later; for now, know that PostgreSQL never leaves your data half-changed.
+The unit that carries these guarantees is the **transaction** — a group of statements treated as one all-or-nothing operation. Transactions get a full module later. Here is atomicity in ten seconds: inside the transaction the new row is visible, after `ROLLBACK` it never existed.
+
+```sql
+-- sql/atomicity.sql
+BEGIN;
+INSERT INTO books (title, author_id, published) VALUES ('Half Written', 1, 2024);
+SELECT count(*) AS books_inside_tx FROM books;
+ROLLBACK;
+SELECT count(*) AS books_after_rollback FROM books;
+```
+
+```text
+BEGIN
+INSERT 0 1
+ books_inside_tx 
+-----------------
+               5
+(1 row)
+
+ROLLBACK
+ books_after_rollback 
+----------------------
+                    4
+(1 row)
+```
+
+Consistency is the constraints you declare (the next module), isolation is MVCC (below), and durability comes from the write-ahead log flushed at `COMMIT` (covered in the operations module). None of these can be demonstrated in a single psql session without crashing the server, so this lesson only claims what it ran.
 
 ## MVCC in one line
 
-PostgreSQL achieves isolation through **MVCC**, multi-version concurrency control: instead of locking rows for readers, it keeps multiple versions of a row so readers see a consistent snapshot while writers work, and readers never block writers.
+PostgreSQL achieves isolation through **MVCC**, multi-version concurrency control: instead of locking rows for readers, it keeps multiple versions of a row so readers see a consistent snapshot while writers work. The manual states it directly: "reading never blocks writing and writing never blocks reading" ([PostgreSQL 18 docs, Concurrency Control - Introduction](https://www.postgresql.org/docs/18/mvcc-intro.html)). The price is dead row versions that `VACUUM` must clean up; the transactions and indexes modules show that live.
 
 ## Extensibility
 
@@ -59,9 +135,78 @@ What truly sets PostgreSQL apart is how much you can extend it. You are not limi
 
 - **Rich and custom types** — beyond numbers and text, Postgres ships with dates, arrays, geometric types, network addresses, and more, and you can define your own.
 - **JSONB** — store and index real JSON documents inside a column, blending relational and document styles in one database.
-- **Extensions** — drop-in packages add whole capabilities, such as `postgis` for geographic data or `pg_trgm` for fuzzy text matching, installed with a single `CREATE EXTENSION` command.
+- **Extensions** — packages that add whole capabilities, installed with a single `CREATE EXTENSION` command.
 
-This flexibility means one PostgreSQL instance can often replace several specialized tools, keeping your stack simpler.
+How many extensions does a stock server have on disk? Ask it:
+
+```sql
+-- sql/version.sql
+SELECT version();
+SELECT count(*) AS available_extensions FROM pg_available_extensions;
+```
+
+```text
+                                                         version                                                          
+--------------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+(1 row)
+
+ available_extensions 
+----------------------
+                   46
+(1 row)
+```
+
+That is `postgres:18.6` on aarch64 with 46 extensions available in the `postgres` Docker image (the contrib set; the list in your install depends on the packages you installed, see [the contrib chapter](https://www.postgresql.org/docs/18/contrib.html)). Available is not installed: `CREATE EXTENSION` activates one inside a single database. `pg_trgm` gives fuzzy text matching, so a typo still finds the right book:
+
+```sql
+-- sql/pg-trgm.sql
+CREATE EXTENSION pg_trgm;
+SELECT title, round(similarity(title, 'Glas Orchad')::numeric, 3) AS sim
+FROM books
+ORDER BY sim DESC
+LIMIT 2;
+```
+
+```text
+CREATE EXTENSION
+       title       |  sim  
+-------------------+-------
+ The Glass Orchard | 0.429
+ Quiet Harbors     | 0.000
+(2 rows)
+```
+
+And JSONB lets one column hold a document while the rest of the row stays relational:
+
+```sql
+-- sql/jsonb.sql
+CREATE TABLE reviews (id int PRIMARY KEY, doc jsonb NOT NULL);
+INSERT INTO reviews VALUES (1, '{"book": "Tidal Notes", "stars": 5, "tags": ["sea", "quiet"]}');
+SELECT doc ->> 'book' AS book, (doc ->> 'stars')::int AS stars, doc -> 'tags' ->> 0 AS first_tag
+FROM reviews;
+```
+
+```text
+CREATE TABLE
+INSERT 0 1
+    book     | stars | first_tag 
+-------------+-------+-----------
+ Tidal Notes |     5 | sea
+(1 row)
+```
+
+This flexibility means one PostgreSQL instance can often replace several specialized tools, keeping your stack simpler. But an extension has to exist on the server first. `postgis` is not part of the stock image:
+
+```sql
+-- @expect-error 0A000
+CREATE EXTENSION postgis;
+```
+
+```text
+ERROR:  extension "postgis" is not available
+HINT:  The extension must first be installed on the system where PostgreSQL is running.
+```
 
 ## When PostgreSQL fits
 
@@ -69,13 +214,50 @@ PostgreSQL is a strong default for almost any application that stores structured
 
 It is a less natural fit when you need a pure in-memory cache for ephemeral data, or a specialized engine for a single extreme workload such as time-series at massive ingest rates — though even there, extensions often close the gap. For the vast majority of projects, reaching for PostgreSQL first is a safe and durable choice.
 
+## Reading AI-generated code
+
+An assistant asked for "store locations with geo queries" will happily write this migration. Read it before you run it:
+
+<SpotTheBug lang="sql" code={`-- migration: 0007_add_store_locations.sql
+-- AI comment: "store locations need geo queries, enabling PostGIS"
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+CREATE TABLE stores (
+  id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name     text NOT NULL,
+  location geography(Point, 4326) NOT NULL
+);`}>
+
+The comment is reasonable, and `CREATE EXTENSION IF NOT EXISTS` looks defensive. The bug is that the stock server has no `postgis` at all, so the very first statement fails (reproduced above): `ERROR:  extension "postgis" is not available` with `HINT:  The extension must first be installed on the system where PostgreSQL is running.` `IF NOT EXISTS` only skips an extension that is *installed*; it does not install packages. The fix is not in SQL: use an image that ships the extension (for example the `postgis/postgis` image) or a managed service that lists it, and check `pg_available_extensions` before you write the migration:
+
+```sql
+-- sql/fix-extension.sql
+-- Stock postgres:18.6 ships contrib only. pg_available_extensions is the truth:
+SELECT count(*) FILTER (WHERE name = 'postgis') AS postgis_available,
+       count(*) FILTER (WHERE name = 'pg_trgm') AS pg_trgm_available
+FROM pg_available_extensions;
+```
+
+```text
+ postgis_available | pg_trgm_available 
+-------------------+-------------------
+                 0 |                 1
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Think of PostgreSQL as three layers. **Tables and constraints** hold facts and refuse contradictions. **Transactions with MVCC** let many people read and write at once while everybody sees a consistent picture. **Extensions, types, and JSONB** are how the engine grows without becoming a different product. Almost every later lesson is one of those three layers in detail.
+
 ## Tips / gotchas
 
 - Think in tables and relationships from the start; modeling data well early saves pain later.
 - A primary key uniquely identifies a row; a foreign key in another table points back at it.
 - ACID is not magic you turn on — it is always on, carried by transactions.
 - Reach for JSONB when part of your data is genuinely schemaless, but keep the structured parts in normal columns.
-- Before adopting a separate specialized database, check whether a PostgreSQL extension already covers the need.
+- Before adopting a separate specialized database, check whether a PostgreSQL extension already covers the need — and check `pg_available_extensions` on the server you will actually run.
 
 <Callout title="Relational first, flexible always">
 The relational model gives you correctness and clear structure; ACID gives you trust; extensibility gives you room to grow. PostgreSQL is the rare tool that offers all three at once, which is why so much of this course is simply learning to use one database really well.
@@ -86,27 +268,24 @@ The relational model gives you correctness and clear structure; ACID gives you t
 | Option | Benefit | Cost |
 |---------|---------|------|
 | Self-hosted PostgreSQL | Full control over config, extensions, and version | You handle backups, patching, and tuning yourself |
-| A managed service like RDS or Supabase | Less operational burden, backups and failover included | Higher cost, and some extensions may be restricted |
+| A managed service (RDS, Cloud SQL, Supabase, ...) | Less operational burden, backups and failover included | Higher cost, and some extensions may be restricted |
 | Lean on PostgreSQL's extensibility (JSONB, extensions) | One engine covers several workloads | Schema and queries get more complex if overused |
 | A separate specialized database | Best possible performance for that one workload | One more system to run and keep in sync |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Assuming PostgreSQL is "just like MySQL"** — both are relational databases, but MVCC, the type system, and transaction behavior differ meaningfully. Do not carry over a mental model unchecked.
-- **Picking a managed provider without checking its version or supported extensions** — some providers lock in an older version or do not enable an extension you need, such as `postgis`. Check compatibility before committing to a provider.
-- **Underestimating the ongoing work of self-hosting** — backups, monitoring, patching, and scaling are continuous work, not a one-time setup.
-
-> 💡 Real-world example
->
-> **[Instagram](https://instagram-engineering.com/sharding-ids-at-instagram-1cf5a71e5a5c)** — scaled largely vanilla PostgreSQL to serve hundreds of millions of users using application-level sharding, showing how far plain Postgres can go with a good schema and scaling strategy.
->
-> **[Supabase](https://supabase.com/docs/guides/getting-started/architecture)** — built its entire developer platform on top of PostgreSQL, using Postgres's own extensibility (realtime, auth, storage) as the core, instead of building a new database from scratch.
+- **"PostgreSQL is just like MySQL."** Both are relational databases, but MVCC, the type system, and transaction behavior differ meaningfully. Do not carry over a mental model unchecked.
+- **"If it is a PostgreSQL extension I can `CREATE EXTENSION` it."** Only extensions installed on the server appear in `pg_available_extensions`. `postgis` is not in the stock image (proved above).
+- **"Rollback is a special mode."** Every statement already runs in a transaction; `BEGIN` just makes it span several statements.
+- **"Self-hosting is a one-time setup."** Backups, monitoring, patching, and scaling are continuous work.
+- **"JSONB replaces columns."** It complements them: keep keys you filter and join on as real columns.
 
 export const quizWhatIs = [
   {
     q: 'In the relational model, what holds the data?',
     options: ['Documents', 'Tables made of rows and columns', 'Key-value pairs', 'Graphs of nodes'],
     answer: 1,
+    explain: 'A table is a grid of typed columns and rows. Relationships are stored as ordinary values (a foreign key such as `books.author_id`), not as hidden pointers.',
   },
   {
     q: 'What does the "D" in ACID guarantee?',
@@ -117,11 +296,30 @@ export const quizWhatIs = [
       'Duplicate rows are rejected',
     ],
     answer: 1,
+    explain: 'Durability: after COMMIT returns, the change is safe in the write-ahead log and survives a crash. Exact decimals are the `numeric` type; duplicate rejection is a constraint.',
   },
   {
     q: 'Which feature lets you store and index real JSON documents inside a column?',
     options: ['MVCC', 'JSONB', 'Foreign keys', 'Atomicity'],
     answer: 1,
+    explain: 'JSONB stores a parsed binary JSON document that can be queried (`doc ->> \'book\'`) and indexed, next to normal relational columns.',
+  },
+  {
+    q: 'You run `BEGIN; INSERT ...; ROLLBACK;` and then `SELECT count(*)`. What happens to the inserted row?',
+    options: ['It stays, but is hidden', 'It never existed: the count is back to its old value', 'It is saved to a temporary table', 'The rollback fails because the row was read'],
+    answer: 1,
+    explain: 'Atomicity: the transaction is all-or-nothing. The lesson shows 5 rows inside the transaction and 4 after `ROLLBACK`.',
+  },
+  {
+    q: '`CREATE EXTENSION IF NOT EXISTS postgis;` fails on the stock `postgres:18.6` image. Why?',
+    options: [
+      'IF NOT EXISTS is not valid syntax',
+      'PostGIS is not installed on that server, so it is not in `pg_available_extensions`',
+      'Only superusers can install extensions',
+      'PostgreSQL 18 removed PostGIS support',
+    ],
+    answer: 1,
+    explain: '`IF NOT EXISTS` only skips extensions that are already installed in the database; it cannot fetch packages. The server needs the extension files (for example from the `postgis/postgis` image).',
   },
 ];
 
