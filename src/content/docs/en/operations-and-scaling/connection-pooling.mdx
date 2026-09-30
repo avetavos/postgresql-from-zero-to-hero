@@ -1,6 +1,6 @@
 ---
 title: Connection pooling
-description: Why each PostgreSQL connection is a heavyweight process, how PgBouncer's session, transaction, and statement pooling modes work, and how to connect your application through a pooler.
+description: Why each PostgreSQL connection is a heavyweight process, how PgBouncer's transaction pooling works, what breaks in it (SET, advisory locks, prepared statements), and how to size a pool — all measured in a real PgBouncer lab.
 sidebar:
   order: 3
 ---
@@ -10,16 +10,127 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 A surprising amount of production trouble traces back to one fact: in PostgreSQL, every client connection is backed by its own operating-system process on the server. A few connections cost almost nothing. A few thousand cost a great deal of memory and scheduling overhead, and the server slows to a crawl long before it runs out of useful work to do.
 
 **Connection pooling** fixes this by putting a small middleman between your applications and the database. The pooler keeps a modest number of real server connections open and hands them out to clients as needed, so the database only ever deals with a handful of connections no matter how many clients exist.
 
+Everything below was run for real on **PostgreSQL 18.6** and **PgBouncer 1.26.0** (aarch64, Docker Desktop on a Mac, September 2026). The lab is three containers on an `--internal` Docker network — a database limited to 768 MB and 4 CPUs, a client container for `psql` and `pgbench`, and PgBouncer — all named `postgresql-b3-*` and removed at the end. The PgBouncer project publishes no official image, so the lab builds one from the PostgreSQL apt repository. `<your-password>` stands for any value you choose. Throughput numbers are from this Mac and only their proportions carry over; the sizing experiment repeats each measurement three times to show the noise.
+
 ## Why connections are heavy
 
-When a client connects, the PostgreSQL postmaster forks a dedicated backend process to serve it. That process holds memory for caches, sort buffers, and bookkeeping, and the operating system must schedule it alongside every other backend. Idle connections still occupy a process; a web app that opens a connection per request and leaves it idle between requests wastes that cost over and over.
+When a client connects, the PostgreSQL postmaster forks a dedicated backend process to serve it. That process holds memory for caches, sort buffers, and bookkeeping, and the operating system must schedule it alongside every other backend. Idle connections still occupy a process. Here 60 clients connect directly and sit there:
 
-This is why a default install caps `max_connections` at a low number such as 100. Raising it does not make the problem go away — it just lets you create more expensive processes.
+```text
+# 60 sessions connect directly and sit there (each one runs pg_sleep(15))
+
+-- database: script
+SELECT count(*) AS app_sessions FROM pg_stat_activity
+WHERE backend_type = 'client backend' AND usename = 'app';
+-- database: psql output
+ app_sessions
+--------------
+ 61
+
+
+$ docker exec postgresql-b3-db sh -c 'ps -eo args | grep -c "^postgres: app shop"'
+61
+
+$ docker exec postgresql-b3-db sh -c 'ps -eo pid,args | grep "postgres: app shop" | head -3'
+114 postgres: app shop 172.22.0.4(55742) idle
+  115 postgres: app shop 172.22.0.3(54550) SELECT
+  116 postgres: app shop 172.22.0.3(54564) SELECT
+
+$ docker exec postgresql-b3-db sh -c '(sum RssAnon from /proc/<pid>/status for each backend)'
+backends=62 private_memory_total_kB=188464 average_kB=3039
+```
+
+61 sessions, 61 operating-system processes named `postgres: app shop <client address> <state>` (60 direct ones plus the single idle connection PgBouncer keeps open), and each one holds about 3 MB of private memory (`RssAnon`) even when idle. Multiply that by a thousand connections and three gigabytes are gone before any query runs. The default cap protects the server:
+
+```text
+# 1. an internal network, a memory-capped database, and a client container for psql and pgbench
+
+$ docker network create --internal postgresql-b3-net
+
+$ docker run -d --name postgresql-b3-db --network postgresql-b3-net --memory 768m --cpus 4 -e POSTGRES_PASSWORD=<your-password> -v postgresql-b3-db-data:/var/lib/postgresql postgres:18.6
+
+$ docker run -d --name postgresql-b3-client --network postgresql-b3-net --memory 1g --cpus 2 --entrypoint sleep postgres:18.6 infinity
+
+-- database: script
+CREATE ROLE app LOGIN PASSWORD '<your-password>';
+CREATE DATABASE shop OWNER app;
+SHOW max_connections;
+SHOW superuser_reserved_connections;
+-- database: psql output
+CREATE ROLE
+CREATE DATABASE
+ max_connections 
+-----------------
+ 100
+(1 row)
+
+ superuser_reserved_connections 
+--------------------------------
+ 3
+(1 row)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-db -U app -i -s 10 -q shop
+creating primary keys...
+done in 0.79 s (drop tables 0.00 s, create tables 0.00 s, client-side generate 0.58 s, vacuum 0.07 s, primary keys 0.14 s).
+
+# 2. PgBouncer: built from the PostgreSQL apt repository (the PgBouncer project publishes no official image)
+
+$ docker build -t postgresql-b3-pgbouncer:local .
+
+$ docker run --rm --entrypoint pgbouncer postgresql-b3-pgbouncer:local --version | head -1
+PgBouncer 1.26.0
+
+$ docker logs postgresql-b3-pgbouncer 2>&1 | tail -3 | cut -c1-140
+2026-09-30 08:32:34.457 UTC [1] LOG listening on 0.0.0.0:6432
+2026-09-30 08:32:34.459 UTC [1] LOG listening on unix:/tmp/.s.PGSQL.6432
+2026-09-30 08:32:34.459 UTC [1] LOG process up: PgBouncer 1.26.0, libevent 2.1.13-stable (epoll), adns: c-ares 1.34.5, tls: OpenSSL 3.5.7 9 
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop -Atc "SELECT current_user, inet_server_addr()"
+app|172.22.0.2
+```
+
+`max_connections` is 100 and three of them are reserved for superusers. Asking for more than that does not queue, it fails:
+
+```text
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-db -U app -S -c 10 -j 4 -T 6 shop
+latency average = 0.139 ms
+tps = 71709.884824 (without initial connection time)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client sh -c "seq 200 | xargs -P 200 -I{} psql -h postgresql-b3-db -U app -d shop -Atc 'SELECT pg_sleep(8)' 2>&1 | sort | uniq -c | sort -rn | head -3"    # 200 direct sessions at once
+     96 
+     48 psql: error: connection to server at "postgresql-b3-db" (172.22.0.2), port 5432 failed: FATAL:  sorry, too many clients already
+     42 psql: error: connection to server at "postgresql-b3-db" (172.22.0.2), port 5432 failed: FATAL:  remaining connection slots are reserved for roles with the SUPERUSER attribute
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d pgbouncer -x -c "SHOW POOLS"    # while the 200-client run is going; the record for database shop, selected rows
+database              | shop
+user                  | app
+cl_active             | 16
+cl_waiting            | 184
+sv_active             | 10
+sv_idle               | 0
+pool_mode             | transaction
+
+-- database: script
+SELECT count(*) AS server_connections FROM pg_stat_activity
+WHERE backend_type = 'client backend' AND datname = 'shop';
+-- database: psql output
+ server_connections
+--------------------
+ 10
+
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -S -c 200 -j 4 -T 8 shop
+latency average = 3.542 ms
+tps = 56466.776538 (without initial connection time)
+```
+
+The first block is the direct run: 10 clients reach about 72 000 select-only transactions per second. Then 200 sessions are started at the same moment: 96 get in, and about 90 are refused, with `FATAL: remaining connection slots are reserved for roles with the SUPERUSER attribute` (42 of them) or `FATAL: sorry, too many clients already` (48) depending on how full the server was when each arrived. Raising `max_connections` does not make the problem go away — it just lets you create more expensive processes.
 
 export const heavyDiagram = `flowchart LR
   Cli[Many app clients] -->|hundreds of connections| PG[(PostgreSQL)]
@@ -41,101 +152,405 @@ export const poolDiagram = `flowchart LR
 
 <Mermaid code={poolDiagram} title="Many clients share a few server connections through a pooler" />
 
-The result is dramatic: ten thousand application clients might be served by twenty real PostgreSQL connections, because no client holds a server connection while it is idle.
+The last block above is the same 200 clients, now through PgBouncer with a pool of 10. While the run was going, `SHOW POOLS` in the admin console showed 16 clients actively in a transaction, 184 waiting their turn, 10 server connections busy, and `pg_stat_activity` on the database confirmed exactly 10 server connections. All 200 clients were served, at about 56 000 transactions per second and 3.5 ms average latency. No client held a server connection while it was idle.
 
 ## Pooling modes
 
-PgBouncer offers three modes that differ in *how long* a client keeps a borrowed server connection.
+PgBouncer offers three modes that differ in *how long* a client keeps a borrowed server connection ([docs](https://www.pgbouncer.org/config.html)).
 
 | Mode        | Server connection is returned after... | Notes                                              |
 |-------------|-----------------------------------------|----------------------------------------------------|
 | Session     | The client disconnects                  | Safest, but a connection is held for the whole session |
-| Transaction | Each transaction commits or rolls back  | The common choice; great reuse with one caveat     |
+| Transaction | Each transaction commits or rolls back  | The common choice; great reuse with caveats         |
 | Statement   | Each individual statement               | Most aggressive; forbids multi-statement transactions |
 
-**Transaction mode** is the popular default. A server connection is borrowed only for the duration of one transaction, so between transactions it is free for others. This gives excellent reuse for typical web traffic, where each request is a short transaction.
-
-The catch is that anything tied to a *session* rather than a transaction can break, because the next transaction may land on a different server connection. Prepared statements, session-level `SET` commands, advisory locks, and `LISTEN`/`NOTIFY` all assume connection continuity that transaction mode does not provide.
+**Transaction mode** is the popular choice. A server connection is borrowed only for the duration of one transaction, so between transactions it is free for others. This gives excellent reuse for typical web traffic, where each request is a short transaction. The catch is that anything tied to a *session* rather than a transaction can break, because the next transaction may land on a different server connection. The PgBouncer feature map lists what does not work in transaction mode "by design": `SET`/`RESET`, `LISTEN`, `WITH HOLD` cursors, `PREPARE`/`DEALLOCATE`, `LOAD`, and session-level advisory locks ([docs](https://www.pgbouncer.org/features.html)).
 
 ## A minimal pgbouncer.ini
 
-PgBouncer is configured with a small INI file. The essentials are which databases it fronts, where it listens, and the pooling mode.
+PgBouncer is configured with a small INI file. The essentials are which databases it fronts, where it listens, and the pooling mode. This is the file the lab uses; the `shopN` entries are the same database with different pool sizes, for the experiments below. `userlist.txt` holds the SCRAM verifier of the `app` role, and `admin_users` lets `app` open the admin console (the pseudo-database `pgbouncer`).
 
 ```ini
 [databases]
-shop = host=127.0.0.1 port=5432 dbname=shop
+shop   = host=postgresql-b3-db port=5432 dbname=shop
+shop1  = host=postgresql-b3-db port=5432 dbname=shop pool_size=1
+shop1b = host=postgresql-b3-db port=5432 dbname=shop pool_size=1
+shop2  = host=postgresql-b3-db port=5432 dbname=shop pool_size=2
+shop4  = host=postgresql-b3-db port=5432 dbname=shop pool_size=4
+shop30 = host=postgresql-b3-db port=5432 dbname=shop pool_size=30
+shop60 = host=postgresql-b3-db port=5432 dbname=shop pool_size=60
 
 [pgbouncer]
 listen_addr = 0.0.0.0
 listen_port = 6432
 auth_type = scram-sha-256
 auth_file = /etc/pgbouncer/userlist.txt
+admin_users = app
 pool_mode = transaction
-max_client_conn = 10000
-default_pool_size = 20
+max_client_conn = 1000
+default_pool_size = 10
+max_prepared_statements = 0
+ignore_startup_parameters = extra_float_digits
 ```
 
-Here `max_client_conn` is how many clients may connect to PgBouncer, while `default_pool_size` is how many real PostgreSQL connections it keeps per database — twenty server connections fronting up to ten thousand clients.
+Here `max_client_conn` is how many clients may connect to PgBouncer, while `default_pool_size` is how many real PostgreSQL connections it keeps per database and user (per-database `pool_size=` overrides it). The lab builds and starts everything like this:
+
+```dockerfile
+# Dockerfile: PgBouncer from the PostgreSQL apt repository that the postgres image already uses
+FROM postgres:18.6
+RUN apt-get update && apt-get install -y --no-install-recommends pgbouncer && rm -rf /var/lib/apt/lists/*
+USER postgres
+```
+
+```bash
+# scripts/pooling-lab.sh
+docker network create --internal postgresql-b3-net
+docker volume create postgresql-b3-db-data
+docker run -d --name postgresql-b3-db --network postgresql-b3-net --memory 768m --cpus 4 \
+  -e POSTGRES_PASSWORD=<your-password> -v postgresql-b3-db-data:/var/lib/postgresql postgres:18.6
+docker run -d --name postgresql-b3-client --network postgresql-b3-net --memory 1g --cpus 2 \
+  --entrypoint sleep postgres:18.6 infinity
+
+docker build -t postgresql-b3-pgbouncer:local .
+docker create --name postgresql-b3-pgbouncer --memory 128m -p 127.0.0.1:6432:6432 \
+  --entrypoint pgbouncer postgresql-b3-pgbouncer:local /etc/pgbouncer/pgbouncer.ini
+docker network connect postgresql-b3-net postgresql-b3-pgbouncer
+docker cp pgbouncer.ini postgresql-b3-pgbouncer:/etc/pgbouncer/pgbouncer.ini
+docker cp userlist.txt  postgresql-b3-pgbouncer:/etc/pgbouncer/userlist.txt
+docker start postgresql-b3-pgbouncer
+```
+
+## What breaks in transaction mode
+
+Because a client keeps no server connection between transactions, session state can leak between clients or disappear. Three cases, all run on the alias `shop1`, whose pool has exactly one server connection, so every client is guaranteed to share it. (With a bigger pool the same bugs are intermittent, which is worse.)
+
+```text
+# each command is a separate client connection; the database alias shop1 has pool_size=1, so every client shares ONE server connection
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1 -c "SET app.tenant = 'alice'"
+SET
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1 -c "SHOW app.tenant"    # a different client
+ app.tenant 
+------------
+ alice
+(1 row)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-db -U app -d shop -c "SHOW app.tenant"    # a direct connection, for comparison
+ERROR:  unrecognized configuration parameter "app.tenant"
+
+# the transaction-local version: shop1b is a separate one-connection pool
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1b   (script below)
+BEGIN
+ set_config 
+------------
+ bob
+(1 row)
+
+ app.tenant 
+------------
+ bob
+(1 row)
+
+COMMIT
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1b -c "SELECT current_setting('app.tenant', true) AS tenant_seen_by_next_client"
+ tenant_seen_by_next_client 
+----------------------------
+ 
+(1 row)
+
+# session-level advisory locks
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1 -c "SELECT pg_advisory_lock(42)"
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1 -c "SELECT pg_try_advisory_lock(42) AS another_client_gets_it"
+ another_client_gets_it 
+------------------------
+ t
+(1 row)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-db -U app -d shop -c "SELECT pg_try_advisory_lock(42) AS direct_client_gets_it"
+ direct_client_gets_it 
+-----------------------
+ f
+(1 row)
+
+-- database: script
+SELECT locktype, objid, mode, granted FROM pg_locks WHERE locktype = 'advisory';
+-- database: psql output
+ locktype | objid |     mode      | granted 
+----------+-------+---------------+---------
+ advisory |    42 | ExclusiveLock | t
+(1 row)
+```
+
+**`SET` leaks.** One client runs `SET app.tenant = 'alice'` and disconnects; a different client that just connected reads `alice`. A direct connection knows nothing about it. The safe forms are `SET LOCAL` or `set_config(name, value, true)` inside a transaction: the value lives until the transaction ends and the next client sees an empty setting.
+
+**Advisory locks belong to the server connection.** Client one takes `pg_advisory_lock(42)` and leaves. A second client asks for the same lock and gets it (`t`), because it is the same backend, while a direct connection is refused (`f`) and `pg_locks` shows one lock held by nobody in particular. Use `pg_advisory_xact_lock` in transaction mode.
+
+**Prepared statements.** Protocol-level prepared statements are what most drivers use by default, and a prepared statement lives on one server connection. Until PgBouncer 1.21 that made them unusable in transaction mode; since then PgBouncer tracks them and re-prepares on whichever server connection a client lands on, if you give it room with `max_prepared_statements` ([docs](https://www.pgbouncer.org/features.html)). The setting is 200 by default in 1.26; the lab file set it to 0 to show the failure. `pgbench -M prepared` uses the protocol-level extended query flow:
+
+```text
+# max_prepared_statements = 0: protocol-level prepared statements are not supported in transaction mode
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client sh -c 'psql -h postgresql-b3-pgbouncer -p 6432 -U app -d pgbouncer -Atc "SHOW CONFIG" | grep ^max_prepared_statements | cut -d"|" -f1,2'
+max_prepared_statements|0
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -M prepared -c 20 -j 4 -T 4 -S shop    # distinct error messages, with counts
+ERROR:  prepared statement "P_0" already exists  (x13)
+ERROR:  prepared statement "P_0" does not exist  (x17)
+pgbench: error: Run was aborted; the above results are incomplete.
+
+# max_prepared_statements = 100 in pgbouncer.ini, then RELOAD from the admin console
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client sh -c 'psql -h postgresql-b3-pgbouncer -p 6432 -U app -d pgbouncer -Atc "SHOW CONFIG" | grep ^max_prepared_statements | cut -d"|" -f1,2'
+max_prepared_statements|100
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -M prepared -c 20 -j 4 -T 4 -S shop
+number of failed transactions: 0 (0.000%)
+tps = 47442.525949 (without initial connection time)
+```
+
+With `max_prepared_statements = 0` the run aborts with `prepared statement "P_0" already exists` and `does not exist` — two clients on one server connection collide, or a client lands on a connection that never saw its statement. With `100` and a `RELOAD` of the config from the admin console, the same run completes with 0 failed transactions.
+
+## Sizing the pool
+
+`default_pool_size` should follow the database's capacity, not the client count. The same write-heavy `pgbench` run (60 clients, TPC-B-like, 8 s per run) against the database limited to 4 CPUs, direct and then through pools of increasing size:
+
+```text
+# the same TPC-B-like pgbench run (60 clients, 8 s each, three runs per line, database limited to 4 CPUs), direct first, then through pools of different sizes
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-db -U app -c 60 -j 4 -T 8 shop      (direct)    # three runs, tps: 7078, 6697, 6379
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop1      (pool_size=1)    # three runs, tps: 1350, 1250, 1429
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop2      (pool_size=2)    # three runs, tps: 2601, 2547, 2591
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop4      (pool_size=4)    # three runs, tps: 4231, 3409, 4055
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop      (pool_size=10)    # three runs, tps: 5708, 4300, 5439
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop30      (pool_size=30)    # three runs, tps: 6022, 5738, 6469
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop60      (pool_size=60)    # three runs, tps: 6492, 5709, 5738
+```
+
+Each line is three runs, so you can see the noise (about 10 percent). Throughput climbs almost linearly from 1 connection (about 1 300 transactions per second) to 2 (2 600) and 4 (about 3 900), a pool of 10 already reaches about 5 200, and 30 (about 6 100) and 60 (about 6 000) are no better than each other; the direct run with 60 connections was about 6 700. Once the CPUs are saturated, more server connections only add contention. What the pool buys you is not speed at the top, it is that the number stays bounded: 200 clients still ran on 10 connections. Where the knee is depends on your hardware and query mix; measure.
 
 ## Connecting through the pooler
 
-From your application's point of view, the pooler looks just like PostgreSQL. You point your driver at the pooler's host and port — `6432` above instead of `5432` — and nothing else changes.
+From your application's point of view, the pooler looks just like PostgreSQL. You point your driver at the pooler's host and port — `6432` above instead of `5432` — and nothing else changes, except for the transaction-mode rules above. Each program below opens 10 client connections, runs 20 workers that execute the same parameterized query three times, and was run twice against a pool of just 2 server connections so that clients are forced to share: first with `max_prepared_statements = 0`, then with `100`.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```bash
-    # Connect to PgBouncer instead of PostgreSQL directly
     psql "host=127.0.0.1 port=6432 dbname=shop user=app"
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    import { Pool } from 'pg';
+    import pg from 'pg';
 
     // Point the driver at the pooler's port, not 5432
-    const pool = new Pool({
+    const pool = new pg.Pool({
       host: '127.0.0.1',
       port: 6432,
       database: 'shop',
       user: 'app',
+      password: process.env.PGPASSWORD,
+      max: 10,
     });
+
+    // a named query is a protocol-level prepared statement
+    const query = { name: 'balance_by_account', text: 'SELECT abalance FROM pgbench_accounts WHERE aid = $1' };
+    const results = await Promise.all(Array.from({ length: 20 }, (_, i) => pool.query({ ...query, values: [i + 1] })));
+    console.log(results.length, 'queries ok');
+    await pool.end();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
     import psycopg
 
-    conn = psycopg.connect(
-        host="127.0.0.1",
-        port=6432,
-        dbname="shop",
-        user="app",
-    )
+    dsn = f"host=127.0.0.1 port=6432 dbname=shop user=app password={os.environ['PGPASSWORD']}"
+
+    def one(i):
+        with psycopg.connect(dsn, prepare_threshold=0) as conn:  # prepare on first use
+            for _ in range(3):
+                conn.execute("SELECT abalance FROM pgbench_accounts WHERE aid = %s", (i,)).fetchone()
+        return i
+
+    with ThreadPoolExecutor(10) as ex:
+        print(len(list(ex.map(one, range(1, 21)))), "workers ok")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    conn, err := pgx.Connect(ctx,
-        "host=127.0.0.1 port=6432 dbname=shop user=app")
+    package main
+
+    import (
+    	"context"
+    	"fmt"
+    	"os"
+    	"sync"
+    	"sync/atomic"
+
+    	"github.com/jackc/pgx/v5/pgxpool"
+    )
+
+    func main() {
+    	ctx := context.Background()
+    	dsn := "host=127.0.0.1 port=6432 dbname=shop user=app pool_max_conns=10 password=" + os.Getenv("PGPASSWORD")
+    	pool, err := pgxpool.New(ctx, dsn)
+    	if err != nil {
+    		panic(err)
+    	}
+    	defer pool.Close()
+
+    	var wg sync.WaitGroup
+    	var ok int32
+    	for i := 1; i <= 20; i++ {
+    		wg.Add(1)
+    		go func(aid int) {
+    			defer wg.Done()
+    			for k := 0; k < 3; k++ {
+    				var v int
+    				if err := pool.QueryRow(ctx, "SELECT abalance FROM pgbench_accounts WHERE aid = $1", aid).Scan(&v); err != nil {
+    					fmt.Println("ERR", err)
+    					return
+    				}
+    			}
+    			atomic.AddInt32(&ok, 1)
+    		}(i)
+    	}
+    	wg.Wait()
+    	fmt.Println(ok, "workers ok")
+    }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .connect("postgres://app@127.0.0.1:6432/shop")
-        .await?;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::main]
+    async fn main() -> Result<(), sqlx::Error> {
+        let password = std::env::var("PGPASSWORD").unwrap();
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(&format!("postgres://app:{password}@127.0.0.1:6432/shop"))
+            .await?;
+
+        let mut tasks = Vec::new();
+        for aid in 1..=20_i32 {
+            let pool = pool.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..3 {
+                    sqlx::query_scalar::<_, i32>("SELECT abalance FROM pgbench_accounts WHERE aid = $1")
+                        .bind(aid)
+                        .fetch_one(&pool)
+                        .await?;
+                }
+                Ok::<(), sqlx::Error>(())
+            }));
+        }
+        let mut ok = 0;
+        for t in tasks {
+            if t.await.unwrap().is_ok() {
+                ok += 1;
+            }
+        }
+        println!("{ok} workers ok");
+        Ok(())
+    }
     ```
   </TabItem>
 </Tabs>
 
+```text
+# max_prepared_statements = 0, default_pool_size = 2   (20 workers on 10 client connections, each worker runs the same prepared query 3 times)
+
+[Node.js (pg 8.23.0)] error: prepared statement "balance_by_account" already exists
+
+[Python (psycopg 3.3.6)] psycopg.errors.DuplicatePreparedStatement: prepared statement "_pg3_0" already exists
+
+[Go (pgx v5.11.0)] ERR ERROR: prepared statement "stmtcache_<id>" already exists (SQLSTATE 42P05)  (x18) | 2 workers ok
+
+[Rust (sqlx 0.9.0)] 3 workers ok
+
+# max_prepared_statements = 100, but sqlx sends a startup parameter PgBouncer does not know
+
+[Rust (sqlx 0.9.0)] Error: Database(PgDatabaseError { severity: Fatal, code: "08P01", message: "unsupported startup parameter: extra_float_digits", detail: None, hint: None, position: None, 
+
+# max_prepared_statements = 100 and ignore_startup_parameters = extra_float_digits
+
+[Node.js (pg 8.23.0)] 20 queries ok
+
+[Python (psycopg 3.3.6)] 20 workers ok
+
+[Go (pgx v5.11.0)] 20 workers ok
+
+[Rust (sqlx 0.9.0)] 20 workers ok
+```
+
+Every driver fails with `max_prepared_statements = 0` — `prepared statement ... already exists` in Node.js, Python and Go, and the Go and Rust runs finishing only 2 and 3 workers of 20 — and every driver works with `100`, apart from one setting: sqlx sends a `extra_float_digits` startup parameter, and PgBouncer refuses startup parameters it does not track (`unsupported startup parameter: extra_float_digits`) until you list it in `ignore_startup_parameters` ([docs](https://www.pgbouncer.org/config.html)). If your PgBouncer is older than 1.21, look in your driver's documentation for the switch that turns server-side prepared statements off.
+
 **In pgAdmin:** register a new server connection whose host and port point at PgBouncer (port `6432`). pgAdmin treats it like any PostgreSQL server, which is a handy way to confirm the pooler is reachable.
+
+When you are done, remove everything the lab created (including the image):
+
+```bash
+# scripts/pooling-cleanup.sh
+docker rm -f postgresql-b3-pgbouncer postgresql-b3-client postgresql-b3-db
+docker volume rm postgresql-b3-db-data
+docker network rm postgresql-b3-net
+docker rmi postgresql-b3-pgbouncer:local
+```
+
+## Reading AI-generated code
+
+An assistant writes multi-tenant data access and, told the deployment uses PgBouncer in transaction mode, decides it is fine:
+
+<SpotTheBug lang="python" code={`# AI comment: "transaction-mode PgBouncer is fine: set the tenant once when we get the connection"
+def get_conn(tenant):
+    conn = pool.getconn()
+    conn.execute("SET app.tenant = %s", (tenant,))  # session-level setting
+    return conn
+
+def orders_for(conn):
+    return conn.execute("SELECT * FROM orders WHERE tenant = current_setting('app.tenant')").fetchall()`}>
+
+`SET` is a session-level command, and in transaction mode a session does not belong to the client. The setting sticks to the server connection and the next client that borrows it inherits the previous tenant — exactly the `alice` in the transcript above. With row-level security or a `WHERE tenant = current_setting(...)` filter that is a data leak between customers, and it does not fail loudly. The fix is to scope the setting to the transaction, as the `shop1b` run did: `set_config('app.tenant', value, true)` (or `SET LOCAL`) inside `BEGIN ... COMMIT`, and read the data in the same transaction. The next client sees an empty setting.
+
+```python
+def orders_for(conn, tenant):
+    with conn.transaction():  # the setting lives exactly as long as this transaction
+        conn.execute("SELECT set_config('app.tenant', %s, true)", (tenant,))
+        return conn.execute("SELECT * FROM orders WHERE tenant = current_setting('app.tenant')").fetchall()
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A pooler is a taxi rank. Clients are passengers, server connections are the cabs, and a transaction is one ride. In transaction mode a passenger only holds a cab for the ride, so twenty cabs can serve thousands of passengers — but nothing you left inside the cab (a `SET`, a session lock, a prepared statement without support) is yours anymore when the ride ends.
 
 ## Tips / gotchas
 
 - Transaction mode is the usual recommendation because it gives the best connection reuse for short web requests. Reach for session mode only when you genuinely need session continuity.
-- In transaction mode, avoid features that span transactions on one connection — server-side prepared statements, session `SET`, advisory locks, and `LISTEN`/`NOTIFY` may misbehave. Many drivers offer a setting to disable server-side prepared statements for this reason.
+- In transaction mode, avoid features that span transactions on one connection — session `SET`, session advisory locks and `LISTEN`/`NOTIFY`. Prepared statements work in PgBouncer 1.21 and later with a non-zero `max_prepared_statements`.
 - A pooler does not replace the driver's own connection pool; you can run both, but size them so the driver never asks for more than the pooler can supply.
-- Set `default_pool_size` based on your server's capacity, not your client count. A small pool that is always busy beats a large pool that swamps the database.
+- Set `default_pool_size` based on your server's capacity (cores, not clients), and remember the pooler's own server connections count against `max_connections` too.
+- Use `SHOW POOLS` and `SHOW STATS` on the admin console to see waiting clients (`cl_waiting`) before users tell you.
+- Keep database credentials out of the images; the lab used a throw-away password on an internal network.
 
 <Callout title="Idle is the enemy">
 The core insight of pooling is that most application connections sit idle most of the time, yet each idle PostgreSQL connection still costs a process. A pooler lets those idle moments be shared. You are not adding capacity to the database — you are stopping clients from hoarding it while they have nothing to do.
@@ -145,20 +560,17 @@ The core insight of pooling is that most application connections sit idle most o
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Transaction-mode pooling (PgBouncer) | Supports far more clients per real PostgreSQL connection; cheap and scalable | Session-level features like prepared statements, `SET`, and advisory locks are not safe to use |
-| Session-mode pooling / no pooler at all | Full support for session-level features, a straightforward connection | PostgreSQL connections are expensive and limited, so far fewer clients can be served |
+| Transaction-mode pooling (PgBouncer) | Far more clients per real PostgreSQL connection (200 clients on 10) | Session-level features (`SET`, session advisory locks, `LISTEN`) break; prepared statements need `max_prepared_statements` and a recent PgBouncer |
+| Session-mode pooling / no pooler at all | Full support for session-level features, a straightforward connection | PostgreSQL connections are expensive and limited (about 3 MB each, hard cap at `max_connections`) |
+| A bigger pool | Fewer clients waiting | Past the CPU count more server connections stop adding throughput (30 vs 60 above) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Ignoring connection pooling until a `too many connections` error hits production** — set up a pooler from the start, rather than waiting for the problem to happen first.
-- **Using transaction-mode pooling when the code depends on session-level features like `SET` or advisory locks** — these fail silently, because the next statement in the same logical session may land on a different server connection. Check the code before switching modes.
-- **Sizing the pool much larger than the database's real `max_connections` capacity** — an oversized pool just moves the problem onto the database. Size it to the server's real capacity instead.
-
-> 💡 Real-world example
->
-> **[Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres)** — puts a shared pooler (Supavisor) in front of every project's PostgreSQL instance by default, with a dedicated PgBouncer-based pooler available on paid plans, because serverless applications open far more concurrent connections than the database can serve directly.
->
-> **[Amazon RDS Proxy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html)** — acts as a managed pooler for RDS PostgreSQL, so Lambda functions or fast-scaling applications do not overwhelm the database's connection limit.
+- **"A pooler makes the database faster."** It bounds the connection count; throughput at the top was about the same with or without it.
+- **"Raising max_connections solves 'too many clients'."** It creates more processes at about 3 MB each and more contention; a pooler solves it.
+- **"Prepared statements do not work with PgBouncer."** That was true before 1.21; with `max_prepared_statements` above zero they do.
+- **"Transaction mode is safe if my code opens transactions."** Only if nothing depends on session state; a plain `SET` outside `BEGIN` leaked to another client.
+- **"Pool size should equal client count."** It should follow the server's capacity; 60 server connections were no better than 30.
 
 export const quizPooling = [
   {
@@ -170,6 +582,7 @@ export const quizPooling = [
       'Each one opens a new TCP port on the client',
     ],
     answer: 1,
+    explain: 'In the lab 61 sessions were 61 `postgres: app shop ...` processes with about 3 MB of private memory each.',
   },
   {
     q: 'In PgBouncer transaction mode, when is a server connection returned to the pool?',
@@ -180,6 +593,7 @@ export const quizPooling = [
       'Never; it is held for the session',
     ],
     answer: 2,
+    explain: 'That is why 200 clients could share 10 server connections: each borrows one only while its transaction runs.',
   },
   {
     q: 'Which feature is most likely to misbehave under transaction-mode pooling?',
@@ -190,6 +604,29 @@ export const quizPooling = [
       'Connecting with a username and password',
     ],
     answer: 1,
+    explain: 'A `SET app.tenant` by one client was read back by another; a second client obtained an advisory lock the first still "held".',
+  },
+  {
+    q: 'A driver reports prepared statement "..." already exists through PgBouncer in transaction mode. What is the likely fix on PgBouncer 1.26?',
+    options: [
+      'Increase max_connections on PostgreSQL',
+      'Set max_prepared_statements to a non-zero value',
+      'Switch to statement pooling',
+      'Restart the application every hour',
+    ],
+    answer: 1,
+    explain: 'With 0, four drivers failed; with 100 all four succeeded. Older PgBouncer (before 1.21) would need the driver to stop using server-side prepared statements.',
+  },
+  {
+    q: 'Which is the safe way to make a per-request setting visible to a query behind a transaction-mode pooler?',
+    options: [
+      'SET app.tenant = ... on the connection when it is fetched from the pool',
+      'set_config(name, value, true) or SET LOCAL inside the same transaction as the query',
+      'A session-level advisory lock',
+      'Nothing; it cannot be done',
+    ],
+    answer: 1,
+    explain: 'The transaction-local form disappears when the transaction ends; the next client read an empty setting instead of the previous tenant.',
   },
 ];
 

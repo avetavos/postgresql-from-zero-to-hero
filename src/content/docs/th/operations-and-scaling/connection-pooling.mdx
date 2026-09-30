@@ -1,6 +1,6 @@
 ---
 title: Connection pooling
-description: ทำไม PostgreSQL connection แต่ละตัวจึงเป็น process ที่หนัก โหมด pooling แบบ session, transaction, และ statement ของ PgBouncer ทำงานอย่างไร และวิธีเชื่อมต่อแอปพลิเคชันของคุณผ่าน pooler
+description: ทำไมแต่ละ connection ของ PostgreSQL เป็น process หนักๆ, transaction pooling ของ PgBouncer ทำงานอย่างไร, อะไรพังในนั้น (SET, advisory lock, prepared statement) และการกำหนดขนาด pool — วัดทั้งหมดในแล็บ PgBouncer จริง
 sidebar:
   order: 3
 ---
@@ -10,16 +10,127 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-ปัญหาในโปรดักชันจำนวนมากอย่างน่าประหลาดใจสืบย้อนกลับไปที่ข้อเท็จจริงหนึ่ง: ใน PostgreSQL ทุก client connection จะมี process ของระบบปฏิบัติการเป็นของตัวเองอยู่ฝั่ง server ถ้ามีไม่กี่ connection ก็แทบไม่มีต้นทุนอะไร แต่พอถึงหลักพัน จะกินหน่วยความจำและ overhead ในการ scheduling อย่างมาก จน server ช้าลงจนคืบคลานก่อนที่งานจริงจะหมดเสียอีก
+ปัญหา production จำนวนมากอย่างน่าประหลาดใจย้อนกลับไปที่ข้อเท็จจริงข้อเดียว: ใน PostgreSQL ทุก client connection มี process ระดับระบบปฏิบัติการของตัวเองบนเซิร์ฟเวอร์ไม่กี่ connection แทบไม่มีต้นทุน แต่ไม่กี่พัน connection กินหน่วยความจำและ overhead การจัดตารางเวลามหาศาล และเซิร์ฟเวอร์ช้าลงมากก่อนจะหมดงานที่มีประโยชน์ให้ทำ
 
-**Connection pooling** แก้ปัญหานี้ด้วยการวางคนกลางตัวเล็ก ๆ ไว้ระหว่างแอปพลิเคชันของคุณกับฐานข้อมูล pooler เปิด server connection จริงไว้จำนวนพอประมาณ แล้วแจกจ่ายให้ client ตามที่ต้องการ ฐานข้อมูลจึงจัดการกับ connection เพียงไม่กี่ตัวเท่านั้น ไม่ว่าจะมี client อยู่กี่ตัวก็ตาม
+**Connection pooling** แก้ปัญหานี้โดยวางตัวกลางเล็ก ๆ ระหว่างแอปกับฐานข้อมูล pooler เก็บ server connection จริงจำนวนพอประมาณเปิดไว้และแจกให้ client ตามต้องการ ฐานข้อมูลจึงจัดการกับ connection ไม่กี่อันเสมอไม่ว่ามี client กี่ตัว
 
-## ทำไม connection จึงหนัก
+ทุกอย่างด้านล่างรันจริงบน **PostgreSQL 18.6** และ **PgBouncer 1.26.0** (aarch64, Docker Desktop บน Mac, กันยายน 2026) แล็บคือสามคอนเทนเนอร์บนเครือข่าย Docker `--internal` — ฐานข้อมูลที่จำกัด 768 MB และ 4 CPU คอนเทนเนอร์ client สำหรับ `psql` และ `pgbench` และ PgBouncer — ตั้งชื่อ `postgresql-b3-*` ทั้งหมดและลบเมื่อจบ โปรเจกต์ PgBouncer ไม่เผยแพร่ image ทางการ แล็บจึง build เองจาก apt repository ของ PostgreSQL `<your-password>` แทนค่าใดก็ได้ที่คุณเลือก ตัวเลข throughput มาจาก Mac เครื่องนี้ และมีแค่สัดส่วนที่ติดตัวไป การทดลองกำหนดขนาด pool วัดซ้ำสามครั้งเพื่อแสดง noise
 
-เมื่อ client เชื่อมต่อ postmaster ของ PostgreSQL จะ fork backend process ขึ้นมาเฉพาะให้ client ตัวนั้น process นี้ถือหน่วยความจำสำหรับ cache, sort buffer และการเก็บบันทึก และระบบปฏิบัติการก็ต้อง schedule process เหล่านี้ควบคู่ไปกับ backend ตัวอื่นทุกตัว ต่อให้ connection ว่างอยู่ ก็ยังกิน process ไปเต็ม ๆ เว็บแอปที่เปิด connection ต่อหนึ่ง request แล้วปล่อยให้ว่างระหว่าง request ก็เสียต้นทุนนั้นซ้ำแล้วซ้ำเล่า
+## ทำไม connection ถึงหนัก
 
-นี่คือเหตุผลที่การติดตั้งเริ่มต้นจำกัด `max_connections` ไว้ที่ตัวเลขต่ำ ๆ เช่น 100 การเพิ่มค่านี้ไม่ได้ทำให้ปัญหาหายไป แค่เปิดให้คุณสร้าง process ราคาแพงได้มากขึ้นเท่านั้น
+เมื่อ client เชื่อมต่อ postmaster ของ PostgreSQL fork backend process เฉพาะเพื่อรับใช้มัน process นั้นถือหน่วยความจำสำหรับ cache, sort buffer และการจัดการภายใน และระบบปฏิบัติการต้องจัดตารางเวลามันร่วมกับ backend อื่นทุกตัว connection ที่ว่างอยู่ก็ยังครอบครอง process 60 client เชื่อมต่อตรงแล้วนั่งเฉย ๆ:
+
+```text
+# 60 sessions connect directly and sit there (each one runs pg_sleep(15))
+
+-- database: script
+SELECT count(*) AS app_sessions FROM pg_stat_activity
+WHERE backend_type = 'client backend' AND usename = 'app';
+-- database: psql output
+ app_sessions
+--------------
+ 61
+
+
+$ docker exec postgresql-b3-db sh -c 'ps -eo args | grep -c "^postgres: app shop"'
+61
+
+$ docker exec postgresql-b3-db sh -c 'ps -eo pid,args | grep "postgres: app shop" | head -3'
+114 postgres: app shop 172.22.0.4(55742) idle
+  115 postgres: app shop 172.22.0.3(54550) SELECT
+  116 postgres: app shop 172.22.0.3(54564) SELECT
+
+$ docker exec postgresql-b3-db sh -c '(sum RssAnon from /proc/<pid>/status for each backend)'
+backends=62 private_memory_total_kB=188464 average_kB=3039
+```
+
+61 session, 61 process ระบบปฏิบัติการชื่อ `postgres: app shop <client address> <state>` (60 อันตรงบวก connection ว่างหนึ่งอันที่ PgBouncer เก็บไว้) และแต่ละอันถือหน่วยความจำส่วนตัว (`RssAnon`) ราว 3 MB แม้ว่างอยู่ คูณด้วยหนึ่งพัน connection สามกิกะไบต์หายไปก่อน query แรกจะรัน เพดานปริยายปกป้องเซิร์ฟเวอร์:
+
+```text
+# 1. an internal network, a memory-capped database, and a client container for psql and pgbench
+
+$ docker network create --internal postgresql-b3-net
+
+$ docker run -d --name postgresql-b3-db --network postgresql-b3-net --memory 768m --cpus 4 -e POSTGRES_PASSWORD=<your-password> -v postgresql-b3-db-data:/var/lib/postgresql postgres:18.6
+
+$ docker run -d --name postgresql-b3-client --network postgresql-b3-net --memory 1g --cpus 2 --entrypoint sleep postgres:18.6 infinity
+
+-- database: script
+CREATE ROLE app LOGIN PASSWORD '<your-password>';
+CREATE DATABASE shop OWNER app;
+SHOW max_connections;
+SHOW superuser_reserved_connections;
+-- database: psql output
+CREATE ROLE
+CREATE DATABASE
+ max_connections 
+-----------------
+ 100
+(1 row)
+
+ superuser_reserved_connections 
+--------------------------------
+ 3
+(1 row)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-db -U app -i -s 10 -q shop
+creating primary keys...
+done in 0.79 s (drop tables 0.00 s, create tables 0.00 s, client-side generate 0.58 s, vacuum 0.07 s, primary keys 0.14 s).
+
+# 2. PgBouncer: built from the PostgreSQL apt repository (the PgBouncer project publishes no official image)
+
+$ docker build -t postgresql-b3-pgbouncer:local .
+
+$ docker run --rm --entrypoint pgbouncer postgresql-b3-pgbouncer:local --version | head -1
+PgBouncer 1.26.0
+
+$ docker logs postgresql-b3-pgbouncer 2>&1 | tail -3 | cut -c1-140
+2026-09-30 08:32:34.457 UTC [1] LOG listening on 0.0.0.0:6432
+2026-09-30 08:32:34.459 UTC [1] LOG listening on unix:/tmp/.s.PGSQL.6432
+2026-09-30 08:32:34.459 UTC [1] LOG process up: PgBouncer 1.26.0, libevent 2.1.13-stable (epoll), adns: c-ares 1.34.5, tls: OpenSSL 3.5.7 9 
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop -Atc "SELECT current_user, inet_server_addr()"
+app|172.22.0.2
+```
+
+`max_connections` คือ 100 และสามอันสำรองไว้ให้ superuser ขอมากกว่านั้นไม่ได้ต่อคิว แต่ล้มเหลว:
+
+```text
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-db -U app -S -c 10 -j 4 -T 6 shop
+latency average = 0.139 ms
+tps = 71709.884824 (without initial connection time)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client sh -c "seq 200 | xargs -P 200 -I{} psql -h postgresql-b3-db -U app -d shop -Atc 'SELECT pg_sleep(8)' 2>&1 | sort | uniq -c | sort -rn | head -3"    # 200 direct sessions at once
+     96 
+     48 psql: error: connection to server at "postgresql-b3-db" (172.22.0.2), port 5432 failed: FATAL:  sorry, too many clients already
+     42 psql: error: connection to server at "postgresql-b3-db" (172.22.0.2), port 5432 failed: FATAL:  remaining connection slots are reserved for roles with the SUPERUSER attribute
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d pgbouncer -x -c "SHOW POOLS"    # while the 200-client run is going; the record for database shop, selected rows
+database              | shop
+user                  | app
+cl_active             | 16
+cl_waiting            | 184
+sv_active             | 10
+sv_idle               | 0
+pool_mode             | transaction
+
+-- database: script
+SELECT count(*) AS server_connections FROM pg_stat_activity
+WHERE backend_type = 'client backend' AND datname = 'shop';
+-- database: psql output
+ server_connections
+--------------------
+ 10
+
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -S -c 200 -j 4 -T 8 shop
+latency average = 3.542 ms
+tps = 56466.776538 (without initial connection time)
+```
+
+บล็อกแรกคือการรันตรง: 10 client ได้ราว 72 000 transaction select-only ต่อวินาที จากนั้น 200 session เริ่มพร้อมกัน: 96 เข้าได้ และราว 90 ถูกปฏิเสธ ด้วย `FATAL: remaining connection slots are reserved for roles with the SUPERUSER attribute` (42 อัน) หรือ `FATAL: sorry, too many clients already` (48 อัน) ขึ้นกับว่าเซิร์ฟเวอร์เต็มแค่ไหนตอนแต่ละอันมาถึง การเพิ่ม `max_connections` ไม่ทำให้ปัญหาหายไป — แค่ให้คุณสร้าง process ที่แพงขึ้นได้มากขึ้น
 
 export const heavyDiagram = `flowchart LR
   Cli[Many app clients] -->|hundreds of connections| PG[(PostgreSQL)]
@@ -29,167 +140,493 @@ export const heavyDiagram = `flowchart LR
   PG --> B4[Backend process]
   PG --> B5[Backend process]`;
 
-<Mermaid code={heavyDiagram} title="หากไม่มี pooling client แต่ละตัวจะได้ process ฝั่ง server เป็นของตัวเอง" />
+<Mermaid code={heavyDiagram} title="ถ้าไม่มี pooling แต่ละ client ได้ server process ของตัวเอง" />
 
-## pooler อยู่ตรงกลาง
+## Pooler ตรงกลาง
 
-Pooler อย่าง **PgBouncer** ตั้งอยู่ระหว่าง client กับ server ตัว client จะเชื่อมต่อเข้า pooler ซึ่งคุยด้วยได้ในราคาถูก ส่วน pooler ก็เปิด connection จริงไปยัง PostgreSQL ไว้จำนวนน้อย ๆ พอ client ต้องใช้ฐานข้อมูล pooler จะให้ยืม server connection แล้วดึงกลับคืนมาให้ client ตัวอื่นใช้ต่อ
+pooler เช่น **PgBouncer** อยู่ระหว่าง client กับเซิร์ฟเวอร์ client เชื่อมต่อกับ pooler ซึ่งคุยด้วยถูก และ pooler เก็บชุดเล็ก ๆ ของ connection จริงไปยัง PostgreSQL เมื่อ client ต้องการฐานข้อมูล pooler ให้ยืม server connection แล้วเอาคืนเพื่อให้ client อื่นใช้ซ้ำ
 
 export const poolDiagram = `flowchart LR
   Cli[Thousands of clients] -->|cheap client connections| Pool[PgBouncer pooler]
   Pool -->|few reused server connections| PG[(PostgreSQL)]`;
 
-<Mermaid code={poolDiagram} title="client จำนวนมากใช้ server connection ไม่กี่ตัวร่วมกันผ่าน pooler" />
+<Mermaid code={poolDiagram} title="หลาย client แชร์ server connection ไม่กี่อันผ่าน pooler" />
 
-ผลลัพธ์น่าทึ่ง: client ของแอปพลิเคชันหนึ่งหมื่นตัวอาจได้รับบริการด้วย PostgreSQL connection จริงเพียงยี่สิบตัว เพราะไม่มี client ตัวไหนถือ server connection ค้างไว้ตอนที่ตัวเองว่าง
+บล็อกสุดท้ายข้างบนคือ 200 client เดิม ตอนนี้ผ่าน PgBouncer ด้วย pool ขนาด 10 ระหว่างการรัน `SHOW POOLS` ใน admin console แสดง 16 client อยู่ใน transaction จริง 184 รอคิว 10 server connection ทำงาน และ `pg_stat_activity` บนฐานข้อมูลยืนยัน server connection พอดี 10 ทั้ง 200 client ได้รับบริการที่ราว 56 000 transaction ต่อวินาที latency เฉลี่ย 3.5 ms ไม่มี client ใดถือ server connection ขณะว่าง
 
 ## โหมด pooling
 
-PgBouncer มีสามโหมดที่แตกต่างกันตรงที่ *นานแค่ไหน* ที่ client ถือ server connection ที่ยืมมา
+PgBouncer มีสามโหมดที่ต่างกันที่ *นานแค่ไหน* ที่ client ถือ server connection ที่ยืมไป ([docs](https://www.pgbouncer.org/config.html))
 
-| โหมด        | server connection ถูกคืนหลังจาก...   | หมายเหตุ                                            |
+| โหมด        | Server connection ถูกคืนหลัง... | หมายเหตุ                                              |
 |-------------|-----------------------------------------|----------------------------------------------------|
-| Session     | client ตัดการเชื่อมต่อ                    | ปลอดภัยที่สุด แต่ connection ถูกถือไว้ตลอดทั้ง session |
-| Transaction | แต่ละ transaction commit หรือ roll back  | ตัวเลือกที่ใช้กันทั่วไป; นำกลับมาใช้ซ้ำได้ดีโดยมีข้อแม้หนึ่งข้อ |
-| Statement   | แต่ละ statement เดี่ยว                    | รุนแรงที่สุด; ห้าม transaction ที่มีหลาย statement  |
+| Session     | client ตัดการเชื่อมต่อ                  | ปลอดภัยที่สุด แต่ถือ connection ตลอด session |
+| Transaction | แต่ละ transaction commit หรือ rollback  | ตัวเลือกที่พบบ่อย; reuse ดีมากแต่มีข้อควรระวัง         |
+| Statement   | แต่ละ statement                         | ก้าวร้าวที่สุด; ห้าม transaction หลาย statement |
 
-**Transaction mode** เป็นค่าเริ่มต้นยอดนิยม server connection ถูกยืมไปเฉพาะช่วงของ transaction เดียวเท่านั้น พอจบ transaction ก็ว่างให้คนอื่นใช้ต่อทันที สิ่งนี้ให้การนำกลับมาใช้ซ้ำที่ยอดเยี่ยมสำหรับ traffic เว็บทั่วไป ที่แต่ละ request เป็น transaction สั้น ๆ
-
-ข้อจับใจคือสิ่งใดก็ตามที่ผูกอยู่กับ *session* แทนที่จะเป็น transaction อาจพังได้ เพราะ transaction ถัดไปอาจไปตกบน server connection คนละตัว ทั้ง prepared statement, คำสั่ง `SET` ระดับ session, advisory lock, และ `LISTEN`/`NOTIFY` ล้วนสันนิษฐานว่า connection มีความต่อเนื่อง ซึ่ง transaction mode ไม่ได้ให้
+**Transaction mode** เป็นตัวเลือกยอดนิยม server connection ถูกยืมเฉพาะช่วงหนึ่ง transaction ระหว่าง transaction จึงว่างให้คนอื่น ให้การใช้ซ้ำยอดเยี่ยมกับทราฟฟิกเว็บทั่วไปที่แต่ละ request เป็น transaction สั้น ๆ ข้อควรระวังคือทุกอย่างที่ผูกกับ *session* ไม่ใช่ transaction พังได้ เพราะ transaction ถัดไปอาจไปตกที่ server connection อื่น ตารางความสามารถของ PgBouncer ระบุว่าอะไรใช้ไม่ได้ใน transaction mode "by design": `SET`/`RESET`, `LISTEN`, cursor `WITH HOLD`, `PREPARE`/`DEALLOCATE`, `LOAD` และ advisory lock ระดับ session ([docs](https://www.pgbouncer.org/features.html))
 
 ## pgbouncer.ini ขั้นต่ำ
 
-PgBouncer ถูกตั้งค่าด้วยไฟล์ INI เล็ก ๆ สิ่งที่ต้องระบุคือ อยู่หน้าฐานข้อมูลไหน ฟังที่ port ใด และใช้โหมด pooling แบบไหน
+PgBouncer ตั้งค่าด้วยไฟล์ INI เล็ก ๆ สิ่งจำเป็นคือมันเป็นหน้าด่านให้ฐานข้อมูลใด ฟังที่ไหน และโหมด pooling นี่คือไฟล์ที่แล็บใช้; รายการ `shopN` คือฐานข้อมูลเดียวกันที่ขนาด pool ต่างกัน สำหรับการทดลองด้านล่าง `userlist.txt` เก็บ SCRAM verifier ของ role `app` และ `admin_users` ให้ `app` เปิด admin console (ฐานข้อมูลจำลอง `pgbouncer`)
 
 ```ini
 [databases]
-shop = host=127.0.0.1 port=5432 dbname=shop
+shop   = host=postgresql-b3-db port=5432 dbname=shop
+shop1  = host=postgresql-b3-db port=5432 dbname=shop pool_size=1
+shop1b = host=postgresql-b3-db port=5432 dbname=shop pool_size=1
+shop2  = host=postgresql-b3-db port=5432 dbname=shop pool_size=2
+shop4  = host=postgresql-b3-db port=5432 dbname=shop pool_size=4
+shop30 = host=postgresql-b3-db port=5432 dbname=shop pool_size=30
+shop60 = host=postgresql-b3-db port=5432 dbname=shop pool_size=60
 
 [pgbouncer]
 listen_addr = 0.0.0.0
 listen_port = 6432
 auth_type = scram-sha-256
 auth_file = /etc/pgbouncer/userlist.txt
+admin_users = app
 pool_mode = transaction
-max_client_conn = 10000
-default_pool_size = 20
+max_client_conn = 1000
+default_pool_size = 10
+max_prepared_statements = 0
+ignore_startup_parameters = extra_float_digits
 ```
 
-ในที่นี้ `max_client_conn` คือจำนวน client ที่อาจเชื่อมต่อกับ PgBouncer ได้ ส่วน `default_pool_size` คือจำนวน PostgreSQL connection จริงที่ PgBouncer เปิดค้างไว้ต่อหนึ่งฐานข้อมูล — server connection ยี่สิบตัวรองรับ client ได้ถึงหนึ่งหมื่นตัว
+`max_client_conn` คือจำนวน client ที่เชื่อมต่อ PgBouncer ได้ ส่วน `default_pool_size` คือจำนวน connection จริงไป PostgreSQL ที่มันเก็บต่อฐานข้อมูลและผู้ใช้ (`pool_size=` ต่อฐานข้อมูลเขียนทับมัน) แล็บ build และเริ่มทุกอย่างแบบนี้:
 
-## การเชื่อมต่อผ่าน pooler
+```dockerfile
+# Dockerfile: PgBouncer from the PostgreSQL apt repository that the postgres image already uses
+FROM postgres:18.6
+RUN apt-get update && apt-get install -y --no-install-recommends pgbouncer && rm -rf /var/lib/apt/lists/*
+USER postgres
+```
 
-จากมุมมองของแอปพลิเคชันคุณ pooler ดูเหมือน PostgreSQL ทุกประการ คุณชี้ driver ของคุณไปที่ host และ port ของ pooler — `6432` ด้านบนแทนที่จะเป็น `5432` — และไม่มีอะไรอื่นเปลี่ยนแปลง
+```bash
+# scripts/pooling-lab.sh
+docker network create --internal postgresql-b3-net
+docker volume create postgresql-b3-db-data
+docker run -d --name postgresql-b3-db --network postgresql-b3-net --memory 768m --cpus 4 \
+  -e POSTGRES_PASSWORD=<your-password> -v postgresql-b3-db-data:/var/lib/postgresql postgres:18.6
+docker run -d --name postgresql-b3-client --network postgresql-b3-net --memory 1g --cpus 2 \
+  --entrypoint sleep postgres:18.6 infinity
+
+docker build -t postgresql-b3-pgbouncer:local .
+docker create --name postgresql-b3-pgbouncer --memory 128m -p 127.0.0.1:6432:6432 \
+  --entrypoint pgbouncer postgresql-b3-pgbouncer:local /etc/pgbouncer/pgbouncer.ini
+docker network connect postgresql-b3-net postgresql-b3-pgbouncer
+docker cp pgbouncer.ini postgresql-b3-pgbouncer:/etc/pgbouncer/pgbouncer.ini
+docker cp userlist.txt  postgresql-b3-pgbouncer:/etc/pgbouncer/userlist.txt
+docker start postgresql-b3-pgbouncer
+```
+
+## อะไรพังใน transaction mode
+
+เพราะ client ไม่ถือ server connection ระหว่าง transaction สถานะ session อาจรั่วระหว่าง client หรือหายไป สามกรณี รันบน alias `shop1` ที่ pool มี server connection เดียวพอดี ทุก client จึงแชร์มันแน่นอน (กับ pool ที่ใหญ่กว่า bug เดียวกันเกิดเป็นช่วง ๆ ซึ่งแย่กว่า)
+
+```text
+# each command is a separate client connection; the database alias shop1 has pool_size=1, so every client shares ONE server connection
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1 -c "SET app.tenant = 'alice'"
+SET
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1 -c "SHOW app.tenant"    # a different client
+ app.tenant 
+------------
+ alice
+(1 row)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-db -U app -d shop -c "SHOW app.tenant"    # a direct connection, for comparison
+ERROR:  unrecognized configuration parameter "app.tenant"
+
+# the transaction-local version: shop1b is a separate one-connection pool
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1b   (script below)
+BEGIN
+ set_config 
+------------
+ bob
+(1 row)
+
+ app.tenant 
+------------
+ bob
+(1 row)
+
+COMMIT
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1b -c "SELECT current_setting('app.tenant', true) AS tenant_seen_by_next_client"
+ tenant_seen_by_next_client 
+----------------------------
+ 
+(1 row)
+
+# session-level advisory locks
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1 -c "SELECT pg_advisory_lock(42)"
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-pgbouncer -p 6432 -U app -d shop1 -c "SELECT pg_try_advisory_lock(42) AS another_client_gets_it"
+ another_client_gets_it 
+------------------------
+ t
+(1 row)
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client psql -h postgresql-b3-db -U app -d shop -c "SELECT pg_try_advisory_lock(42) AS direct_client_gets_it"
+ direct_client_gets_it 
+-----------------------
+ f
+(1 row)
+
+-- database: script
+SELECT locktype, objid, mode, granted FROM pg_locks WHERE locktype = 'advisory';
+-- database: psql output
+ locktype | objid |     mode      | granted 
+----------+-------+---------------+---------
+ advisory |    42 | ExclusiveLock | t
+(1 row)
+```
+
+**`SET` รั่ว** client หนึ่งรัน `SET app.tenant = 'alice'` แล้วตัดการเชื่อมต่อ; client อื่นที่เพิ่งเชื่อมต่ออ่านได้ `alice` การเชื่อมต่อตรงไม่รู้เรื่องอะไร รูปแบบที่ปลอดภัยคือ `SET LOCAL` หรือ `set_config(name, value, true)` ใน transaction: ค่าอยู่จนกว่า transaction จบ และ client ถัดไปเห็นค่าว่าง
+
+**Advisory lock เป็นของ server connection** client หนึ่งถือ `pg_advisory_lock(42)` แล้วจากไป client ที่สองขอ lock เดียวกันและได้ (`t`) เพราะมันคือ backend เดียวกัน ขณะที่การเชื่อมต่อตรงถูกปฏิเสธ (`f`) และ `pg_locks` แสดงหนึ่ง lock ที่ไม่มีเจ้าของชัดเจน ใช้ `pg_advisory_xact_lock` ใน transaction mode
+
+**Prepared statement** prepared statement ระดับโปรโตคอลคือสิ่งที่ driver ส่วนใหญ่ใช้โดย default และ prepared statement อยู่บน server connection เดียว ก่อน PgBouncer 1.21 นั่นทำให้ใช้ใน transaction mode ไม่ได้; ตั้งแต่นั้น PgBouncer ติดตามมันและ prepare ใหม่บน server connection ที่ client ไปตก ถ้าคุณให้ที่ว่างด้วย `max_prepared_statements` ([docs](https://www.pgbouncer.org/features.html)) ค่า default ใน 1.26 คือ 200 ไฟล์ในแล็บตั้งเป็น 0 เพื่อแสดงความล้มเหลว `pgbench -M prepared` ใช้ extended query flow ระดับโปรโตคอล:
+
+```text
+# max_prepared_statements = 0: protocol-level prepared statements are not supported in transaction mode
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client sh -c 'psql -h postgresql-b3-pgbouncer -p 6432 -U app -d pgbouncer -Atc "SHOW CONFIG" | grep ^max_prepared_statements | cut -d"|" -f1,2'
+max_prepared_statements|0
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -M prepared -c 20 -j 4 -T 4 -S shop    # distinct error messages, with counts
+ERROR:  prepared statement "P_0" already exists  (x13)
+ERROR:  prepared statement "P_0" does not exist  (x17)
+pgbench: error: Run was aborted; the above results are incomplete.
+
+# max_prepared_statements = 100 in pgbouncer.ini, then RELOAD from the admin console
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client sh -c 'psql -h postgresql-b3-pgbouncer -p 6432 -U app -d pgbouncer -Atc "SHOW CONFIG" | grep ^max_prepared_statements | cut -d"|" -f1,2'
+max_prepared_statements|100
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -M prepared -c 20 -j 4 -T 4 -S shop
+number of failed transactions: 0 (0.000%)
+tps = 47442.525949 (without initial connection time)
+```
+
+เมื่อ `max_prepared_statements = 0` การรัน abort ด้วย `prepared statement "P_0" already exists` และ `does not exist` — สอง client บน server connection เดียวชนกัน หรือ client ไปตกที่ connection ที่ไม่เคยเห็น statement ของมัน เมื่อ `100` และ `RELOAD` config จาก admin console การรันเดียวกันจบด้วย 0 transaction ที่ล้ม
+
+## กำหนดขนาด pool
+
+`default_pool_size` ควรตามความสามารถของฐานข้อมูล ไม่ใช่จำนวน client การรัน `pgbench` แบบเขียนหนักเดียวกัน (60 client, คล้าย TPC-B) กับฐานข้อมูลที่จำกัด 4 CPU รันตรงแล้วผ่าน pool ที่ใหญ่ขึ้นเรื่อย ๆ:
+
+```text
+# the same TPC-B-like pgbench run (60 clients, 8 s each, three runs per line, database limited to 4 CPUs), direct first, then through pools of different sizes
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-db -U app -c 60 -j 4 -T 8 shop      (direct)    # three runs, tps: 7078, 6697, 6379
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop1      (pool_size=1)    # three runs, tps: 1350, 1250, 1429
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop2      (pool_size=2)    # three runs, tps: 2601, 2547, 2591
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop4      (pool_size=4)    # three runs, tps: 4231, 3409, 4055
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop      (pool_size=10)    # three runs, tps: 5708, 4300, 5439
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop30      (pool_size=30)    # three runs, tps: 6022, 5738, 6469
+
+$ docker exec -e PGPASSWORD=<your-password> postgresql-b3-client pgbench -h postgresql-b3-pgbouncer -p 6432 -U app -c 60 -j 4 -T 8 shop60      (pool_size=60)    # three runs, tps: 6492, 5709, 5738
+```
+
+แต่ละบรรทัดคือสามการรัน คุณจึงเห็น noise (ราว 10 เปอร์เซ็นต์) throughput ไต่เกือบเป็นเส้นตรงจาก 1 connection (ราว 1 300 transaction ต่อวินาที) เป็น 2 (2 600) และ 4 (ราว 3 900) pool 10 ถึงราว 5 200 แล้ว และ 30 (ราว 6 100) กับ 60 (ราว 6 000) ไม่ดีกว่ากัน; การรันตรงด้วย 60 connection ได้ราว 6 700 เมื่อ CPU เต็ม server connection ที่มากขึ้นเพิ่มแต่การแย่งกัน สิ่งที่ pool ให้คุณไม่ใช่ความเร็วที่ยอดบน แต่คือตัวเลขที่ถูกจำกัด: 200 client ยังรันบน 10 connection จุดหักของกราฟขึ้นกับฮาร์ดแวร์และส่วนผสมของ query; วัดเอา
+
+## เชื่อมต่อผ่าน pooler
+
+จากมุมมองของแอป pooler ดูเหมือน PostgreSQL คุณชี้ driver ไปที่ host และพอร์ตของ pooler — `6432` ข้างบนแทน `5432` — และไม่มีอะไรอื่นเปลี่ยน ยกเว้นกฎ transaction-mode ข้างบน โปรแกรมด้านล่างแต่ละอันเปิด client connection 10 อัน รัน 20 worker ที่รัน query แบบมี parameter เดียวกันสามครั้ง และถูกรันสองครั้งกับ pool แค่ 2 server connection เพื่อบังคับให้ client ต้องแชร์: ครั้งแรกด้วย `max_prepared_statements = 0` แล้วด้วย `100`
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```bash
-    # Connect to PgBouncer instead of PostgreSQL directly
     psql "host=127.0.0.1 port=6432 dbname=shop user=app"
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    import { Pool } from 'pg';
+    import pg from 'pg';
 
     // Point the driver at the pooler's port, not 5432
-    const pool = new Pool({
+    const pool = new pg.Pool({
       host: '127.0.0.1',
       port: 6432,
       database: 'shop',
       user: 'app',
+      password: process.env.PGPASSWORD,
+      max: 10,
     });
+
+    // a named query is a protocol-level prepared statement
+    const query = { name: 'balance_by_account', text: 'SELECT abalance FROM pgbench_accounts WHERE aid = $1' };
+    const results = await Promise.all(Array.from({ length: 20 }, (_, i) => pool.query({ ...query, values: [i + 1] })));
+    console.log(results.length, 'queries ok');
+    await pool.end();
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
     import psycopg
 
-    conn = psycopg.connect(
-        host="127.0.0.1",
-        port=6432,
-        dbname="shop",
-        user="app",
-    )
+    dsn = f"host=127.0.0.1 port=6432 dbname=shop user=app password={os.environ['PGPASSWORD']}"
+
+    def one(i):
+        with psycopg.connect(dsn, prepare_threshold=0) as conn:  # prepare on first use
+            for _ in range(3):
+                conn.execute("SELECT abalance FROM pgbench_accounts WHERE aid = %s", (i,)).fetchone()
+        return i
+
+    with ThreadPoolExecutor(10) as ex:
+        print(len(list(ex.map(one, range(1, 21)))), "workers ok")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    conn, err := pgx.Connect(ctx,
-        "host=127.0.0.1 port=6432 dbname=shop user=app")
+    package main
+
+    import (
+    	"context"
+    	"fmt"
+    	"os"
+    	"sync"
+    	"sync/atomic"
+
+    	"github.com/jackc/pgx/v5/pgxpool"
+    )
+
+    func main() {
+    	ctx := context.Background()
+    	dsn := "host=127.0.0.1 port=6432 dbname=shop user=app pool_max_conns=10 password=" + os.Getenv("PGPASSWORD")
+    	pool, err := pgxpool.New(ctx, dsn)
+    	if err != nil {
+    		panic(err)
+    	}
+    	defer pool.Close()
+
+    	var wg sync.WaitGroup
+    	var ok int32
+    	for i := 1; i <= 20; i++ {
+    		wg.Add(1)
+    		go func(aid int) {
+    			defer wg.Done()
+    			for k := 0; k < 3; k++ {
+    				var v int
+    				if err := pool.QueryRow(ctx, "SELECT abalance FROM pgbench_accounts WHERE aid = $1", aid).Scan(&v); err != nil {
+    					fmt.Println("ERR", err)
+    					return
+    				}
+    			}
+    			atomic.AddInt32(&ok, 1)
+    		}(i)
+    	}
+    	wg.Wait()
+    	fmt.Println(ok, "workers ok")
+    }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .connect("postgres://app@127.0.0.1:6432/shop")
-        .await?;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::main]
+    async fn main() -> Result<(), sqlx::Error> {
+        let password = std::env::var("PGPASSWORD").unwrap();
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(&format!("postgres://app:{password}@127.0.0.1:6432/shop"))
+            .await?;
+
+        let mut tasks = Vec::new();
+        for aid in 1..=20_i32 {
+            let pool = pool.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..3 {
+                    sqlx::query_scalar::<_, i32>("SELECT abalance FROM pgbench_accounts WHERE aid = $1")
+                        .bind(aid)
+                        .fetch_one(&pool)
+                        .await?;
+                }
+                Ok::<(), sqlx::Error>(())
+            }));
+        }
+        let mut ok = 0;
+        for t in tasks {
+            if t.await.unwrap().is_ok() {
+                ok += 1;
+            }
+        }
+        println!("{ok} workers ok");
+        Ok(())
+    }
     ```
   </TabItem>
 </Tabs>
 
-**ใน pgAdmin:** ลงทะเบียน server connection ใหม่โดยตั้ง host และ port ชี้ไปที่ PgBouncer (port `6432`) pgAdmin จะมองว่าเป็น PostgreSQL server ตัวหนึ่งตามปกติ เป็นวิธีสะดวก ๆ ในการยืนยันว่า pooler เข้าถึงได้
+```text
+# max_prepared_statements = 0, default_pool_size = 2   (20 workers on 10 client connections, each worker runs the same prepared query 3 times)
+
+[Node.js (pg 8.23.0)] error: prepared statement "balance_by_account" already exists
+
+[Python (psycopg 3.3.6)] psycopg.errors.DuplicatePreparedStatement: prepared statement "_pg3_0" already exists
+
+[Go (pgx v5.11.0)] ERR ERROR: prepared statement "stmtcache_<id>" already exists (SQLSTATE 42P05)  (x18) | 2 workers ok
+
+[Rust (sqlx 0.9.0)] 3 workers ok
+
+# max_prepared_statements = 100, but sqlx sends a startup parameter PgBouncer does not know
+
+[Rust (sqlx 0.9.0)] Error: Database(PgDatabaseError { severity: Fatal, code: "08P01", message: "unsupported startup parameter: extra_float_digits", detail: None, hint: None, position: None, 
+
+# max_prepared_statements = 100 and ignore_startup_parameters = extra_float_digits
+
+[Node.js (pg 8.23.0)] 20 queries ok
+
+[Python (psycopg 3.3.6)] 20 workers ok
+
+[Go (pgx v5.11.0)] 20 workers ok
+
+[Rust (sqlx 0.9.0)] 20 workers ok
+```
+
+ทุก driver ล้มเมื่อ `max_prepared_statements = 0` — `prepared statement ... already exists` ใน Node.js, Python และ Go และการรัน Go กับ Rust จบเพียง 2 และ 3 worker จาก 20 — และทุก driver ทำงานเมื่อ `100` ยกเว้นการตั้งค่าหนึ่ง: sqlx ส่ง startup parameter `extra_float_digits` และ PgBouncer ปฏิเสธ startup parameter ที่มันไม่ติดตาม (`unsupported startup parameter: extra_float_digits`) จนกว่าคุณจะใส่มันใน `ignore_startup_parameters` ([docs](https://www.pgbouncer.org/config.html)) ถ้า PgBouncer ของคุณเก่ากว่า 1.21 ให้หาในเอกสารของ driver เรื่องสวิตช์ที่ปิด server-side prepared statement
+
+**ใน pgAdmin:** ลงทะเบียนการเชื่อมต่อเซิร์ฟเวอร์ใหม่ที่ host และพอร์ตชี้ไป PgBouncer (พอร์ต `6432`) pgAdmin ปฏิบัติต่อมันเหมือนเซิร์ฟเวอร์ PostgreSQL ซึ่งเป็นวิธีสะดวกยืนยันว่าเข้าถึง pooler ได้
+
+เมื่อเสร็จ ลบทุกอย่างที่แล็บสร้าง (รวมถึง image):
+
+```bash
+# scripts/pooling-cleanup.sh
+docker rm -f postgresql-b3-pgbouncer postgresql-b3-client postgresql-b3-db
+docker volume rm postgresql-b3-db-data
+docker network rm postgresql-b3-net
+docker rmi postgresql-b3-pgbouncer:local
+```
+
+## Reading AI-generated code
+
+ผู้ช่วย AI เขียนการเข้าถึงข้อมูลแบบ multi-tenant และเมื่อถูกบอกว่า deployment ใช้ PgBouncer ใน transaction mode ก็ตัดสินว่าไม่เป็นไร:
+
+<SpotTheBug lang="python" code={`# AI comment: "transaction-mode PgBouncer is fine: set the tenant once when we get the connection"
+def get_conn(tenant):
+    conn = pool.getconn()
+    conn.execute("SET app.tenant = %s", (tenant,))  # session-level setting
+    return conn
+
+def orders_for(conn):
+    return conn.execute("SELECT * FROM orders WHERE tenant = current_setting('app.tenant')").fetchall()`}>
+
+`SET` เป็นคำสั่งระดับ session และใน transaction mode session ไม่ได้เป็นของ client ค่าที่ตั้งติดกับ server connection และ client ถัดไปที่ยืมมันสืบทอด tenant ก่อนหน้า — `alice` ใน transcript ข้างบนเป๊ะ เมื่อใช้ row-level security หรือ filter `WHERE tenant = current_setting(...)` นั่นคือข้อมูลรั่วระหว่างลูกค้า และไม่ล้มดัง ๆ วิธีแก้คือจำกัดค่าให้อยู่ใน transaction ตามที่การรัน `shop1b` ทำ: `set_config('app.tenant', value, true)` (หรือ `SET LOCAL`) ภายใน `BEGIN ... COMMIT` และอ่านข้อมูลใน transaction เดียวกัน client ถัดไปเห็นค่าว่าง
+
+```python
+def orders_for(conn, tenant):
+    with conn.transaction():  # the setting lives exactly as long as this transaction
+        conn.execute("SELECT set_config('app.tenant', %s, true)", (tenant,))
+        return conn.execute("SELECT * FROM orders WHERE tenant = current_setting('app.tenant')").fetchall()
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+pooler คือคิวแท็กซี่ client คือผู้โดยสาร server connection คือรถ และ transaction คือหนึ่งเที่ยว ใน transaction mode ผู้โดยสารถือรถเฉพาะตลอดเที่ยว รถยี่สิบคันจึงรับใช้ผู้โดยสารหลายพันคน — แต่ทุกอย่างที่คุณทิ้งไว้ในรถ (`SET`, session lock, prepared statement ที่ไม่มีการรองรับ) ไม่ใช่ของคุณอีกแล้วเมื่อจบเที่ยว
 
 ## เคล็ดลับและข้อควรระวัง
 
-- Transaction mode เป็นคำแนะนำตามปกติ เพราะให้การนำ connection กลับมาใช้ซ้ำได้ดีที่สุดสำหรับ request เว็บสั้น ๆ คว้า session mode มาใช้ก็ต่อเมื่อคุณต้องการความต่อเนื่องของ session จริง ๆ เท่านั้น
-- ใน transaction mode ให้หลีกเลี่ยงฟีเจอร์ที่กินข้าม transaction บน connection เดียว — server-side prepared statement, `SET` ระดับ session, advisory lock, และ `LISTEN`/`NOTIFY` อาจทำงานผิดปกติได้ driver จำนวนมากมีการตั้งค่าให้ปิด server-side prepared statement ด้วยเหตุผลนี้
-- Pooler ไม่ได้มาแทน connection pool ของ driver เอง คุณรันทั้งสองได้ แต่ต้องตั้งขนาดให้ driver ไม่ขอเกินกว่าที่ pooler จ่ายได้
-- ตั้ง `default_pool_size` ตามความจุของ server คุณ ไม่ใช่ตามจำนวน client pool เล็กที่ยุ่งอยู่ตลอดดีกว่า pool ใหญ่ที่ท่วมฐานข้อมูล
+- transaction mode เป็นคำแนะนำปกติเพราะให้ connection reuse ดีที่สุดสำหรับ request เว็บสั้น ๆ ใช้ session mode เมื่อต้องการความต่อเนื่องของ session จริง ๆ เท่านั้น
+- ใน transaction mode หลีกเลี่ยงฟีเจอร์ที่ข้าม transaction บน connection เดียว — `SET` ระดับ session, advisory lock ระดับ session และ `LISTEN`/`NOTIFY` prepared statement ใช้ได้ใน PgBouncer 1.21 ขึ้นไปเมื่อ `max_prepared_statements` ไม่ใช่ศูนย์
+- pooler ไม่ทดแทน connection pool ของ driver เอง รันทั้งสองได้ แต่กำหนดขนาดให้ driver ไม่ขอมากกว่าที่ pooler ให้ได้
+- ตั้ง `default_pool_size` ตามความสามารถของเซิร์ฟเวอร์ (จำนวน core ไม่ใช่ client) และจำไว้ว่า server connection ของ pooler เองก็นับรวมใน `max_connections` ด้วย
+- ใช้ `SHOW POOLS` และ `SHOW STATS` บน admin console เพื่อดู client ที่รอ (`cl_waiting`) ก่อนผู้ใช้จะบอกคุณ
+- อย่าใส่ credential ของฐานข้อมูลลงใน image; แล็บใช้รหัสผ่านใช้แล้วทิ้งบนเครือข่ายภายใน
 
-<Callout title="ความว่างคือศัตรู">
-แก่นของ pooling คือ connection ของแอปพลิเคชันส่วนใหญ่นั่งว่างอยู่เป็นส่วนใหญ่ของเวลา แต่ PostgreSQL connection ที่ว่างแต่ละตัวก็ยังเสียต้นทุนเป็น process pooler ทำให้ช่วงว่างเหล่านั้นถูกแชร์กัน คุณไม่ได้เพิ่มความจุให้ฐานข้อมูล แต่กำลังกัน client ไม่ให้กักตุน connection ไว้ตอนที่ไม่มีอะไรทำ
+<Callout title="ว่างคือศัตรู">
+ข้อมูลเชิงลึกหลักของ pooling คือ connection ของแอปส่วนใหญ่ว่างเกือบตลอดเวลา แต่แต่ละ connection PostgreSQL ที่ว่างก็ยังเสียหนึ่ง process pooler ทำให้ช่วงว่างเหล่านั้นแชร์ได้ คุณไม่ได้เพิ่มความจุให้ฐานข้อมูล — คุณหยุด client ไม่ให้กักตุนมันขณะที่ไม่มีอะไรทำ
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Transaction-mode pooling (PgBouncer) | รองรับ client จำนวนมากต่อ PostgreSQL connection จริงหนึ่งตัว ราคาถูกและ scale ได้ | ฟีเจอร์ระดับ session เช่น prepared statement, `SET`, advisory lock ใช้งานไม่ได้อย่างปลอดภัย |
-| Session-mode pooling / ไม่มี pooler เลย | รองรับฟีเจอร์ระดับ session ได้เต็มรูปแบบ เชื่อมต่อตรงไปตรงมา | PostgreSQL connection แพงและมีจำกัด, scale จำนวน client ได้น้อยกว่ามาก |
+| Transaction-mode pooling (PgBouncer) | client ต่อ PostgreSQL connection จริงได้มากกว่าเยอะ (200 client บน 10) | ฟีเจอร์ระดับ session (`SET`, session advisory lock, `LISTEN`) พัง; prepared statement ต้องมี `max_prepared_statements` และ PgBouncer ที่ใหม่พอ |
+| Session-mode pooling / ไม่มี pooler | รองรับฟีเจอร์ระดับ session เต็มที่ การเชื่อมต่อตรงไปตรงมา | PostgreSQL connection แพงและจำกัด (ราว 3 MB ต่ออัน เพดานแข็งที่ `max_connections`) |
+| pool ที่ใหญ่ขึ้น | client รอน้อยลง | เกินจำนวน CPU แล้ว server connection มากขึ้นไม่เพิ่ม throughput (30 เทียบ 60 ข้างบน) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **มองข้าม connection pooling จนกว่าจะเจอ error `too many connections` ในโปรดักชัน** — ตั้ง pooler ไว้ตั้งแต่ต้น อย่ารอให้ปัญหาเกิดก่อนแล้วค่อยแก้
-- **ใช้ transaction-mode pooling ทั้งที่โค้ดพึ่งพาฟีเจอร์ระดับ session อย่าง `SET` หรือ advisory lock** — ฟีเจอร์เหล่านี้จะพังแบบเงียบ ๆ เพราะ transaction ถัดไปอาจไปตกบน server connection คนละตัว ตรวจสอบโค้ดก่อนเปลี่ยนโหมด
-- **กำหนดขนาด pool ให้ใหญ่กว่า `max_connections` ที่ฐานข้อมูลรองรับได้จริงมาก** — pool ที่ใหญ่เกินไปแค่ย้ายปัญหาไปกองไว้ที่ฐานข้อมูล ให้กำหนดขนาดตามความจุจริงของ server
-
-> 💡 ตัวอย่างจากของจริง
->
-> **[Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres)** — วาง shared pooler (Supavisor) ไว้หน้า PostgreSQL instance ของทุกโปรเจกต์เป็นค่าเริ่มต้น และมี dedicated pooler แบบ PgBouncer ให้ใช้ในแผนแบบเสียเงิน เพราะแอปพลิเคชัน serverless เปิด connection พร้อมกันได้มากกว่าที่ฐานข้อมูลรองรับโดยตรง
->
-> **[Amazon RDS Proxy](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html)** — วางตัวเป็น pooler ระดับ managed service สำหรับ RDS PostgreSQL เพื่อให้ Lambda function หรือแอปที่ scale เร็วไม่ทำให้ connection ของฐานข้อมูลพุ่งจนล้น
+- **"pooler ทำให้ฐานข้อมูลเร็วขึ้น"** มันจำกัดจำนวน connection; throughput ที่ยอดบนเท่าเดิมโดยประมาณทั้งมีและไม่มีมัน
+- **"เพิ่ม max_connections แก้ 'too many clients'"** มันสร้าง process มากขึ้นที่ราว 3 MB ต่ออันและการแย่งกันมากขึ้น pooler แก้ได้
+- **"prepared statement ใช้กับ PgBouncer ไม่ได้"** จริงก่อน 1.21; เมื่อ `max_prepared_statements` มากกว่าศูนย์ มันใช้ได้
+- **"transaction mode ปลอดภัยถ้าโค้ดเปิด transaction"** เฉพาะเมื่อไม่มีอะไรพึ่งสถานะ session; `SET` ธรรมดานอก `BEGIN` รั่วไปยัง client อื่น
+- **"ขนาด pool ควรเท่าจำนวน client"** ควรตามความจุของเซิร์ฟเวอร์; 60 server connection ไม่ดีกว่า 30
 
 export const quizPooling = [
   {
-    q: 'ทำไม PostgreSQL connection จึงถือว่าหนัก?',
+    q: 'ทำไม connection ของ PostgreSQL ถึงถือว่าหนัก?',
     options: [
-      'แต่ละตัวดาวน์โหลดทั้งฐานข้อมูล',
-      'แต่ละตัวมี process ของระบบปฏิบัติการเป็นของตัวเองอยู่ฝั่ง server',
-      'แต่ละตัวต้องการดิสก์แยกต่างหาก',
-      'แต่ละตัวเปิด TCP port ใหม่บน client',
+      'แต่ละอันดาวน์โหลดทั้งฐานข้อมูล',
+      'แต่ละอันมี process ระบบปฏิบัติการเฉพาะบนเซิร์ฟเวอร์',
+      'แต่ละอันต้องใช้ดิสก์แยก',
+      'แต่ละอันเปิดพอร์ต TCP ใหม่ฝั่ง client',
     ],
     answer: 1,
+    explain: 'ในแล็บ 61 session คือ 61 process `postgres: app shop ...` ที่มีหน่วยความจำส่วนตัวราว 3 MB ต่ออัน',
   },
   {
-    q: 'ในโหมด transaction ของ PgBouncer server connection จะถูกคืนกลับสู่ pool เมื่อไหร่?',
+    q: 'ใน PgBouncer transaction mode เมื่อไรที่ server connection ถูกคืนเข้า pool?',
     options: [
       'เมื่อ client ตัดการเชื่อมต่อ',
-      'หลังจากแต่ละ statement เดี่ยว',
-      'เมื่อ transaction ปัจจุบัน commit หรือ roll back',
-      'ไม่เคยคืน เพราะถือไว้ตลอด session',
+      'หลังแต่ละ statement',
+      'เมื่อ transaction ปัจจุบัน commit หรือ rollback',
+      'ไม่เคย; ถือไว้ตลอด session',
     ],
     answer: 2,
+    explain: 'นั่นคือเหตุผลที่ 200 client แชร์ 10 server connection ได้: แต่ละอันยืมหนึ่งอันเฉพาะขณะ transaction ของมันรัน',
   },
   {
-    q: 'ฟีเจอร์ใดมีแนวโน้มทำงานผิดปกติมากที่สุดภายใต้ pooling โหมด transaction?',
+    q: 'ฟีเจอร์ใดมีแนวโน้มทำงานผิดปกติมากที่สุดภายใต้ transaction-mode pooling?',
     options: [
-      'SELECT แบบ single-statement ธรรมดา',
-      'คำสั่ง SET ระดับ session และ advisory lock ที่สันนิษฐานว่ามี connection เดียว',
-      'INSERT สั้น ๆ ภายใน transaction เดียว',
+      'SELECT statement เดี่ยวธรรมดา',
+      'คำสั่ง SET ระดับ session และ advisory lock ที่สมมติว่ามี connection เดียว',
+      'INSERT สั้น ๆ ใน transaction เดียว',
       'การเชื่อมต่อด้วย username และ password',
     ],
     answer: 1,
+    explain: '`SET app.tenant` ของ client หนึ่งถูก client อื่นอ่านกลับ; client ที่สองได้ advisory lock ที่ client แรกยัง "ถือ" อยู่',
+  },
+  {
+    q: 'driver รายงาน prepared statement "..." already exists ผ่าน PgBouncer ใน transaction mode วิธีแก้ที่น่าจะเป็นบน PgBouncer 1.26 คืออะไร?',
+    options: [
+      'เพิ่ม max_connections บน PostgreSQL',
+      'ตั้ง max_prepared_statements เป็นค่าที่ไม่ใช่ศูนย์',
+      'เปลี่ยนไปใช้ statement pooling',
+      'restart แอปทุกชั่วโมง',
+    ],
+    answer: 1,
+    explain: 'เมื่อเป็น 0 สี่ driver ล้ม; เมื่อเป็น 100 สำเร็จทั้งสี่ PgBouncer ที่เก่ากว่า (ก่อน 1.21) ต้องให้ driver เลิกใช้ server-side prepared statement',
+  },
+  {
+    q: 'อะไรคือวิธีปลอดภัยให้ค่าตั้งต่อ request มองเห็นได้ใน query หลัง pooler แบบ transaction-mode?',
+    options: [
+      'SET app.tenant = ... บน connection ตอนดึงจาก pool',
+      'set_config(name, value, true) หรือ SET LOCAL ใน transaction เดียวกับ query',
+      'advisory lock ระดับ session',
+      'ทำไม่ได้',
+    ],
+    answer: 1,
+    explain: 'รูปแบบ transaction-local หายไปเมื่อ transaction จบ client ถัดไปอ่านค่าว่างแทน tenant ก่อนหน้า',
   },
 ];
 
