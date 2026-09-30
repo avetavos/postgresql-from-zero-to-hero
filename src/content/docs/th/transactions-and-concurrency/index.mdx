@@ -1,6 +1,6 @@
 ---
 title: Transactions & Concurrency
-description: จัดกลุ่มหลายคำสั่งให้เป็นหน่วยแบบ all-or-nothing ด้วย transaction แล้วเรียนรู้ว่า PostgreSQL ปล่อยให้หลายตัวทำงานพร้อมกันได้อย่างไรผ่าน isolation, MVCC และ locking
+description: จัดกลุ่ม statement เป็นหน่วยแบบ all-or-nothing ด้วย transaction แล้วเรียนรู้ว่า PostgreSQL ให้หลายตัวรันพร้อมกันได้อย่างไรผ่าน isolation, MVCC และ locking — แต่ละแนวคิดแสดงด้วย session จริง
 sidebar:
   order: 1
 ---
@@ -11,26 +11,28 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-จนถึงตอนนี้ทุกคำสั่งที่คุณเขียนต่างก็ทำงานของตัวเองแยกกัน แต่ในแอปพลิเคชันจริง การกระทำทางธุรกิจหนึ่งอย่างมักต้องใช้หลายคำสั่งที่ต้องสำเร็จไปด้วยกันทั้งหมดหรือไม่สำเร็จเลย การโอนเงินระหว่างสองบัญชีคือตัวอย่างคลาสสิก คือ row หนึ่งลดลง อีก row หนึ่งเพิ่มขึ้น และคุณไม่มีทางยอมให้เกิดการทำสำเร็จเพียงครึ่งเดียวได้เลย
+จนถึงตอนนี้ทุก statement ที่คุณเขียนรันเดี่ยว ๆ แต่ในแอปจริง การกระทำทางธุรกิจหนึ่งอย่างมักต้องใช้หลาย statement ที่ต้องสำเร็จพร้อมกันทั้งหมดหรือไม่ก็ไม่สำเร็จเลย การย้ายเงินระหว่างสองบัญชีเป็นตัวอย่างคลาสสิก: row หนึ่งลด อีก row เพิ่ม และคุณรับไม่ได้เลยที่จะทำแค่ครึ่งเดียว
 
-**transaction** คือเครื่องมือสำหรับสิ่งนี้โดยเฉพาะ โดยจัดกลุ่มคำสั่งตั้งแต่หนึ่งคำสั่งขึ้นไปให้เป็นหน่วยงานเดียวแบบ all-or-nothing ถ้าไม่ทุกคำสั่งมีผล ก็ไม่มีคำสั่งไหนมีผลเลย นอกจากนี้ ฐานข้อมูลที่มีงานหนาแน่นยังมี transaction หลายตัวทำงานพร้อมกันในเวลาเดียวกัน ซึ่งนี่คือสิ่งที่เราหมายถึงคำว่า **concurrency** โมดูลนี้พูดถึงทั้งสองเรื่อง คือวิธีนิยามหน่วยงาน และวิธีที่ PostgreSQL ป้องกันไม่ให้ transaction เหล่านั้นทำให้ข้อมูลของกันและกันเสียหาย
+**transaction** คือเครื่องมือสำหรับสิ่งนี้เอง มันจัดกลุ่ม statement หนึ่งตัวหรือมากกว่าเป็นหน่วยงาน all-or-nothing หน่วยเดียว ไม่ทุก statement มีผล ก็ไม่มีเลย นอกจากนี้ฐานข้อมูลที่ยุ่งมีหลาย transaction รันพร้อมกัน ซึ่งเราเรียกว่า **concurrency** โมดูลนี้ครอบคลุมทั้งสอง: วิธีกำหนดหน่วยงาน และวิธีที่ PostgreSQL ไม่ให้พวกมันทำลายข้อมูลของกันและกัน
 
-## การรับประกันสี่ข้อ: ACID
+ทุกบทเรียนในโมดูลนี้รันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) ตัวอย่าง concurrency ไม่ได้ถูกเล่า แต่ถูกทำซ้ำ: สองหรือสาม session `psql` จริงที่เริ่มพร้อมกัน พิมพ์ผลลัพธ์ตามที่ตอบกลับมา
 
-transaction ใน PostgreSQL ให้การรับประกันแก่คุณสี่ข้อ จำง่าย ๆ ด้วยตัวย่อ **ACID**
+## สี่การรับประกัน: ACID
 
-| ตัวอักษร | คุณสมบัติ    | สิ่งที่รับประกัน                                                        |
+transaction ใน PostgreSQL ให้การรับประกันสี่อย่าง จำด้วยตัวย่อ **ACID** ([docs](https://www.postgresql.org/docs/18/tutorial-transactions.html))
+
+| ตัวอักษร | คุณสมบัติ | สัญญาว่า |
 |--------|-------------|-------------------------------------------------------------------------|
-| A      | Atomicity   | ทุกคำสั่ง commit ไปด้วยกันหรือ roll back ไปด้วยกัน ไม่มีทางทำเสร็จครึ่งเดียว   |
-| C      | Consistency | ฐานข้อมูลเคลื่อนจากสถานะที่ถูกต้องหนึ่งไปยังอีกสถานะที่ถูกต้อง โดยเคารพ constraint |
-| I      | Isolation   | transaction ที่ทำงานพร้อมกันจะไม่เห็นงานที่ยังไม่เสร็จของกันและกัน         |
-| D      | Durability  | เมื่อ commit แล้ว การเปลี่ยนแปลงจะอยู่รอดผ่านการ crash หรือไฟดับ               |
+| A      | Atomicity   | ทุก statement commit พร้อมกันหรือ rollback พร้อมกัน ไม่ทำครึ่งเดียว   |
+| C      | Consistency | ฐานข้อมูลเปลี่ยนจากสถานะที่ถูกต้องหนึ่งไปอีกอัน โดยเคารพ constraint |
+| I      | Isolation   | transaction ที่พร้อมกันไม่เห็นงานที่ยังไม่เสร็จของกันและกัน         |
+| D      | Durability  | เมื่อ commit แล้ว การเปลี่ยนแปลงรอดจาก crash หรือไฟดับ               |
 
-Atomicity คือส่วนที่คุณรู้สึกได้ตรง ๆ ที่สุดเมื่อพิมพ์ `COMMIT` หรือ `ROLLBACK` ส่วน Isolation คือส่วนที่เริ่มน่าสนใจเมื่อมี client มากกว่าหนึ่งตัวเชื่อมต่ออยู่ และเป็นจุดที่เนื้อหาเชิงลึกส่วนใหญ่ของโมดูลนี้อยู่
+Atomicity คือส่วนที่คุณรู้สึกโดยตรงที่สุดเมื่อพิมพ์ `COMMIT` หรือ `ROLLBACK` Isolation คือส่วนที่น่าสนใจเมื่อมี client เชื่อมต่อมากกว่าหนึ่ง และเป็นที่ที่ความลึกส่วนใหญ่ของโมดูลนี้อยู่
 
-## ชิ้นส่วนต่าง ๆ ประกอบกันอย่างไร
+## ชิ้นส่วนประกอบกันอย่างไร
 
-สี่บทเรียนถัดไปต่อยอดกันเป็นชั้น คุณเริ่ม transaction คุณเลือกว่า transaction นั้นควร isolate มากแค่ไหน และเบื้องล่างของทั้งสองสิ่งนั้น PostgreSQL ใช้กลไกสองอย่างเพื่อให้ concurrency ปลอดภัย คือการเก็บ row เดียวกันไว้หลายเวอร์ชัน และการจับ lock เมื่อจำเป็น
+สี่บทถัดไปต่อยอดกัน คุณเริ่ม transaction เลือกว่าจะแยกตัวมากแค่ไหน และใต้ทั้งสองอย่าง PostgreSQL ใช้สองกลไกให้ concurrency ปลอดภัย: เก็บหลาย version ของแต่ละ row และถือ lock เมื่อจำเป็น
 
 export const moduleMap = `flowchart TD
   A[Transaction: BEGIN to COMMIT] --> B[Isolation level: how much it sees]
@@ -39,26 +41,38 @@ export const moduleMap = `flowchart TD
   C --> E[Safe concurrency for many clients]
   D --> E`;
 
-<Mermaid code={moduleMap} title="จากหนึ่ง transaction สู่ concurrency ที่ปลอดภัย" />
+<Mermaid code={moduleMap} title="จาก transaction เดียวสู่ concurrency ที่ปลอดภัย" />
 
-## โมดูลนี้ครอบคลุมอะไรบ้าง
+## โมดูลนี้ครอบคลุมอะไร
 
-- **Transaction basics** — `BEGIN`, `COMMIT`, `ROLLBACK`, atomicity และ `SAVEPOINT` สำหรับการ roll back บางส่วน สาธิตด้วยการโอนเงินระหว่างบัญชี
-- **Isolation levels** — Read Committed, Repeatable Read และ Serializable พร้อม read anomaly ที่แต่ละระดับป้องกันได้
-- **MVCC** — Multi-Version Concurrency Control ที่ writer ไม่ block reader และ reader ไม่ block writer เพราะแต่ละ transaction อ่านจาก snapshot ที่สอดคล้องกัน
-- **Locking and deadlocks** — row lock แบบชัดเจนด้วย `SELECT ... FOR UPDATE`, เหตุที่สอง transaction เกิด deadlock ได้ และวิธีที่ PostgreSQL ตัดสินผลเสมอ
+- **พื้นฐาน Transaction** — `BEGIN`, `COMMIT`, `ROLLBACK`, สิ่งที่เกิดเมื่อ statement ล้มใน transaction (`25P02`), `SAVEPOINT` สำหรับ rollback บางส่วน และ connection รั่วที่เห็นได้ใน `pg_stat_activity`
+- **Isolation levels** — Read Committed, Repeatable Read และ Serializable พร้อมทำซ้ำทุก anomaly (ยอดที่เปลี่ยนกลาง transaction, write skew ที่ commit, `40001` และ retry loop ที่จัดการมัน)
+- **MVCC** — Multi-Version Concurrency Control ที่ผู้เขียนไม่บล็อกผู้อ่านและผู้อ่านไม่บล็อกผู้เขียน เพราะแต่ละ transaction อ่าน snapshot ที่สอดคล้อง คุณดู `xmin`, `xmax` และ `ctid` และ heap page ดิบ และเห็นว่าทำไม transaction ที่ลืมไว้อันเดียวทำให้ table บวม
+- **Locking และ deadlock** — row lock แบบชัดเจนด้วย `SELECT ... FOR UPDATE`, lost update ที่มันป้องกัน, lock สี่โหมด, deadlock จริงพร้อม server log, `NOWAIT`, `SKIP LOCKED` และ advisory lock
 
-## ดูภาพรวมก่อน
+## ดูเบื้องต้น
 
-คุณจะได้รู้จักคำสั่งเหล่านี้อย่างเป็นเรื่องเป็นราวในบทเรียนถัดไป แต่นี่คือรูปร่างของ transaction เพื่อให้เนื้อหาที่เหลือของโมดูลอ่านได้อย่างเป็นธรรมชาติ
+คุณจะพบคำสั่งเหล่านี้อย่างจริงจังในบทถัดไป แต่นี่คือรูปร่างของ transaction เพื่อให้ส่วนที่เหลือของโมดูลอ่านลื่น ทุกบทนิยาม table เล็กนี้ของตัวเอง คุณเริ่มที่ไหนก็ได้
+
+```sql
+-- sql/setup.sql
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+```
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/first-look.sql
     BEGIN;
     UPDATE accounts SET balance = balance - 100 WHERE id = 1;
     UPDATE accounts SET balance = balance + 100 WHERE id = 2;
     COMMIT;
+    SELECT id, owner, balance FROM accounts ORDER BY id;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -69,6 +83,9 @@ export const moduleMap = `flowchart TD
       await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [100, 1]);
       await client.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [100, 2]);
       await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
     } finally {
       client.release();
     }
@@ -83,10 +100,18 @@ export const moduleMap = `flowchart TD
   </TabItem>
   <TabItem label="Go">
     ```go
-    tx, _ := conn.Begin(ctx)
-    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1)
-    tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", 100, 2)
-    tx.Commit(ctx)
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback(ctx)
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1); err != nil {
+        return err
+    }
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", 100, 2); err != nil {
+        return err
+    }
+    return tx.Commit(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -101,44 +126,101 @@ export const moduleMap = `flowchart TD
   </TabItem>
 </Tabs>
 
-**ใน pgAdmin:** โดยค่าเริ่มต้น Query Tool จะรันแต่ละคำสั่งใน transaction แบบ auto-commit ของตัวเอง หากต้องการจัดกลุ่มคำสั่ง ให้พิมพ์ `BEGIN;` ด้วยตัวเองที่ด้านบนและ `COMMIT;` ที่ท้าย แล้วรันทั้งบล็อกพร้อมกันทีเดียว
+```text
+BEGIN
+UPDATE 1
+UPDATE 1
+COMMIT
+ id | owner | balance 
+----+-------+---------
+  1 | Ada   |     400
+  2 | Linus |     200
+(2 rows)
+```
+
+การโอนเดียวกันจากแต่ละ driver รันหนึ่งครั้งกับฐานข้อมูล scratch ที่รีเซ็ตเป็น Ada 500 / Linus 100 ก่อน (pg 8.23.0, psycopg 3.3.6, pgx v5.11.0, sqlx 0.9.0):
+
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[first look] Node.js (pg 8.23.0): Ada 400, Linus 200
+[first look] Python (psycopg 3.3.6): Ada 400, Linus 200
+[first look] Go (pgx v5.11.0): Ada 400, Linus 200
+[first look] Rust (sqlx 0.9.0): Ada 400, Linus 200
+```
+
+**ใน pgAdmin:** Query Tool รันแต่ละ statement เป็น transaction ที่ auto-commit ของมันเองโดยปกติ เพื่อจัดกลุ่ม statement พิมพ์ `BEGIN;` เองที่ด้านบนและ `COMMIT;` ที่ท้าย แล้วรันทั้งบล็อกพร้อมกัน
+
+## Mental Model
+
+ถือสองแนวคิดพร้อมกัน transaction คือขอบเขตของ *คุณ* — คุณตัดสินใจว่างานเริ่มและจบเมื่อไร concurrency control คือหน้าที่ของ *PostgreSQL* — มันตัดสินว่า transaction ของคุณอยู่ร่วมกับของทุกคนได้อย่างไร โดยใช้ snapshot (ผู้อ่านจึงไม่รอ) และ lock (ผู้เขียนจึงผลัดกัน) ส่วนที่เหลือของโมดูลแสดงว่าสองความรับผิดชอบนี้มาเจอกันที่ไหน และโค้ดของคุณต้องทำอะไรเมื่อ PostgreSQL บอกว่า "ลองใหม่"
 
 ## เคล็ดลับและข้อควรระวัง
 
-- connection ที่ไม่ได้อยู่ภายใน transaction แบบชัดเจนจะรันแต่ละคำสั่งใน transaction โดยปริยายของตัวเอง และ commit ทันที สิ่งนี้เรียกว่า auto-commit
-- isolation คือสเปกตรัม ไม่ใช่สวิตช์ ระดับที่สูงขึ้นป้องกัน anomaly ได้มากขึ้น แต่ทำให้ conflict มีโอกาส abort มากขึ้นด้วย
-- PostgreSQL ไม่เคยขอให้ reader รอ writer สำหรับ query `SELECT` ธรรมดา นั่นคือประโยชน์เด่นของ MVCC
-- deadlock เป็นความเป็นไปได้ปกติในระบบ concurrent ใด ๆ ไม่ใช่บั๊ก แอปพลิเคชันที่เขียนดีจะเผื่อไว้แล้ว retry
+- connection ที่ไม่อยู่ใน transaction แบบชัดเจนรันแต่ละ statement ใน transaction โดยนัยของมันเอง และ commit ทันที เรียกว่า auto-commit
+- isolation คือสเปกตรัม ไม่ใช่สวิตช์ level ที่สูงขึ้นป้องกัน anomaly ได้มากขึ้น แต่ทำให้ความขัดแย้งมีโอกาส abort มากขึ้น
+- PostgreSQL ไม่เคยขอให้ผู้อ่านรอผู้เขียนสำหรับ query `SELECT` ธรรมดา นั่นคือประโยชน์หลักของ MVCC
+- deadlock และ serialization failure เป็นความเป็นไปได้ปกติในระบบ concurrent ไม่ใช่ bug แอปที่เขียนดีคาดหวังและ retry
 
-<Callout title="โมเดลความคิดสำหรับโมดูลนี้">
-ถือสองความคิดไว้พร้อมกัน transaction คือขอบเขตของ *คุณ* คุณเป็นผู้ตัดสินใจว่างานเริ่มและจบเมื่อใด ส่วนการควบคุม concurrency คืองานของ *PostgreSQL* PostgreSQL เป็นคนตัดสินว่า transaction ของคุณจะอยู่ร่วมกับของคนอื่นอย่างไร เนื้อหาที่เหลือของโมดูลนี้แสดงให้เห็นจุดที่ความรับผิดชอบทั้งสองนี้มาบรรจบกัน
+<Callout title="โมเดลความคิดของโมดูล">
+transaction นิยามสิ่งที่ต้องเกิดพร้อมกัน isolation นิยามสิ่งที่มันเห็นได้ MVCC และ lock คือวิธีที่ PostgreSQL ส่งมอบทั้งสองโดยไม่ทำให้ทุกคนรอ เรียนรู้ error code ที่แปลว่า "retry" (`40001`, `40P01`) แล้วคุณรู้ส่วนใหญ่ของสิ่งที่แอปต้องจัดการ
 </Callout>
+
+## Common Misconceptions
+
+- **"transaction ทำให้โค้ดช้าลง"** transaction แทบไม่มีต้นทุนเมื่อสั้น ที่ทำให้เจ็บคืออันที่ *ยาว* (ดูบทเรียน MVCC)
+- **"isolation สูงกว่าปลอดภัยกว่าเสมอ"** มันเข้มกว่า และ abort มากกว่า ถ้าไม่มี retry loop นั่นคือ outage ไม่ใช่ความปลอดภัย
+- **"การอ่านและการเขียนบล็อกกัน"** ไม่ใช่ใน PostgreSQL: การอ่านธรรมดาใช้ snapshot และไม่ถือ row lock
 
 export const quizIndex = [
   {
-    q: 'ตัว "A" ใน ACID รับประกันอะไรเกี่ยวกับ transaction?',
+    q: '"A" ใน ACID รับประกันอะไรเกี่ยวกับ transaction?',
     options: [
-      'รันเร็วกว่าการแยกเป็นหลายคำสั่งเสมอ',
-      'ทุกคำสั่งข้างในจะ commit ไปด้วยกัน หรือไม่ก็ไม่ commit เลยสักคำสั่ง',
-      'roll back ไม่ได้อีกเลยเมื่อเริ่มไปแล้ว',
-      'lock ทั้งฐานข้อมูลไว้ตลอดเวลาที่ทำงาน',
+      'มันรันเร็วกว่า statement แยกเสมอ',
+      'ทุก statement ของมัน commit พร้อมกันหรือไม่มีอันไหนเลย',
+      'เมื่อเริ่มแล้ว rollback ไม่ได้อีก',
+      'มัน lock ทั้งฐานข้อมูลขณะรัน',
     ],
     answer: 1,
+    explain: 'Atomicity: statement ที่ล้มใน transaction หรือ `ROLLBACK` ทิ้งทุกการเปลี่ยนแปลงตั้งแต่ `BEGIN`',
   },
   {
-    q: '"concurrency" หมายถึงอะไรในบริบทของ database?',
+    q: '"concurrency" หมายถึงอะไรในบริบทของฐานข้อมูล?',
     options: [
-      'การรันคำสั่งตามลำดับตัวอักษร',
-      'transaction หลายตัวทำงานในเวลาเดียวกัน',
-      'การเก็บข้อมูลใน table มากกว่าหนึ่ง table',
-      'commit เฉพาะวันสุดสัปดาห์เท่านั้น',
+      'รัน statement ตามลำดับตัวอักษร',
+      'หลาย transaction ทำงานพร้อมกัน',
+      'เก็บข้อมูลมากกว่าหนึ่ง table',
+      'commit เฉพาะวันหยุดสุดสัปดาห์',
     ],
     answer: 1,
+    explain: 'ฐานข้อมูลที่ยุ่งมีหลาย client ที่ transaction ซ้อนกันในเวลา isolation, MVCC และ locking มีไว้เพื่อให้ปลอดภัย',
   },
   {
-    q: 'ACID property ตัวไหนที่อธิบายว่า transaction ที่รันพร้อมกันจะมองไม่เห็นงานที่ยังไม่เสร็จของกันและกัน?',
+    q: 'คุณสมบัติ ACID ใดอธิบายว่า transaction ที่พร้อมกันไม่เห็นงานที่ยังไม่เสร็จของกันและกัน?',
     options: ['Atomicity', 'Consistency', 'Isolation', 'Durability'],
     answer: 2,
+    explain: 'Isolation PostgreSQL ไม่เคยแสดงข้อมูลที่ยังไม่ commit ไม่ว่า isolation level ใด',
+  },
+  {
+    q: 'นอก BEGIN ที่ชัดเจน เกิดอะไรกับ UPDATE เดี่ยว?',
+    options: [
+      'มันรอ COMMIT ที่คุณพิมพ์ทีหลัง',
+      'มันรันใน transaction โดยนัยของตัวเองและ commit ทันที',
+      'มันถูกเก็บในหน่วยความจำจน connection ปิด',
+      'มันถูกปฏิเสธ',
+    ],
+    answer: 1,
+    explain: 'นี่คือ auto-commit นั่นคือเหตุผลที่สอง statement แยกกันไม่ atomic ด้วยกัน',
+  },
+  {
+    q: 'SQLSTATE สองรหัสใดแปลว่า "rollback แล้ว retry ทั้ง transaction"?',
+    options: [
+      '23505 และ 23503',
+      '40001 และ 40P01',
+      '42P01 และ 42703',
+      '22012 และ 22P02',
+    ],
+    answer: 1,
+    explain: '`40001` คือ serialization failure และ `40P01` คือ deadlock ที่ตรวจพบ ทั้งคู่เป็นสิ่งที่คาดไว้ภายใต้ concurrency และจัดการด้วยการรัน transaction ใหม่',
   },
 ];
 

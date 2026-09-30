@@ -1,6 +1,6 @@
 ---
 title: Transactions & Concurrency
-description: Group statements into all-or-nothing units with transactions, then learn how PostgreSQL lets many of them run at once through isolation, MVCC, and locking.
+description: Group statements into all-or-nothing units with transactions, then learn how PostgreSQL lets many of them run at once through isolation, MVCC, and locking — each idea shown with real sessions.
 sidebar:
   order: 1
 ---
@@ -15,9 +15,11 @@ So far every statement you wrote ran on its own. In real applications, though, a
 
 A **transaction** is the tool for exactly this. It groups one or more statements into a single all-or-nothing unit of work. Either every statement takes effect, or none of them do. On top of that, a busy database has many transactions running at the same time, which is what we mean by **concurrency**. This module is about both: how to define units of work, and how PostgreSQL keeps them from corrupting each other's data.
 
+Every lesson in this module was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The concurrency examples are not described, they are reproduced: two or three real `psql` sessions started together, with the output printed as it came back.
+
 ## The four guarantees: ACID
 
-A transaction in PostgreSQL gives you four guarantees, remembered by the acronym **ACID**.
+A transaction in PostgreSQL gives you four guarantees, remembered by the acronym **ACID** ([docs](https://www.postgresql.org/docs/18/tutorial-transactions.html)).
 
 | Letter | Property    | What it promises                                                        |
 |--------|-------------|-------------------------------------------------------------------------|
@@ -43,22 +45,34 @@ export const moduleMap = `flowchart TD
 
 ## What this module covers
 
-- **Transaction basics** — `BEGIN`, `COMMIT`, `ROLLBACK`, atomicity, and `SAVEPOINT` for partial rollbacks, demonstrated with an account transfer.
-- **Isolation levels** — Read Committed, Repeatable Read, and Serializable, and the read anomalies each one prevents.
-- **MVCC** — Multi-Version Concurrency Control, where writers do not block readers and readers do not block writers because each transaction reads a consistent snapshot.
-- **Locking and deadlocks** — explicit row locks with `SELECT ... FOR UPDATE`, why two transactions can deadlock, and how PostgreSQL breaks the tie.
+- **Transaction basics** — `BEGIN`, `COMMIT`, `ROLLBACK`, what happens when a statement fails inside a transaction (`25P02`), `SAVEPOINT` for partial rollbacks, and a connection leak you can see in `pg_stat_activity`.
+- **Isolation levels** — Read Committed, Repeatable Read, and Serializable, with each anomaly reproduced (a balance that changes mid-transaction, write skew that commits, `40001` and the retry loop that handles it).
+- **MVCC** — Multi-Version Concurrency Control, where writers do not block readers and readers do not block writers because each transaction reads a consistent snapshot. You look at `xmin`, `xmax` and `ctid` and at a raw heap page, and see why one forgotten transaction bloats a table.
+- **Locking and deadlocks** — explicit row locks with `SELECT ... FOR UPDATE`, the lost update they prevent, the four lock modes, a real deadlock with its server log, `NOWAIT`, `SKIP LOCKED` and advisory locks.
 
 ## A first look
 
-You will meet these commands properly in the next lesson, but here is the shape of a transaction so the rest of the module reads naturally.
+You will meet these commands properly in the next lesson, but here is the shape of a transaction so the rest of the module reads naturally. Every lesson defines its own copy of this small table, so you can start anywhere.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+```
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/first-look.sql
     BEGIN;
     UPDATE accounts SET balance = balance - 100 WHERE id = 1;
     UPDATE accounts SET balance = balance + 100 WHERE id = 2;
     COMMIT;
+    SELECT id, owner, balance FROM accounts ORDER BY id;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -69,6 +83,9 @@ You will meet these commands properly in the next lesson, but here is the shape 
       await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [100, 1]);
       await client.query('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [100, 2]);
       await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
     } finally {
       client.release();
     }
@@ -83,10 +100,18 @@ You will meet these commands properly in the next lesson, but here is the shape 
   </TabItem>
   <TabItem label="Go">
     ```go
-    tx, _ := conn.Begin(ctx)
-    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1)
-    tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", 100, 2)
-    tx.Commit(ctx)
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback(ctx)
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1); err != nil {
+        return err
+    }
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", 100, 2); err != nil {
+        return err
+    }
+    return tx.Commit(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -101,18 +126,50 @@ You will meet these commands properly in the next lesson, but here is the shape 
   </TabItem>
 </Tabs>
 
+```text
+BEGIN
+UPDATE 1
+UPDATE 1
+COMMIT
+ id | owner | balance 
+----+-------+---------
+  1 | Ada   |     400
+  2 | Linus |     200
+(2 rows)
+```
+
+The same transfer from each driver, run once against a scratch database that was reset to Ada 500 / Linus 100 first (pg 8.23.0, psycopg 3.3.6, pgx v5.11.0, sqlx 0.9.0):
+
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[first look] Node.js (pg 8.23.0): Ada 400, Linus 200
+[first look] Python (psycopg 3.3.6): Ada 400, Linus 200
+[first look] Go (pgx v5.11.0): Ada 400, Linus 200
+[first look] Rust (sqlx 0.9.0): Ada 400, Linus 200
+```
+
 **In pgAdmin:** the Query Tool runs each statement in its own auto-committed transaction by default. To group statements, type `BEGIN;` yourself at the top and `COMMIT;` at the end, then run the whole block at once.
+
+## Mental Model
+
+Hold two ideas at once. A transaction is *your* boundary — you decide when work begins and ends. Concurrency control is *PostgreSQL's* job — it decides how your transaction coexists with everyone else's, using snapshots (so readers never wait) and locks (so writers take turns). The rest of this module shows where those two responsibilities meet, and what your code must do when PostgreSQL says "try again".
 
 ## Tips / gotchas
 
 - A connection that is not inside an explicit transaction runs each statement in its own implicit transaction, committed immediately. This is called auto-commit.
 - Isolation is a spectrum, not a switch. Higher levels prevent more anomalies but make conflicts more likely to abort.
 - PostgreSQL never asks readers to wait for writers for ordinary `SELECT` queries; that is the headline benefit of MVCC.
-- Deadlocks are a normal possibility in any concurrent system, not a bug; well-written applications expect them and retry.
+- Deadlocks and serialization failures are a normal possibility in any concurrent system, not a bug; well-written applications expect them and retry.
 
 <Callout title="The mental model for the module">
-Hold two ideas at once. A transaction is *your* boundary — you decide when work begins and ends. Concurrency control is *PostgreSQL's* job — it decides how your transaction coexists with everyone else's. The rest of this module shows where those two responsibilities meet.
+A transaction defines what must happen together. Isolation defines what it may see. MVCC and locks are how PostgreSQL delivers both without making everybody wait. Learn the error codes that mean "retry" (`40001`, `40P01`) and you know most of what an application has to handle.
 </Callout>
+
+## Common Misconceptions
+
+- **"Transactions make my code slower."** A transaction costs almost nothing when it is short; a *long* one is what hurts (see the MVCC lesson).
+- **"Higher isolation is always safer."** It is stricter, and it aborts more; without a retry loop that is an outage, not safety.
+- **"Reads and writes block each other."** Not in PostgreSQL: ordinary reads use a snapshot and take no row locks.
 
 export const quizIndex = [
   {
@@ -124,6 +181,7 @@ export const quizIndex = [
       'It locks the entire database while running',
     ],
     answer: 1,
+    explain: 'Atomicity: a failed statement inside the transaction, or a `ROLLBACK`, discards every change made since `BEGIN`.',
   },
   {
     q: 'What does "concurrency" mean in the context of a database?',
@@ -134,11 +192,35 @@ export const quizIndex = [
       'Committing only on weekends',
     ],
     answer: 1,
+    explain: 'A busy database has many clients whose transactions overlap in time; isolation, MVCC and locking exist to keep that safe.',
   },
   {
     q: 'Which ACID property describes that concurrent transactions do not see each other unfinished work?',
     options: ['Atomicity', 'Consistency', 'Isolation', 'Durability'],
     answer: 2,
+    explain: 'Isolation. PostgreSQL never shows uncommitted data at any isolation level.',
+  },
+  {
+    q: 'Outside an explicit BEGIN, what happens to a single UPDATE statement?',
+    options: [
+      'It waits for a COMMIT that you type later',
+      'It runs in its own implicit transaction and is committed immediately',
+      'It is held in memory until the connection closes',
+      'It is rejected',
+    ],
+    answer: 1,
+    explain: 'This is auto-commit. It is why two separate statements are not atomic together.',
+  },
+  {
+    q: 'Which two SQLSTATE codes mean "roll back and retry the whole transaction"?',
+    options: [
+      '23505 and 23503',
+      '40001 and 40P01',
+      '42P01 and 42703',
+      '22012 and 22P02',
+    ],
+    answer: 1,
+    explain: '`40001` is a serialization failure and `40P01` a detected deadlock; both are expected under concurrency and both are handled by re-running the transaction.',
   },
 ];
 
