@@ -1,6 +1,6 @@
 ---
-title: Views and materialized views
-description: Name a query with CREATE VIEW for an always-fresh result, or cache an expensive query with CREATE MATERIALIZED VIEW and REFRESH it on demand — and know when to use each.
+title: Views and Materialized Views
+description: Save a query as a view (merged into your query, updatable, security_invoker) or a materialized view (stored rows, REFRESH, CONCURRENTLY and its unique-index rule) — with real plans, permission errors, and a reader-blocking proof.
 sidebar:
   order: 4
 ---
@@ -10,179 +10,651 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-When the same complex query keeps appearing across your application, copying its SQL everywhere is fragile. PostgreSQL lets you give a query a name and then use that name like a table. There are two flavors with very different behavior: a **view** runs the underlying query every time you read it, while a **materialized view** stores the result and only recomputes when you ask.
+Some queries are long, or used in many places, or joined and aggregated in the same way every time. Instead of copying the SQL around, PostgreSQL lets you give the query a name and treat it as a table: a **view**. A **materialized view** goes one step further and stores the query's result rows, trading freshness for speed.
 
-We reuse the `authors` and `books` tables from the CRUD module for the examples below.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The `sql` fences run top to bottom in one empty database; outputs are pasted from `psql`; the two-session runs are real (two `psql` processes started together). Timings are from this Mac.
+
+export const viewFlow = `flowchart LR
+  Q["Your query on the view"] --> V["View: stored SELECT, merged into your query"]
+  V --> T["Base tables, read now"]
+  Q2["Your query on the materialized view"] --> M["Materialized view: stored rows"]
+  M -. "REFRESH" .-> T`;
+
+<Mermaid code={viewFlow} title="View or materialized view" />
+
+## The dataset
+
+The module's canonical dataset again. Note that `books` includes `copies_sold`, which the views use.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## A view is a stored query
 
-`CREATE VIEW` saves a `SELECT` under a name. Reading the view runs that query fresh against the current data, so its result is always up to date. Nothing is stored except the definition.
+`CREATE VIEW` saves a `SELECT` under a name. It stores no rows. Every time you query the view, PostgreSQL runs the saved query against the current data. This one summarizes each author, keeping authors without books:
 
 ```sql
-CREATE VIEW author_book_counts AS
-SELECT a.id,
+-- sql/create-view.sql
+CREATE VIEW author_sales AS
+SELECT a.id AS author_id,
        a.name,
-       count(b.id) AS book_count,
-       coalesce(sum(b.copies_sold), 0) AS total_sold
-FROM authors a
-LEFT JOIN books b ON b.author_id = a.id
+       count(b.id)                        AS books,
+       coalesce(sum(b.copies_sold), 0)    AS copies_sold
+FROM authors AS a
+LEFT JOIN books AS b ON b.author_id = a.id
 GROUP BY a.id, a.name;
+```
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/query-view.sql
+    SELECT * FROM author_sales ORDER BY name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT * FROM author_sales ORDER BY name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT * FROM author_sales ORDER BY name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT * FROM author_sales ORDER BY name`)
+    defer rows.Close()
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT * FROM author_sales ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ author_id |    name    | books | copies_sold 
+-----------+------------+-------+-------------
+         1 | Mara Linde |     2 |        1700
+         2 | Owen Pryce |     1 |         600
+         3 | Sela Vance |     0 |           0
+(3 rows)
+```
+
+```text
+$ (each snippet run once against the dataset above; multi-line driver output joined onto one line)
+[view]    Node.js (pg 8.23.0):    [ { author_id: '1', name: 'Mara Linde', books: '2', copies_sold: '1700' }, { author_id: '2', name: 'Owen Pryce', books: '1', copies_sold: '600' }, { author_id: '3', name: 'Sela Vance', books: '0', copies_sold: '0' } ]
+[view]    Python (psycopg 3.3.6): [(1, 'Mara Linde', 2, 1700), (2, 'Owen Pryce', 1, 600), (3, 'Sela Vance', 0, 0)]
+[view]    Go (pgx v5.11.0):       [1 Mara Linde 2 1700] [2 Owen Pryce 1 600] [3 Sela Vance 0 0]
+[view]    Rust (sqlx 0.9.0):      1 Mara Linde 2 1700 / 2 Owen Pryce 1 600 / 3 Sela Vance 0 0
+[refresh] Node.js:                [ { region: 'East', sales: '4', copies: '2150' }, { region: 'West', sales: '4', copies: '955' } ]
+[refresh] Python:                 [('East', 4, 2150), ('West', 4, 955)]
+[refresh] Go / Rust:              East 4 2150 / West 4 955
+```
+
+Because the view stores nothing, its results are always current. It also costs nothing extra to plan: the view is expanded into your query before optimization, so it is not a black box the planner has to run first. Ask for one author and the filter reaches the base table:
+
+```sql
+-- sql/view-plan.sql
+-- the view is not a black box: its query is merged into yours, and the filter reaches the base table
+EXPLAIN (COSTS OFF) SELECT * FROM author_sales WHERE name = 'Owen Pryce';
+```
+
+```text
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ GroupAggregate
+   Group Key: a.id
+   ->  Sort
+         Sort Key: a.id
+         ->  Hash Right Join
+               Hash Cond: (b.author_id = a.id)
+               ->  Seq Scan on books b
+               ->  Hash
+                     ->  Seq Scan on authors a
+                           Filter: (name = 'Owen Pryce'::text)
+(10 rows)
+```
+
+The `Filter: (name = 'Owen Pryce')` sits on the scan of `authors`, under the join: the view's `GROUP BY` did not stop it from being pushed down. A view is a naming and reuse tool; it is not a performance feature ([docs](https://www.postgresql.org/docs/18/sql-createview.html)).
+
+### A view remembers its columns, not your intentions
+
+`SELECT *` in a view definition is expanded once, when the view is created. Add a column to the table later and the view does not show it:
+
+```sql
+-- sql/select-star-frozen.sql
+CREATE VIEW book_titles AS SELECT * FROM books;
+ALTER TABLE books ADD COLUMN isbn text;
+SELECT * FROM book_titles LIMIT 1;
+SELECT * FROM books LIMIT 1;
 ```
 
 ```text
 CREATE VIEW
+ALTER TABLE
+ id |     title     | author_id | published | copies_sold 
+----+---------------+-----------+-----------+-------------
+  1 | Quiet Harbors |         1 |      2003 |         450
+(1 row)
+
+ id |     title     | author_id | published | copies_sold | isbn 
+----+---------------+-----------+-----------+-------------+------
+  1 | Quiet Harbors |         1 |      2003 |         450 | 
+(1 row)
 ```
 
-Now query it as if it were a table:
+`book_titles` still has five columns; `books` now has six. Write the columns you want.
+
+### Updatable views and WITH CHECK OPTION
+
+A view over one table, without aggregates, `DISTINCT` or set operations, is **automatically updatable**: `INSERT`, `UPDATE` and `DELETE` on the view change the base table. `WITH CHECK OPTION` keeps rows you write through the view inside the view's own `WHERE`:
 
 ```sql
-SELECT name, book_count, total_sold
-FROM author_book_counts
-WHERE book_count > 0
-ORDER BY total_sold DESC;
+-- sql/updatable-view.sql
+CREATE VIEW recent_books AS
+SELECT id, title, author_id, published, copies_sold
+FROM books
+WHERE published >= 2010
+WITH CHECK OPTION;
+SELECT id, title, published FROM recent_books ORDER BY id;
+BEGIN;
+-- a simple view is updatable: this changes the base table
+UPDATE recent_books SET copies_sold = copies_sold + 10 WHERE title = 'Tidal Notes' RETURNING id, title, copies_sold;
+ROLLBACK;
 ```
 
 ```text
-      name       | book_count | total_sold
------------------+------------+------------
- Dana Whitfield  |          2 |       1800
- Marcus Lindqvist|          1 |        950
-(2 rows)
+CREATE VIEW
+ id |       title       | published 
+----+-------------------+-----------
+  2 | The Glass Orchard |      2018
+  3 | Tidal Notes       |      2011
+  4 | Unlinked Draft    |      2020
+(3 rows)
+
+BEGIN
+ id |    title    | copies_sold 
+----+-------------+-------------
+  3 | Tidal Notes |         610
+(1 row)
+
+UPDATE 1
+ROLLBACK
 ```
 
-Because the query runs each time, inserting a new book and re-reading the view immediately reflects the change. The cost is that every read pays the full price of the join and aggregation.
+```sql
+-- @expect-error 44000
+INSERT INTO recent_books (title, author_id, published) VALUES ('Old Book', 1, 1999);
+```
+
+```text
+ERROR:  new row violates check option for view "recent_books"
+DETAIL:  Failing row contains (5, Old Book, 1, 1999, 0, null).
+```
+
+Without `WITH CHECK OPTION` that insert would succeed and the new row would simply be invisible through the view.
+
+### Dependencies
+
+A view depends on its base tables, and PostgreSQL knows it. Dropping a table that views use is refused, and the message lists every dependent:
+
+```sql
+-- @expect-error 2BP01
+DROP TABLE books;
+```
+
+```text
+ERROR:  cannot drop table books because other objects depend on it
+DETAIL:  constraint sales_book_id_fkey on table sales depends on table books
+view author_sales depends on table books
+view book_titles depends on table books
+view recent_books depends on table books
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+```
+
+### security_invoker
+
+By default a view runs with the privileges of the view's **owner**, not the caller. That is a feature (it can hide columns and rows), and a trap (a role that cannot read the tables can read the view). PostgreSQL 15 added `security_invoker`: the view then runs with the caller's privileges. A role with `SELECT` on the view only:
+
+```sql
+-- sql/security-invoker.sql
+CREATE ROLE report_reader NOLOGIN;
+GRANT USAGE ON SCHEMA public TO report_reader;
+GRANT SELECT ON author_sales TO report_reader;    -- the view only, no table privileges
+
+-- default: the view runs with its OWNER's privileges, so the reader gets data
+SET ROLE report_reader;
+SELECT name, books FROM author_sales ORDER BY name;
+RESET ROLE;
+
+-- security_invoker (PostgreSQL 15+): the view runs with the CALLER's privileges
+ALTER VIEW author_sales SET (security_invoker = true);
+```
+
+```text
+CREATE ROLE
+GRANT
+GRANT
+SET
+    name    | books 
+------------+-------
+ Mara Linde |     2
+ Owen Pryce |     1
+ Sela Vance |     0
+(3 rows)
+
+RESET
+ALTER VIEW
+```
+
+Now the same role, after `security_invoker = true`:
+
+```sql
+-- @expect-error 42501
+SET ROLE report_reader;
+SELECT name, books FROM author_sales ORDER BY name;
+```
+
+```text
+SET
+ERROR:  permission denied for table authors
+```
+
+With `security_invoker` the caller needs privileges on the base tables too, and row-level security policies apply to the caller rather than the owner ([docs](https://www.postgresql.org/docs/18/sql-createview.html)). Clean up the demo role:
+
+```sql
+-- sql/security-cleanup.sql
+RESET ROLE;
+DROP OWNED BY report_reader;
+DROP ROLE report_reader;
+ALTER VIEW author_sales RESET (security_invoker);
+```
 
 ## A materialized view caches the result
 
-`CREATE MATERIALIZED VIEW` runs the query once and stores the rows on disk, like a snapshot. Reads are then as cheap as reading a table — but the data is frozen at the moment it was built or last refreshed.
+`CREATE MATERIALIZED VIEW` runs the query now and stores the rows. Reading it is as cheap as reading a table, and just as stale as the last refresh. We insert a new sale, and the materialized view does not notice until we `REFRESH` it:
 
 ```sql
-CREATE MATERIALIZED VIEW author_book_counts_cached AS
-SELECT a.id,
-       a.name,
-       count(b.id) AS book_count,
-       coalesce(sum(b.copies_sold), 0) AS total_sold
-FROM authors a
-LEFT JOIN books b ON b.author_id = a.id
-GROUP BY a.id, a.name;
+-- sql/materialized-view.sql
+CREATE MATERIALIZED VIEW sales_by_region AS
+SELECT region, count(*) AS sales, sum(copies) AS copies
+FROM sales
+GROUP BY region;
+SELECT * FROM sales_by_region ORDER BY region;
+-- the source changes, the materialized view does not
+INSERT INTO sales (book_id, region, copies) VALUES (3, 'East', 1000);
+SELECT 'view says' AS source, region, copies FROM sales_by_region WHERE region = 'East'
+UNION ALL
+SELECT 'live table', region, sum(copies) FROM sales WHERE region = 'East' GROUP BY region;
+REFRESH MATERIALIZED VIEW sales_by_region;
+SELECT 'after refresh' AS source, region, copies FROM sales_by_region WHERE region = 'East';
 ```
 
 ```text
-SELECT 3
-```
+SELECT 2
+ region | sales | copies 
+--------+-------+--------
+ East   |     3 |   1150
+ West   |     3 |    950
+(2 rows)
 
-If you now insert a new book, the materialized view does **not** change. You bring it up to date with `REFRESH`:
+INSERT 0 1
+   source   | region | copies 
+------------+--------+--------
+ view says  | East   |   1150
+ live table | East   |   2150
+(2 rows)
 
-```sql
-REFRESH MATERIALIZED VIEW author_book_counts_cached;
-```
-
-```text
 REFRESH MATERIALIZED VIEW
+    source     | region | copies 
+---------------+--------+--------
+ after refresh | East   |   2150
+(1 row)
 ```
 
-A plain `REFRESH` takes a lock that blocks reads while it rebuilds. To keep the view readable during refresh, add `CONCURRENTLY` — this requires a unique index on the materialized view first:
+`view says 1150`, `live table 2150`: the materialized view is a snapshot. It is the right tool for expensive aggregates that many readers need and that can be a little stale (a dashboard, a nightly report).
+
+`WITH NO DATA` creates the definition without running the query; reading it before the first refresh is an error:
 
 ```sql
-CREATE UNIQUE INDEX idx_abc_cached_id ON author_book_counts_cached (id);
-
-REFRESH MATERIALIZED VIEW CONCURRENTLY author_book_counts_cached;
+-- sql/with-no-data.sql
+CREATE MATERIALIZED VIEW empty_mv AS SELECT region, sum(copies) AS copies FROM sales GROUP BY region WITH NO DATA;
 ```
 
-**In pgAdmin:** both objects appear in the browser tree — views under Views and materialized views under Materialized Views. Right-clicking a materialized view offers a Refresh action that runs the statement for you.
+```sql
+-- @expect-error 55000
+SELECT * FROM empty_mv;
+```
 
-## How they differ at read time
+```text
+ERROR:  materialized view "empty_mv" has not been populated
+HINT:  Use the REFRESH MATERIALIZED VIEW command.
+```
 
-The two behave the same to write (`SELECT ... FROM name`) but differently underneath. A view forwards your query to the stored definition; a materialized view answers from its own stored rows.
+### REFRESH blocks readers, CONCURRENTLY does not
 
-export const viewDiagram = `flowchart LR
-  subgraph View
-    Q1[SELECT from view] --> D1[Stored query definition]
-    D1 --> T1[(Live tables)]
-    T1 --> R1[Always-fresh result]
-  end
-  subgraph Materialized view
-    Q2[SELECT from matview] --> S2[(Stored result rows)]
-    S2 --> R2[Fast but possibly stale result]
-    RF[REFRESH] --> T2[(Live tables)]
-    T2 --> S2
-  end`;
+A plain `REFRESH MATERIALIZED VIEW` takes an `ACCESS EXCLUSIVE` lock while it rewrites the stored rows, so readers wait. `REFRESH MATERIALIZED VIEW CONCURRENTLY` builds the new contents on the side and swaps in only the differences, so readers keep reading the old rows. It needs a unique index on the materialized view, otherwise it refuses:
 
-<Mermaid code={viewDiagram} title="View passes through to live data; matview reads its own cached rows" />
+```sql
+-- @expect-error 55000
+REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region;
+```
+
+```text
+ERROR:  cannot refresh materialized view "public.sales_by_region" concurrently
+HINT:  Create a unique index with no WHERE clause on one or more columns of the materialized view.
+```
+
+```sql
+-- sql/concurrently.sql
+CREATE UNIQUE INDEX sales_by_region_region_idx ON sales_by_region (region);
+```
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/refresh-concurrently.sql
+    INSERT INTO sales (book_id, region, copies) VALUES (1, 'West', 5);
+    REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region;
+    SELECT * FROM sales_by_region ORDER BY region;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region');
+    const res = await pool.query('SELECT * FROM sales_by_region ORDER BY region');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region")
+    cur.execute("SELECT * FROM sales_by_region ORDER BY region")
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region")
+    rows, err2 := conn.Query(ctx, "SELECT * FROM sales_by_region ORDER BY region")
+    defer rows.Close()
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region")
+        .execute(&pool)
+        .await?;
+    let rows = sqlx::query("SELECT * FROM sales_by_region ORDER BY region")
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+INSERT 0 1
+REFRESH MATERIALIZED VIEW
+ region | sales | copies 
+--------+-------+--------
+ East   |     4 |   2150
+ West   |     4 |    955
+(2 rows)
+```
+
+Each driver ran the same refresh and read once; their output is in the `[refresh]` lines of the block near the top of this page.
+
+To see the difference we need a refresh slow enough to observe, so this materialized view is *artificially* slow: `pg_sleep(1)` runs once per group, making every refresh take about 2 seconds.
+
+```sql
+-- sql/slow-mv.sql
+-- an artificially slow materialized view: pg_sleep makes the refresh take about 2 seconds
+CREATE MATERIALIZED VIEW slow_mv AS
+SELECT region, sum(copies) AS copies, pg_sleep(1) IS NOT NULL AS slept
+FROM sales GROUP BY region;
+CREATE UNIQUE INDEX slow_mv_region_idx ON slow_mv (region);
+```
+
+Session A refreshes it while session B tries to read 0.3 s later:
+
+```text
+-- session A: script
+\timing on
+REFRESH MATERIALIZED VIEW slow_mv;
+-- session A: psql output
+Timing is on.
+REFRESH MATERIALIZED VIEW
+Time: 2011.220 ms (00:02.011)
+
+-- session B (starts 0.3 s later): script
+\o /dev/null
+SELECT pg_sleep(0.3);
+\o
+\timing on
+SELECT region, copies FROM slow_mv ORDER BY region;
+-- session B: psql output
+Timing is on.
+ region | copies 
+--------+--------
+ East   |   2150
+ West   |    955
+(2 rows)
+
+Time: 1710.883 ms (00:01.711)
+```
+
+B waited **1.7 seconds**, the remaining time of A's refresh. Now the same with `CONCURRENTLY`:
+
+```text
+-- session A: script
+\timing on
+REFRESH MATERIALIZED VIEW CONCURRENTLY slow_mv;
+-- session A: psql output
+Timing is on.
+REFRESH MATERIALIZED VIEW
+Time: 2016.039 ms (00:02.016)
+
+-- session B (same script as above): psql output
+Timing is on.
+ region | copies 
+--------+--------
+ East   |   2150
+ West   |    955
+(2 rows)
+
+Time: 1.892 ms
+```
+
+A took just as long (2.0 s), but B read the old rows in **1.9 ms**. The price of `CONCURRENTLY` is the unique index and more work per refresh (it computes a diff) ([docs](https://www.postgresql.org/docs/18/sql-refreshmaterializedview.html)).
 
 ## Choosing between them
 
-| Question                                  | View                  | Materialized view              |
-|-------------------------------------------|-----------------------|--------------------------------|
-| Is the result always current?             | Yes                   | Only after a refresh           |
-| How expensive is each read?               | Full query cost       | Cheap (reads stored rows)      |
-| Does it use disk for results?             | No                    | Yes                            |
-| Can you index the result directly?        | No                    | Yes                            |
-| Best when                                 | Data changes often    | Query is costly, staleness OK  |
+| Question | View | Materialized view |
+|---|---|---|
+| Are results always current? | Yes | No, only as of the last `REFRESH` |
+| Is it faster than the raw query? | No (merged into the query) | Yes: rows are precomputed |
+| Does it use storage? | No | Yes, plus indexes you add on it |
+| Who refreshes it? | Nobody, no need | You: a schedule, a trigger or `pg_cron` |
 
-Use a plain view to tidy up and reuse a query whose cost is acceptable on every read. Reach for a materialized view when the query is genuinely expensive (heavy joins, aggregates over big tables) and your application can tolerate results that lag behind by minutes or hours.
+## Reading AI-generated code
+
+An assistant sets up a nightly job to refresh a summary "without blocking readers", using `CONCURRENTLY`:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "nightly cron: refresh without blocking readers"
+CREATE MATERIALIZED VIEW daily_totals AS
+SELECT region, sum(copies) AS copies FROM sales GROUP BY region;
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_totals;`}>
+
+It runs, and fails every night: `CONCURRENTLY` requires a unique index on the materialized view, and the assistant never created one. The materialized view is created (that part works), then the refresh is refused, the job logs an error nobody reads, and the data goes stale:
+
+```sql
+-- sql/stb-setup.sql
+CREATE MATERIALIZED VIEW daily_totals AS
+SELECT region, sum(copies) AS copies FROM sales GROUP BY region;
+```
+
+```sql
+-- @expect-error 55000
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_totals;
+```
+
+```text
+ERROR:  cannot refresh materialized view "public.daily_totals" concurrently
+HINT:  Create a unique index with no WHERE clause on one or more columns of the materialized view.
+```
+
+The fix is the unique index (here `region` is unique per row), and then the refresh works while readers keep reading:
+
+```sql
+-- sql/stb-fixed.sql
+CREATE UNIQUE INDEX daily_totals_region_idx ON daily_totals (region);
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_totals;
+SELECT * FROM daily_totals ORDER BY region;
+```
+
+```text
+CREATE INDEX
+REFRESH MATERIALIZED VIEW
+ region | copies 
+--------+--------
+ East   |   2150
+ West   |    955
+(2 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A view is a *definition*: a name for a query, expanded into whatever query uses it. A materialized view is a *table that remembers how it was made*: rows are stored, and `REFRESH` re-runs the definition. Every question about them follows: a view is always fresh and no faster than its query; a materialized view is fast to read and as stale as its last refresh, occupies space, can be indexed, and needs someone to refresh it.
 
 ## Tips / gotchas
 
-- A materialized view is stale by definition until you refresh it. Schedule a refresh (a cron job, a scheduled task, or a trigger) that matches how fresh the data needs to be.
-- `REFRESH MATERIALIZED VIEW CONCURRENTLY` needs a unique index on the view and does more work, but it lets reads continue during the rebuild. A plain refresh is faster but blocks readers.
-- Plain views add no storage and no staleness, but they also add no speed — each read re-runs the full query. They are about reuse and readability, not performance.
-- You generally cannot write through a view that aggregates or joins. Simple single-table views can be updatable, but the moment you add `GROUP BY` or joins, treat the view as read-only.
+- Use a view to name and reuse a query, to expose a stable interface over changing tables, or to narrow what a role can see.
+- List the columns; `SELECT *` in a view is frozen at creation.
+- Set `security_invoker = true` on views that should respect the caller's privileges and row-level security.
+- Add indexes to materialized views like any table; `REFRESH ... CONCURRENTLY` needs a unique one.
+- Schedule refreshes and monitor them: a refresh that fails silently leaves stale data forever.
+- Views can nest views; each layer is expanded, so deep stacks can produce large plans.
 
-<Callout title="Fresh versus fast">
-The whole decision comes down to a trade. A view gives you correctness for free and pays at every read. A materialized view gives you speed and asks you to manage staleness with refreshes. Pick the side of that trade your feature actually needs.
+<Callout title="Fresh or fast: pick one on purpose">
+A view is always fresh and as slow as its query. A materialized view is as fast as a table and only as fresh as its last refresh. If staleness is unacceptable but the query is slow, look at indexes first, then at incremental summary tables kept up to date by triggers or application code.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Plain `VIEW` | Always current, no extra disk space | Re-runs the underlying query on every read — full cost every request |
-| Materialized view | Fast reads, since it reads stored rows; can be indexed | Data goes stale until `REFRESH`, and the refresh itself has a cost |
+| View | Always current, no storage, reusable and permission-friendly | No speedup; changing base tables can break it |
+| Materialized view | Fast reads of an expensive query | Stale between refreshes; storage; a plain refresh blocked a reader for 1.7 s |
+| `REFRESH ... CONCURRENTLY` | Readers not blocked (1.9 ms) | Needs a unique index; slower, more work per refresh |
+| `security_invoker` view | Caller's privileges and RLS apply | Callers need base-table privileges |
+| `WITH CHECK OPTION` | Writes can't leave the view | Only for updatable views |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Expecting fresh data from a materialized view** — it is only as fresh as the last `REFRESH`. Use a plain view or query the table directly if you need real-time data.
-- **Running a plain `REFRESH MATERIALIZED VIEW` on production without thinking** — this holds a lock that blocks reads while it rebuilds. For a non-blocking refresh, use `CONCURRENTLY` together with a unique index on the materialized view.
-- **Using a materialized view for data that changes every second** — if the data changes that fast, a plain view or a direct query is simpler and always correct, with no refresh schedule to manage.
-
-> 💡 Real-world example
->
-> **Analytics dashboards and reporting tools** — built on PostgreSQL commonly use a materialized view to pre-compute an expensive aggregate, then refresh it on a schedule instead of recomputing it on every request.
->
-> **Hasura- or PostgREST-based APIs** — often expose a view directly as an endpoint, using a materialized view for heavy reports where some staleness is acceptable, and a plain view for data that must always be current.
+- **"A view caches its result."** It stores no rows; it is re-run every time (and merged into your query).
+- **"A view makes a slow query fast."** The filter reached the base table, but the work is the same as the raw query.
+- **"`SELECT *` in a view tracks new columns."** It is expanded at creation: `book_titles` did not get `isbn`.
+- **"A materialized view refreshes itself."** Only when you `REFRESH` it: 1150 stayed 1150 while the table said 2150.
+- **"`REFRESH ... CONCURRENTLY` just works."** It needs a unique index, or fails with `55000`.
+- **"A role needs table access to read through a view."** Not by default: the view runs as its owner, unless `security_invoker` is set.
 
 export const quizViews = [
   {
-    q: 'What happens when you SELECT from a plain (non-materialized) view?',
+    q: 'What does a plain (non-materialized) view store?',
     options: [
-      'It returns rows stored on disk from the last refresh',
-      'It runs the underlying query fresh against current data',
-      'It always returns an empty result until refreshed',
-      'It modifies the underlying tables',
+      'The result rows of its query',
+      'Only the query definition; the query runs against current data on every use',
+      'A copy of the tables',
+      'An index',
     ],
     answer: 1,
+    explain: 'That is why a view is always current, and why the EXPLAIN of a view query shows the base tables.',
   },
   {
-    q: 'After inserting a new row into a base table, how does a materialized view reflect it?',
+    q: 'You insert a sale into the source table. When does a materialized view built on it show the new sale?',
     options: [
-      'Automatically and immediately',
-      'Never, materialized views are read-only snapshots forever',
-      'Only after you run REFRESH MATERIALIZED VIEW',
-      'Only after you DROP and recreate the table',
+      'Immediately',
+      'After REFRESH MATERIALIZED VIEW',
+      'After the next VACUUM',
+      'Never',
     ],
-    answer: 2,
+    answer: 1,
+    explain: 'In the lesson the view kept saying 1150 while the live table said 2150, until REFRESH.',
   },
   {
-    q: 'What does REFRESH MATERIALIZED VIEW CONCURRENTLY require?',
+    q: 'A nightly job runs `REFRESH MATERIALIZED VIEW CONCURRENTLY daily_totals` and fails with SQLSTATE 55000. What is missing?',
     options: [
-      'A unique index on the materialized view',
-      'A trigger on the base table',
-      'A superuser connection',
-      'The view to be empty',
+      'A foreign key',
+      'A unique index (without a WHERE clause) on the materialized view',
+      'A trigger on the source table',
+      'The WITH NO DATA option',
     ],
-    answer: 0,
+    answer: 1,
+    explain: 'The hint says: Create a unique index with no WHERE clause on one or more columns of the materialized view.',
+  },
+  {
+    q: 'A role has SELECT on a view but no privileges on the tables under it. What happens by default?',
+    options: [
+      'permission denied: it needs table privileges too',
+      'It reads the view fine: the view runs with its owner\'s privileges, unless security_invoker is set',
+      'The view returns no rows',
+      'It can also read the tables',
+    ],
+    answer: 1,
+    explain: 'After `ALTER VIEW ... SET (security_invoker = true)` the same role got `permission denied for table authors`.',
+  },
+  {
+    q: 'During a plain REFRESH MATERIALIZED VIEW, what did a concurrent SELECT experience in the lesson?',
+    options: [
+      'It read the old rows immediately',
+      'It waited (1.7 s) until the refresh finished, because REFRESH holds an ACCESS EXCLUSIVE lock',
+      'It failed with a deadlock',
+      'It read a half-refreshed result',
+    ],
+    answer: 1,
+    explain: 'With CONCURRENTLY the same SELECT returned the old rows in about 2 ms.',
   },
 ];
 

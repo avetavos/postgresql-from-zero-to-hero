@@ -1,6 +1,6 @@
 ---
-title: Views และ materialized views
-description: ตั้งชื่อให้ query ด้วย CREATE VIEW เพื่อผลลัพธ์ที่สดใหม่เสมอ หรือแคช query ที่มีต้นทุนสูงด้วย CREATE MATERIALIZED VIEW แล้ว REFRESH เมื่อต้องการ — และรู้ว่าควรใช้อันไหนเมื่อใด
+title: View และ Materialized View
+description: บันทึก query เป็น view (ถูกรวมเข้า query ของคุณ, update ได้, security_invoker) หรือ materialized view (เก็บ row, REFRESH, CONCURRENTLY และกฎ unique index) — พร้อม plan จริง, error เรื่องสิทธิ์ และหลักฐานว่าผู้อ่านถูกบล็อก
 sidebar:
   order: 4
 ---
@@ -10,179 +10,651 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-เมื่อ query ที่ซับซ้อนตัวเดิมโผล่มาเรื่อย ๆ ทั่วทั้งแอปพลิเคชันของคุณ การก็อป SQL ชุดนั้นไปวางทุกที่คือความเปราะบาง PostgreSQL ให้คุณตั้งชื่อให้ query แล้วใช้ชื่อนั้นเหมือน table มีสองแบบที่พฤติกรรมต่างกันมาก คือ **view** จะรัน query เบื้องหลังใหม่ทุกครั้งที่คุณอ่าน ส่วน **materialized view** จะเก็บผลลัพธ์ไว้และคำนวณใหม่เฉพาะเมื่อคุณสั่ง
+query บางตัวยาว หรือถูกใช้หลายที่ หรือ join และ aggregate แบบเดียวกันทุกครั้ง แทนที่จะคัดลอก SQL ไปทั่ว PostgreSQL ให้คุณตั้งชื่อให้ query แล้วใช้เหมือน table: **view** ส่วน **materialized view** ไปอีกขั้น คือเก็บ row ผลลัพธ์ของ query ไว้ แลกความสดกับความเร็ว
 
-เราใช้ table `authors` และ `books` จากโมดูล CRUD ซ้ำสำหรับตัวอย่างด้านล่าง
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ผลลัพธ์คัดลอกจาก `psql` การรันสอง session เป็นของจริง (โปรเซส `psql` สองตัวที่เริ่มพร้อมกัน) ตัวเลขเวลามาจาก Mac เครื่องนี้
 
-## view คือ query ที่ถูกเก็บไว้
+export const viewFlow = `flowchart LR
+  Q["Your query on the view"] --> V["View: stored SELECT, merged into your query"]
+  V --> T["Base tables, read now"]
+  Q2["Your query on the materialized view"] --> M["Materialized view: stored rows"]
+  M -. "REFRESH" .-> T`;
 
-`CREATE VIEW` บันทึก `SELECT` ไว้ภายใต้ชื่อหนึ่ง การอ่าน view จะรัน query นั้นใหม่กับข้อมูลปัจจุบัน ผลลัพธ์จึงเป็นข้อมูลล่าสุดเสมอ และไม่มีอะไรถูกเก็บไว้นอกจากตัวนิยาม (definition)
+<Mermaid code={viewFlow} title="View หรือ materialized view" />
+
+## ชุดข้อมูล
+
+ชุดข้อมูลมาตรฐานของ module อีกครั้ง สังเกตว่า `books` มี `copies_sold` ซึ่ง view ใช้
 
 ```sql
-CREATE VIEW author_book_counts AS
-SELECT a.id,
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+## view คือ query ที่บันทึกไว้
+
+`CREATE VIEW` บันทึก `SELECT` ไว้ใต้ชื่อ มันไม่เก็บ row ทุกครั้งที่คุณ query view PostgreSQL รัน query ที่บันทึกไว้กับข้อมูลปัจจุบัน ตัวนี้สรุปผู้เขียนแต่ละคน โดยเก็บผู้เขียนที่ไม่มีหนังสือไว้:
+
+```sql
+-- sql/create-view.sql
+CREATE VIEW author_sales AS
+SELECT a.id AS author_id,
        a.name,
-       count(b.id) AS book_count,
-       coalesce(sum(b.copies_sold), 0) AS total_sold
-FROM authors a
-LEFT JOIN books b ON b.author_id = a.id
+       count(b.id)                        AS books,
+       coalesce(sum(b.copies_sold), 0)    AS copies_sold
+FROM authors AS a
+LEFT JOIN books AS b ON b.author_id = a.id
 GROUP BY a.id, a.name;
+```
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/query-view.sql
+    SELECT * FROM author_sales ORDER BY name;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(`
+      SELECT * FROM author_sales ORDER BY name
+    `);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("""
+        SELECT * FROM author_sales ORDER BY name
+    """)
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx, `
+      SELECT * FROM author_sales ORDER BY name`)
+    defer rows.Close()
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query(
+        "SELECT * FROM author_sales ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ author_id |    name    | books | copies_sold 
+-----------+------------+-------+-------------
+         1 | Mara Linde |     2 |        1700
+         2 | Owen Pryce |     1 |         600
+         3 | Sela Vance |     0 |           0
+(3 rows)
+```
+
+```text
+$ (each snippet run once against the dataset above; multi-line driver output joined onto one line)
+[view]    Node.js (pg 8.23.0):    [ { author_id: '1', name: 'Mara Linde', books: '2', copies_sold: '1700' }, { author_id: '2', name: 'Owen Pryce', books: '1', copies_sold: '600' }, { author_id: '3', name: 'Sela Vance', books: '0', copies_sold: '0' } ]
+[view]    Python (psycopg 3.3.6): [(1, 'Mara Linde', 2, 1700), (2, 'Owen Pryce', 1, 600), (3, 'Sela Vance', 0, 0)]
+[view]    Go (pgx v5.11.0):       [1 Mara Linde 2 1700] [2 Owen Pryce 1 600] [3 Sela Vance 0 0]
+[view]    Rust (sqlx 0.9.0):      1 Mara Linde 2 1700 / 2 Owen Pryce 1 600 / 3 Sela Vance 0 0
+[refresh] Node.js:                [ { region: 'East', sales: '4', copies: '2150' }, { region: 'West', sales: '4', copies: '955' } ]
+[refresh] Python:                 [('East', 4, 2150), ('West', 4, 955)]
+[refresh] Go / Rust:              East 4 2150 / West 4 955
+```
+
+เพราะ view ไม่เก็บอะไร ผลของมันจึงสดเสมอ และการวาง plan ก็ไม่เสียเพิ่ม: view ถูกขยายเข้าไปใน query ของคุณก่อนการ optimize จึงไม่ใช่กล่องดำที่ planner ต้องรันก่อน ขอผู้เขียนหนึ่งคนแล้วตัวกรองไปถึง table ต้นทาง:
+
+```sql
+-- sql/view-plan.sql
+-- the view is not a black box: its query is merged into yours, and the filter reaches the base table
+EXPLAIN (COSTS OFF) SELECT * FROM author_sales WHERE name = 'Owen Pryce';
+```
+
+```text
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ GroupAggregate
+   Group Key: a.id
+   ->  Sort
+         Sort Key: a.id
+         ->  Hash Right Join
+               Hash Cond: (b.author_id = a.id)
+               ->  Seq Scan on books b
+               ->  Hash
+                     ->  Seq Scan on authors a
+                           Filter: (name = 'Owen Pryce'::text)
+(10 rows)
+```
+
+`Filter: (name = 'Owen Pryce')` อยู่บนการ scan `authors` ใต้ join: `GROUP BY` ของ view ไม่ได้ขัดขวางการผลักลงไป view เป็นเครื่องมือตั้งชื่อและใช้ซ้ำ ไม่ใช่ฟีเจอร์ด้านประสิทธิภาพ ([docs](https://www.postgresql.org/docs/18/sql-createview.html))
+
+### view จำ column ไม่ได้จำเจตนาของคุณ
+
+`SELECT *` ในนิยามของ view ถูกขยายครั้งเดียวตอนสร้าง เพิ่ม column ให้ table ทีหลังแล้ว view ไม่แสดง:
+
+```sql
+-- sql/select-star-frozen.sql
+CREATE VIEW book_titles AS SELECT * FROM books;
+ALTER TABLE books ADD COLUMN isbn text;
+SELECT * FROM book_titles LIMIT 1;
+SELECT * FROM books LIMIT 1;
 ```
 
 ```text
 CREATE VIEW
+ALTER TABLE
+ id |     title     | author_id | published | copies_sold 
+----+---------------+-----------+-----------+-------------
+  1 | Quiet Harbors |         1 |      2003 |         450
+(1 row)
+
+ id |     title     | author_id | published | copies_sold | isbn 
+----+---------------+-----------+-----------+-------------+------
+  1 | Quiet Harbors |         1 |      2003 |         450 | 
+(1 row)
 ```
 
-ตอนนี้ query view นี้ได้เหมือนเป็น table เลย:
+`book_titles` ยังมีห้า column; `books` ตอนนี้มีหก เขียน column ที่ต้องการให้ชัด
+
+### view ที่ update ได้ และ WITH CHECK OPTION
+
+view บน table เดียวที่ไม่มี aggregate, `DISTINCT` หรือ set operation เป็น **update ได้อัตโนมัติ**: `INSERT`, `UPDATE` และ `DELETE` บน view เปลี่ยน table ต้นทาง `WITH CHECK OPTION` เก็บ row ที่คุณเขียนผ่าน view ให้อยู่ใน `WHERE` ของ view เอง:
 
 ```sql
-SELECT name, book_count, total_sold
-FROM author_book_counts
-WHERE book_count > 0
-ORDER BY total_sold DESC;
+-- sql/updatable-view.sql
+CREATE VIEW recent_books AS
+SELECT id, title, author_id, published, copies_sold
+FROM books
+WHERE published >= 2010
+WITH CHECK OPTION;
+SELECT id, title, published FROM recent_books ORDER BY id;
+BEGIN;
+-- a simple view is updatable: this changes the base table
+UPDATE recent_books SET copies_sold = copies_sold + 10 WHERE title = 'Tidal Notes' RETURNING id, title, copies_sold;
+ROLLBACK;
 ```
 
 ```text
-      name       | book_count | total_sold
------------------+------------+------------
- Dana Whitfield  |          2 |       1800
- Marcus Lindqvist|          1 |        950
+CREATE VIEW
+ id |       title       | published 
+----+-------------------+-----------
+  2 | The Glass Orchard |      2018
+  3 | Tidal Notes       |      2011
+  4 | Unlinked Draft    |      2020
+(3 rows)
+
+BEGIN
+ id |    title    | copies_sold 
+----+-------------+-------------
+  3 | Tidal Notes |         610
+(1 row)
+
+UPDATE 1
+ROLLBACK
+```
+
+```sql
+-- @expect-error 44000
+INSERT INTO recent_books (title, author_id, published) VALUES ('Old Book', 1, 1999);
+```
+
+```text
+ERROR:  new row violates check option for view "recent_books"
+DETAIL:  Failing row contains (5, Old Book, 1, 1999, 0, null).
+```
+
+ถ้าไม่มี `WITH CHECK OPTION` การ insert นั้นสำเร็จ และ row ใหม่จะแค่มองไม่เห็นผ่าน view
+
+### Dependency
+
+view พึ่งพา table ต้นทาง และ PostgreSQL รู้เรื่องนี้ การ drop table ที่ view ใช้ถูกปฏิเสธ และข้อความลิสต์ทุกตัวที่พึ่งพา:
+
+```sql
+-- @expect-error 2BP01
+DROP TABLE books;
+```
+
+```text
+ERROR:  cannot drop table books because other objects depend on it
+DETAIL:  constraint sales_book_id_fkey on table sales depends on table books
+view author_sales depends on table books
+view book_titles depends on table books
+view recent_books depends on table books
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+```
+
+### security_invoker
+
+โดยค่าเริ่มต้น view รันด้วยสิทธิ์ของ **เจ้าของ** view ไม่ใช่ผู้เรียก นั่นเป็นฟีเจอร์ (ซ่อน column และ row ได้) และเป็นกับดัก (role ที่อ่าน table ไม่ได้อ่าน view ได้) PostgreSQL 15 เพิ่ม `security_invoker`: view จึงรันด้วยสิทธิ์ของผู้เรียก role ที่มี `SELECT` บน view เท่านั้น:
+
+```sql
+-- sql/security-invoker.sql
+CREATE ROLE report_reader NOLOGIN;
+GRANT USAGE ON SCHEMA public TO report_reader;
+GRANT SELECT ON author_sales TO report_reader;    -- the view only, no table privileges
+
+-- default: the view runs with its OWNER's privileges, so the reader gets data
+SET ROLE report_reader;
+SELECT name, books FROM author_sales ORDER BY name;
+RESET ROLE;
+
+-- security_invoker (PostgreSQL 15+): the view runs with the CALLER's privileges
+ALTER VIEW author_sales SET (security_invoker = true);
+```
+
+```text
+CREATE ROLE
+GRANT
+GRANT
+SET
+    name    | books 
+------------+-------
+ Mara Linde |     2
+ Owen Pryce |     1
+ Sela Vance |     0
+(3 rows)
+
+RESET
+ALTER VIEW
+```
+
+ทีนี้ role เดียวกัน หลัง `security_invoker = true`:
+
+```sql
+-- @expect-error 42501
+SET ROLE report_reader;
+SELECT name, books FROM author_sales ORDER BY name;
+```
+
+```text
+SET
+ERROR:  permission denied for table authors
+```
+
+เมื่อมี `security_invoker` ผู้เรียกต้องมีสิทธิ์บน table ต้นทางด้วย และนโยบาย row-level security ใช้กับผู้เรียกไม่ใช่เจ้าของ ([docs](https://www.postgresql.org/docs/18/sql-createview.html)) ล้าง role สาธิต:
+
+```sql
+-- sql/security-cleanup.sql
+RESET ROLE;
+DROP OWNED BY report_reader;
+DROP ROLE report_reader;
+ALTER VIEW author_sales RESET (security_invoker);
+```
+
+## materialized view เก็บผลลัพธ์ไว้
+
+`CREATE MATERIALIZED VIEW` รัน query ตอนนี้และเก็บ row การอ่านมันถูกเท่ากับอ่าน table และเก่าเท่ากับการ refresh ครั้งล่าสุด เรา insert ยอดขายใหม่ และ materialized view ไม่รู้เรื่องจนกว่าเราจะ `REFRESH`:
+
+```sql
+-- sql/materialized-view.sql
+CREATE MATERIALIZED VIEW sales_by_region AS
+SELECT region, count(*) AS sales, sum(copies) AS copies
+FROM sales
+GROUP BY region;
+SELECT * FROM sales_by_region ORDER BY region;
+-- the source changes, the materialized view does not
+INSERT INTO sales (book_id, region, copies) VALUES (3, 'East', 1000);
+SELECT 'view says' AS source, region, copies FROM sales_by_region WHERE region = 'East'
+UNION ALL
+SELECT 'live table', region, sum(copies) FROM sales WHERE region = 'East' GROUP BY region;
+REFRESH MATERIALIZED VIEW sales_by_region;
+SELECT 'after refresh' AS source, region, copies FROM sales_by_region WHERE region = 'East';
+```
+
+```text
+SELECT 2
+ region | sales | copies 
+--------+-------+--------
+ East   |     3 |   1150
+ West   |     3 |    950
+(2 rows)
+
+INSERT 0 1
+   source   | region | copies 
+------------+--------+--------
+ view says  | East   |   1150
+ live table | East   |   2150
+(2 rows)
+
+REFRESH MATERIALIZED VIEW
+    source     | region | copies 
+---------------+--------+--------
+ after refresh | East   |   2150
+(1 row)
+```
+
+`view says 1150`, `live table 2150`: materialized view คือ snapshot เป็นเครื่องมือที่เหมาะกับ aggregate แพง ๆ ที่ผู้อ่านหลายคนต้องการและเก่าเล็กน้อยได้ (dashboard, รายงานรายคืน)
+
+`WITH NO DATA` สร้างนิยามโดยไม่รัน query การอ่านก่อน refresh ครั้งแรกเป็น error:
+
+```sql
+-- sql/with-no-data.sql
+CREATE MATERIALIZED VIEW empty_mv AS SELECT region, sum(copies) AS copies FROM sales GROUP BY region WITH NO DATA;
+```
+
+```sql
+-- @expect-error 55000
+SELECT * FROM empty_mv;
+```
+
+```text
+ERROR:  materialized view "empty_mv" has not been populated
+HINT:  Use the REFRESH MATERIALIZED VIEW command.
+```
+
+### REFRESH บล็อกผู้อ่าน CONCURRENTLY ไม่บล็อก
+
+`REFRESH MATERIALIZED VIEW` ธรรมดาถือ lock `ACCESS EXCLUSIVE` ขณะเขียน row ที่เก็บใหม่ ผู้อ่านจึงรอ `REFRESH MATERIALIZED VIEW CONCURRENTLY` สร้างเนื้อหาใหม่ข้าง ๆ และสลับเฉพาะส่วนต่าง ผู้อ่านจึงอ่าน row เก่าต่อไปได้ มันต้องมี unique index บน materialized view ไม่เช่นนั้นปฏิเสธ:
+
+```sql
+-- @expect-error 55000
+REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region;
+```
+
+```text
+ERROR:  cannot refresh materialized view "public.sales_by_region" concurrently
+HINT:  Create a unique index with no WHERE clause on one or more columns of the materialized view.
+```
+
+```sql
+-- sql/concurrently.sql
+CREATE UNIQUE INDEX sales_by_region_region_idx ON sales_by_region (region);
+```
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/refresh-concurrently.sql
+    INSERT INTO sales (book_id, region, copies) VALUES (1, 'West', 5);
+    REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region;
+    SELECT * FROM sales_by_region ORDER BY region;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region');
+    const res = await pool.query('SELECT * FROM sales_by_region ORDER BY region');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region")
+    cur.execute("SELECT * FROM sales_by_region ORDER BY region")
+    rows = cur.fetchall()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region")
+    rows, err2 := conn.Query(ctx, "SELECT * FROM sales_by_region ORDER BY region")
+    defer rows.Close()
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_region")
+        .execute(&pool)
+        .await?;
+    let rows = sqlx::query("SELECT * FROM sales_by_region ORDER BY region")
+        .fetch_all(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+INSERT 0 1
+REFRESH MATERIALIZED VIEW
+ region | sales | copies 
+--------+-------+--------
+ East   |     4 |   2150
+ West   |     4 |    955
 (2 rows)
 ```
 
-เพราะ query รันทุกครั้ง การ insert หนังสือใหม่แล้วอ่าน view ซ้ำจะสะท้อนการเปลี่ยนแปลงทันที ต้นทุนคือทุกการอ่านต้องจ่ายราคาเต็มของ join และการ aggregate
+แต่ละ driver รัน refresh และอ่านเดียวกันหนึ่งครั้ง ผลลัพธ์อยู่ในบรรทัด `[refresh]` ของบล็อกใกล้ต้นหน้านี้
 
-## materialized view แคชผลลัพธ์ไว้
-
-`CREATE MATERIALIZED VIEW` รัน query หนึ่งครั้งและเก็บ row ต่าง ๆ ไว้บนดิสก์ เหมือนภาพ snapshot การอ่านจึงถูกพอ ๆ กับการอ่าน table — แต่ข้อมูลจะแช่แข็งอยู่ ณ ตอนที่สร้างหรือ refresh ครั้งล่าสุด
+เพื่อเห็นความต่าง เราต้องมี refresh ที่ช้าพอจะสังเกต materialized view นี้จึง *ช้าโดยตั้งใจ*: `pg_sleep(1)` รันหนึ่งครั้งต่อกลุ่ม ทำให้ทุก refresh ใช้ราว 2 วินาที
 
 ```sql
-CREATE MATERIALIZED VIEW author_book_counts_cached AS
-SELECT a.id,
-       a.name,
-       count(b.id) AS book_count,
-       coalesce(sum(b.copies_sold), 0) AS total_sold
-FROM authors a
-LEFT JOIN books b ON b.author_id = a.id
-GROUP BY a.id, a.name;
+-- sql/slow-mv.sql
+-- an artificially slow materialized view: pg_sleep makes the refresh take about 2 seconds
+CREATE MATERIALIZED VIEW slow_mv AS
+SELECT region, sum(copies) AS copies, pg_sleep(1) IS NOT NULL AS slept
+FROM sales GROUP BY region;
+CREATE UNIQUE INDEX slow_mv_region_idx ON slow_mv (region);
 ```
+
+session A refresh มัน ขณะที่ session B ลองอ่านหลังจากนั้น 0.3 วินาที:
 
 ```text
-SELECT 3
-```
-
-ถ้าตอนนี้คุณ insert หนังสือใหม่ materialized view จะ**ไม่**เปลี่ยน คุณต้องสั่ง `REFRESH` เองเพื่อดึงข้อมูลใหม่:
-
-```sql
-REFRESH MATERIALIZED VIEW author_book_counts_cached;
-```
-
-```text
+-- session A: script
+\timing on
+REFRESH MATERIALIZED VIEW slow_mv;
+-- session A: psql output
+Timing is on.
 REFRESH MATERIALIZED VIEW
+Time: 2011.220 ms (00:02.011)
+
+-- session B (starts 0.3 s later): script
+\o /dev/null
+SELECT pg_sleep(0.3);
+\o
+\timing on
+SELECT region, copies FROM slow_mv ORDER BY region;
+-- session B: psql output
+Timing is on.
+ region | copies 
+--------+--------
+ East   |   2150
+ West   |    955
+(2 rows)
+
+Time: 1710.883 ms (00:01.711)
 ```
 
-`REFRESH` ธรรมดาจะจับ lock ที่บล็อกการอ่านตลอดช่วงที่สร้างใหม่ หากต้องการให้ view ยังอ่านได้ระหว่าง refresh ให้เพิ่ม `CONCURRENTLY` — สิ่งนี้ต้องมี unique index บน materialized view ก่อน:
+B รอ **1.7 วินาที** คือเวลาที่เหลือของ refresh ของ A ทีนี้แบบเดียวกันด้วย `CONCURRENTLY`:
+
+```text
+-- session A: script
+\timing on
+REFRESH MATERIALIZED VIEW CONCURRENTLY slow_mv;
+-- session A: psql output
+Timing is on.
+REFRESH MATERIALIZED VIEW
+Time: 2016.039 ms (00:02.016)
+
+-- session B (same script as above): psql output
+Timing is on.
+ region | copies 
+--------+--------
+ East   |   2150
+ West   |    955
+(2 rows)
+
+Time: 1.892 ms
+```
+
+A ใช้เวลาเท่ากัน (2.0 วินาที) แต่ B อ่าน row เก่าได้ใน **1.9 ms** ราคาของ `CONCURRENTLY` คือ unique index และงานเพิ่มต่อการ refresh (มันคำนวณ diff) ([docs](https://www.postgresql.org/docs/18/sql-refreshmaterializedview.html))
+
+## เลือกระหว่างสองแบบ
+
+| คำถาม | View | Materialized view |
+|---|---|---|
+| ผลสดเสมอไหม? | ใช่ | ไม่ สดเท่า `REFRESH` ครั้งล่าสุด |
+| เร็วกว่า query ดิบไหม? | ไม่ (รวมเข้า query) | เร็ว: row คำนวณไว้แล้ว |
+| ใช้พื้นที่เก็บไหม? | ไม่ | ใช่ บวก index ที่คุณเพิ่ม |
+| ใคร refresh? | ไม่มีใคร ไม่ต้อง | คุณ: ตารางเวลา trigger หรือ `pg_cron` |
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ตั้ง job รายคืนเพื่อ refresh ตารางสรุป "โดยไม่บล็อกผู้อ่าน" ด้วย `CONCURRENTLY`:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "nightly cron: refresh without blocking readers"
+CREATE MATERIALIZED VIEW daily_totals AS
+SELECT region, sum(copies) AS copies FROM sales GROUP BY region;
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_totals;`}>
+
+มันรัน และล้มทุกคืน: `CONCURRENTLY` ต้องมี unique index บน materialized view และผู้ช่วยไม่เคยสร้าง materialized view ถูกสร้าง (ส่วนนั้นทำงาน) แล้ว refresh ถูกปฏิเสธ job บันทึก error ที่ไม่มีใครอ่าน และข้อมูลเก่าลง:
 
 ```sql
-CREATE UNIQUE INDEX idx_abc_cached_id ON author_book_counts_cached (id);
-
-REFRESH MATERIALIZED VIEW CONCURRENTLY author_book_counts_cached;
+-- sql/stb-setup.sql
+CREATE MATERIALIZED VIEW daily_totals AS
+SELECT region, sum(copies) AS copies FROM sales GROUP BY region;
 ```
 
-**ใน pgAdmin:** ทั้งสองอ็อบเจกต์จะปรากฏในแผนผัง browser — view อยู่ใต้ Views และ materialized view อยู่ใต้ Materialized Views การคลิกขวาที่ materialized view จะมีตัวเลือก Refresh ที่รันคำสั่งนั้นให้คุณ
+```sql
+-- @expect-error 55000
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_totals;
+```
 
-## ทั้งสองต่างกันอย่างไรตอนอ่าน
+```text
+ERROR:  cannot refresh materialized view "public.daily_totals" concurrently
+HINT:  Create a unique index with no WHERE clause on one or more columns of the materialized view.
+```
 
-ทั้งสองมีพฤติกรรมเหมือนกันตอนเขียน (`SELECT ... FROM name`) แต่ต่างกันที่เบื้องหลัง view ส่งต่อ query ของคุณไปยัง definition ที่เก็บไว้ ส่วน materialized view ตอบจาก row ที่เก็บไว้ของตัวเอง
+วิธีแก้คือ unique index (ที่นี่ `region` ไม่ซ้ำต่อ row) แล้ว refresh ทำงานขณะที่ผู้อ่านอ่านต่อได้:
 
-export const viewDiagram = `flowchart LR
-  subgraph View
-    Q1[SELECT from view] --> D1[Stored query definition]
-    D1 --> T1[(Live tables)]
-    T1 --> R1[Always-fresh result]
-  end
-  subgraph Materialized view
-    Q2[SELECT from matview] --> S2[(Stored result rows)]
-    S2 --> R2[Fast but possibly stale result]
-    RF[REFRESH] --> T2[(Live tables)]
-    T2 --> S2
-  end`;
+```sql
+-- sql/stb-fixed.sql
+CREATE UNIQUE INDEX daily_totals_region_idx ON daily_totals (region);
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_totals;
+SELECT * FROM daily_totals ORDER BY region;
+```
 
-<Mermaid code={viewDiagram} title="view ส่งผ่านไปยังข้อมูลสด ส่วน matview อ่าน row ที่แคชไว้ของตัวเอง" />
+```text
+CREATE INDEX
+REFRESH MATERIALIZED VIEW
+ region | copies 
+--------+--------
+ East   |   2150
+ West   |    955
+(2 rows)
+```
 
-## การเลือกระหว่างทั้งสอง
+</SpotTheBug>
 
-| คำถาม                                  | View                  | Materialized view              |
-|-------------------------------------------|-----------------------|--------------------------------|
-| ผลลัพธ์เป็นปัจจุบันเสมอหรือไม่?             | ใช่                   | เฉพาะหลัง refresh           |
-| การอ่านแต่ละครั้งมีต้นทุนแค่ไหน?               | ต้นทุน query เต็ม       | ถูก (อ่าน row ที่เก็บไว้)      |
-| ใช้ดิสก์เก็บผลลัพธ์หรือไม่?             | ไม่                    | ใช่                            |
-| ทำ index ให้ผลลัพธ์โดยตรงได้หรือไม่?        | ไม่                    | ได้                            |
-| เหมาะเมื่อ                                 | ข้อมูลเปลี่ยนบ่อย    | query มีต้นทุนสูง และยอมรับความล้าสมัยได้  |
+## Mental Model
 
-ใช้ view ธรรมดาเพื่อจัดระเบียบและนำ query ที่มีต้นทุนยอมรับได้ในทุกการอ่านมาใช้ซ้ำ หยิบ materialized view มาใช้เมื่อ query มีต้นทุนสูงจริง ๆ (join หนัก ๆ การ aggregate บน table ใหญ่) และแอปพลิเคชันของคุณทนกับผลลัพธ์ที่ตามหลังอยู่หลายนาทีหรือหลายชั่วโมงได้
+view คือ *นิยาม*: ชื่อของ query ที่ขยายเข้าไปในทุก query ที่ใช้มัน materialized view คือ *table ที่จำได้ว่าตัวเองสร้างอย่างไร*: row ถูกเก็บ และ `REFRESH` รันนิยามใหม่ ทุกคำถามเกี่ยวกับมันตามมาจากนี้: view สดเสมอและเร็วเท่า query ของมัน; materialized view อ่านเร็วและเก่าเท่า refresh ครั้งล่าสุด กินพื้นที่ มี index ได้ และต้องมีคน refresh
 
 ## เคล็ดลับและข้อควรระวัง
 
-- materialized view ล้าสมัยโดยนิยามจนกว่าคุณจะสั่ง refresh ดังนั้นตั้งตารางเวลา refresh (cron job, scheduled task หรือ trigger) ให้สอดคล้องกับความสดใหม่ที่ข้อมูลต้องการ
-- `REFRESH MATERIALIZED VIEW CONCURRENTLY` ต้องมี unique index บน view และทำงานหนักกว่า แต่ปล่อยให้อ่านต่อได้ระหว่างสร้างใหม่ การ refresh ธรรมดาเร็วกว่าแต่บล็อกผู้อ่าน
-- view ธรรมดาไม่เพิ่มพื้นที่จัดเก็บและไม่มีความล้าสมัย แต่ก็ไม่ได้ช่วยให้เร็วขึ้นเช่นกัน เพราะการอ่านแต่ละครั้งรัน query เต็มใหม่ ประโยชน์อยู่ที่การใช้ซ้ำและความอ่านง่าย ไม่ใช่ประสิทธิภาพ
-- โดยทั่วไปคุณเขียนผ่าน view ที่ aggregate หรือ join ไม่ได้ view แบบ table เดียวง่าย ๆ อาจ update ได้ แต่ทันทีที่คุณเพิ่ม `GROUP BY` หรือ join ให้ถือว่า view นั้นเป็นแบบอ่านอย่างเดียว
+- ใช้ view เพื่อตั้งชื่อและใช้ query ซ้ำ เพื่อเปิดอินเทอร์เฟซคงที่เหนือ table ที่เปลี่ยน หรือเพื่อจำกัดสิ่งที่ role มองเห็น
+- ระบุ column ให้ชัด; `SELECT *` ใน view ถูกตรึงตอนสร้าง
+- ตั้ง `security_invoker = true` บน view ที่ควรเคารพสิทธิ์ของผู้เรียกและ row-level security
+- เพิ่ม index ให้ materialized view เหมือน table; `REFRESH ... CONCURRENTLY` ต้องใช้ตัวที่ unique
+- ตั้งเวลา refresh และเฝ้าดู: refresh ที่ล้มเงียบ ๆ ทิ้งข้อมูลเก่าไปตลอด
+- view ซ้อน view ได้ แต่ละชั้นถูกขยาย กองลึกอาจสร้าง plan ใหญ่
 
-<Callout title="สดใหม่ versus เร็ว">
-การตัดสินใจทั้งหมดสรุปลงที่การแลกเปลี่ยน view ให้ความถูกต้องฟรี ๆ และจ่ายในทุกการอ่าน materialized view ให้ความเร็วและขอให้คุณจัดการความล้าสมัยด้วยการ refresh เลือกข้างของการแลกเปลี่ยนที่ฟีเจอร์ของคุณต้องการจริง ๆ
+<Callout title="สดหรือเร็ว: เลือกอย่างตั้งใจ">
+view สดเสมอและช้าเท่า query ของมัน materialized view เร็วเท่า table และสดเท่า refresh ครั้งล่าสุด ถ้ายอมให้เก่าไม่ได้แต่ query ช้า ให้ดู index ก่อน แล้วจึงดู summary table แบบ incremental ที่ trigger หรือโค้ดแอปอัปเดตให้
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `VIEW` ธรรมดา | ผลลัพธ์เป็นปัจจุบันเสมอ ไม่ใช้พื้นที่ดิสก์เพิ่ม | รัน query เบื้องหลังใหม่ทุกครั้งที่อ่าน ต้นทุนเต็มทุก request |
-| Materialized view | อ่านเร็วเพราะเป็นการอ่าน row ที่เก็บไว้ ทำ index บนผลลัพธ์ได้ | ข้อมูลล้าสมัยได้จนกว่าจะ `REFRESH` และตัว refresh เองก็มีต้นทุน |
+| View | สดเสมอ ไม่ใช้พื้นที่ ใช้ซ้ำและจัดการสิทธิ์ได้ดี | ไม่เร็วขึ้น; การเปลี่ยน table ต้นทางอาจทำให้พัง |
+| Materialized view | อ่าน query แพงได้เร็ว | เก่าระหว่าง refresh; พื้นที่; refresh ธรรมดาบล็อกผู้อ่าน 1.7 วินาที |
+| `REFRESH ... CONCURRENTLY` | ไม่บล็อกผู้อ่าน (1.9 ms) | ต้องมี unique index; ช้ากว่า งานมากกว่าต่อการ refresh |
+| view แบบ `security_invoker` | สิทธิ์และ RLS ของผู้เรียกมีผล | ผู้เรียกต้องมีสิทธิ์บน table ต้นทาง |
+| `WITH CHECK OPTION` | การเขียนไม่หลุดจาก view | เฉพาะ view ที่ update ได้ |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **คาดหวังข้อมูลสดจาก materialized view** — ข้อมูลสดแค่ ณ ตอน `REFRESH` ล่าสุดเท่านั้น ถ้าต้องการข้อมูล real-time ให้ใช้ view ธรรมดาหรือ query ตรง table แทน
-- **รัน `REFRESH MATERIALIZED VIEW` ธรรมดาบน production โดยไม่คิด** — คำสั่งนี้จับ lock ที่บล็อกการอ่านระหว่างสร้างใหม่ ถ้าต้องการ non-blocking refresh ต้องใช้ `CONCURRENTLY` ร่วมกับ unique index บน materialized view นั้น
-- **ใช้ materialized view กับข้อมูลที่เปลี่ยนทุกวินาที** — ถ้าข้อมูลเปลี่ยนเร็วมาก view ธรรมดาหรือ query ตรง ๆ จะง่ายกว่าและถูกต้องเสมอ ไม่ต้องมาคอยจัดการเรื่อง refresh schedule
-
-> 💡 ตัวอย่างจากของจริง
->
-> **Dashboard วิเคราะห์ข้อมูลและเครื่องมือ reporting** — ที่สร้างบน PostgreSQL มักใช้ materialized view เพื่อ pre-compute การ aggregate ที่มีต้นทุนสูง แล้ว refresh ตามตารางเวลาแทนที่จะคำนวณใหม่ทุก request
->
-> **API ที่สร้างบน Hasura หรือ PostgREST** — มักเปิด view ให้เป็น endpoint ตรง ๆ โดยใช้ materialized view สำหรับรายงานที่หนักและยอมรับความล้าสมัยได้ ส่วน view ธรรมดาสำหรับข้อมูลที่ต้องสดใหม่เสมอ
+- **"view เก็บผลลัพธ์ไว้ใน cache"** มันไม่เก็บ row; รันใหม่ทุกครั้ง (และรวมเข้า query ของคุณ)
+- **"view ทำให้ query ช้าเร็วขึ้น"** ตัวกรองไปถึง table ต้นทาง แต่งานเท่ากับ query ดิบ
+- **"`SELECT *` ใน view ตาม column ใหม่"** มันถูกขยายตอนสร้าง: `book_titles` ไม่ได้ `isbn`
+- **"materialized view refresh เอง"** เฉพาะเมื่อคุณ `REFRESH`: 1150 ยังเป็น 1150 ขณะ table บอก 2150
+- **"`REFRESH ... CONCURRENTLY` ใช้ได้เลย"** มันต้องมี unique index ไม่เช่นนั้นล้มด้วย `55000`
+- **"role ต้องเข้าถึง table เพื่ออ่านผ่าน view"** ไม่ใช่โดยค่าเริ่มต้น: view รันในฐานะเจ้าของ นอกจากตั้ง `security_invoker`
 
 export const quizViews = [
   {
-    q: 'เกิดอะไรขึ้นเมื่อคุณ SELECT จาก view ธรรมดา (ไม่ใช่ materialized)?',
+    q: 'view ธรรมดา (ไม่ materialized) เก็บอะไร?',
     options: [
-      'คืน row ที่เก็บไว้บนดิสก์จากการ refresh ครั้งล่าสุด',
-      'รัน query เบื้องหลังใหม่กับข้อมูลปัจจุบัน',
-      'คืนผลลัพธ์ว่างเสมอจนกว่าจะ refresh',
-      'แก้ไข table เบื้องหลัง',
+      'row ผลลัพธ์ของ query',
+      'เฉพาะนิยาม query; query รันกับข้อมูลปัจจุบันทุกครั้งที่ใช้',
+      'สำเนาของ table',
+      'index',
     ],
     answer: 1,
+    explain: 'จึงเป็นเหตุที่ view สดเสมอ และเหตุที่ EXPLAIN ของ query บน view แสดง table ต้นทาง',
   },
   {
-    q: 'หลังจาก insert row ใหม่ลงใน table พื้นฐาน materialized view จะเห็น row นั้นเมื่อไหร่?',
+    q: 'คุณ insert ยอดขายลง table ต้นทาง materialized view ที่สร้างบนมันแสดงยอดขายใหม่เมื่อไร?',
     options: [
-      'โดยอัตโนมัติและทันที',
-      'ไม่เลย materialized view เป็น snapshot แบบอ่านอย่างเดียวตลอดไป',
-      'เฉพาะหลังจากที่คุณรัน REFRESH MATERIALIZED VIEW',
-      'เฉพาะหลังจากที่คุณ DROP และสร้าง table ใหม่',
+      'ทันที',
+      'หลัง REFRESH MATERIALIZED VIEW',
+      'หลัง VACUUM ครั้งถัดไป',
+      'ไม่เคย',
     ],
-    answer: 2,
+    answer: 1,
+    explain: 'ในบทเรียน view ยังบอก 1150 ขณะที่ table จริงบอก 2150 จนกว่าจะ REFRESH',
   },
   {
-    q: 'REFRESH MATERIALIZED VIEW CONCURRENTLY ต้องการอะไร?',
+    q: 'job รายคืนรัน `REFRESH MATERIALIZED VIEW CONCURRENTLY daily_totals` แล้วล้มด้วย SQLSTATE 55000 ขาดอะไร?',
     options: [
-      'unique index บน materialized view',
-      'trigger บน table พื้นฐาน',
-      'การเชื่อมต่อแบบ superuser',
-      'view ต้องว่างเปล่า',
+      'foreign key',
+      'unique index (ไม่มี clause WHERE) บน materialized view',
+      'trigger บน table ต้นทาง',
+      'ตัวเลือก WITH NO DATA',
     ],
-    answer: 0,
+    answer: 1,
+    explain: 'hint บอก: Create a unique index with no WHERE clause on one or more columns of the materialized view',
+  },
+  {
+    q: 'role มี SELECT บน view แต่ไม่มีสิทธิ์บน table ข้างใต้ โดยค่าเริ่มต้นเกิดอะไรขึ้น?',
+    options: [
+      'permission denied: ต้องมีสิทธิ์บน table ด้วย',
+      'อ่าน view ได้ปกติ: view รันด้วยสิทธิ์ของเจ้าของ นอกจากตั้ง security_invoker',
+      'view ไม่คืน row',
+      'อ่าน table ได้ด้วย',
+    ],
+    answer: 1,
+    explain: 'หลัง `ALTER VIEW ... SET (security_invoker = true)` role เดียวกันได้ `permission denied for table authors`',
+  },
+  {
+    q: 'ระหว่าง REFRESH MATERIALIZED VIEW ธรรมดา SELECT ที่ทำพร้อมกันเจออะไรในบทเรียน?',
+    options: [
+      'อ่าน row เก่าได้ทันที',
+      'รอ (1.7 วินาที) จน refresh จบ เพราะ REFRESH ถือ lock ACCESS EXCLUSIVE',
+      'ล้มด้วย deadlock',
+      'อ่านผลที่ refresh ไปครึ่งเดียว',
+    ],
+    answer: 1,
+    explain: 'ด้วย CONCURRENTLY SELECT เดียวกันคืน row เก่าใน 2 ms',
   },
 ];
 
