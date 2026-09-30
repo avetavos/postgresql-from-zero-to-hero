@@ -1,6 +1,6 @@
 ---
-title: Storing JSON with JSONB
-description: Use the jsonb type to store flexible documents, reach inside them with operators like ->, ->>, #>, @>, and ?, update them with jsonb_set, and index containment queries with GIN.
+title: JSONB
+description: Store and query JSON documents with jsonb — operators, containment, jsonpath and JSON_TABLE, partial updates that do and do not preserve siblings, GIN indexing with real timings, and the TOAST cost of rewriting big documents.
 sidebar:
   order: 2
 ---
@@ -9,206 +9,283 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 Sometimes a row needs to hold data whose shape is not fixed in advance: a product whose attributes differ by category, an event payload from a third party, or user preferences that grow over time. PostgreSQL lets a single column store a whole JSON document with the `jsonb` type, and then query inside it as if its keys were columns.
 
-For this lesson we use a table of products where each row carries a flexible `attributes` document.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The `sql` fences run top to bottom in one empty database, outputs are pasted from `psql`, and timings are single runs from this Mac.
 
 ## Creating a JSONB column
 
-The `jsonb` type stores JSON in a decomposed binary form. Compared with the plain `json` type, it strips insignificant whitespace, removes duplicate keys, does not preserve key order, and — crucially — can be indexed.
+The `jsonb` type stores JSON in a decomposed binary form. Compared with the plain `json` type, it strips insignificant whitespace, keeps only the last of duplicate keys, does not preserve key order, and, crucially, can be indexed. This lesson uses a table of products where each row carries a flexible `attributes` document.
 
 ```sql
+-- sql/setup.sql
 CREATE TABLE products (
   id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  name       text NOT NULL,
+  name       text  NOT NULL,
   attributes jsonb NOT NULL DEFAULT '{}'
 );
 ```
 
 ## Storing a document
 
-Inserting a row is ordinary `INSERT`; the document is just a JSON string that PostgreSQL parses into `jsonb`. From a driver you pass the JSON as a parameter rather than building strings by hand.
+Insert JSON as a string literal; PostgreSQL parses and validates it. Note how `jsonb` prints each document: its keys come out in its own order (shorter keys first, then alphabetical), not in the order you wrote them:
+
+```sql
+-- sql/insert-documents.sql
+INSERT INTO products (name, attributes) VALUES
+  ('Trail Jacket',  '{"color": "teal",   "price": 129.5, "tags": ["outdoor", "rain"],    "specs": {"weight_g": 480, "waterproof": true}}'),
+  ('City Backpack', '{"color": "black",  "price": 89,    "tags": ["urban"],              "specs": {"weight_g": 900, "waterproof": false}}'),
+  ('Camp Stove',    '{"color": "silver", "price": 45,    "tags": ["outdoor", "cooking"], "specs": {"weight_g": 350}}'),
+  ('Wool Socks',    '{"color": "teal",   "price": 12.5,  "tags": ["outdoor"]}'),
+  ('Rain Poncho',   '{"color": "yellow", "price": 9,     "tags": ["rain", "outdoor"],    "specs": {"waterproof": true}}');
+SELECT id, name, attributes FROM products ORDER BY id;
+```
+
+```text
+INSERT 0 5
+ id |     name      |                                                   attributes                                                   
+----+---------------+----------------------------------------------------------------------------------------------------------------
+  1 | Trail Jacket  | {"tags": ["outdoor", "rain"], "color": "teal", "price": 129.5, "specs": {"weight_g": 480, "waterproof": true}}
+  2 | City Backpack | {"tags": ["urban"], "color": "black", "price": 89, "specs": {"weight_g": 900, "waterproof": false}}
+  3 | Camp Stove    | {"tags": ["outdoor", "cooking"], "color": "silver", "price": 45, "specs": {"weight_g": 350}}
+  4 | Wool Socks    | {"tags": ["outdoor"], "color": "teal", "price": 12.5}
+  5 | Rain Poncho   | {"tags": ["rain", "outdoor"], "color": "yellow", "price": 9, "specs": {"waterproof": true}}
+(5 rows)
+```
+
+`json` and `jsonb` differ on exactly the points above. The same literal, with extra whitespace and a duplicate key:
+
+```sql
+-- sql/json-vs-jsonb.sql
+SELECT '{"b": 1,   "a": 2, "a": 3}'::json  AS as_json,
+       '{"b": 1,   "a": 2, "a": 3}'::jsonb AS as_jsonb;
+```
+
+```text
+          as_json           |     as_jsonb     
+----------------------------+------------------
+ {"b": 1,   "a": 2, "a": 3} | {"a": 3, "b": 1}
+(1 row)
+```
+
+`json` keeps the text as written (whitespace, both `"a"` keys, order). `jsonb` normalizes it: `{"a": 3, "b": 1}`, the last duplicate wins ([docs](https://www.postgresql.org/docs/18/datatype-json.html)). Invalid JSON is rejected at insert time, with the exact spot:
+
+```sql
+-- @expect-error 22P02
+INSERT INTO products (name, attributes) VALUES ('Broken', '{"color": }');
+```
+
+```text
+ERROR:  invalid input syntax for type json
+LINE 1: ...NTO products (name, attributes) VALUES ('Broken', '{"color":...
+                                                             ^
+DETAIL:  Expected JSON value, but found "}".
+CONTEXT:  JSON data, line 1: {"color": }
+```
+
+From code, PostgreSQL drivers turn a `jsonb` column into a native structure. Each driver ran this query once against the products above:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    INSERT INTO products (name, attributes) VALUES
-      ('Trail Runner', '{"color": "teal", "sizes": [8, 9, 10], "waterproof": true}'),
-      ('City Loafer',  '{"color": "brown", "sizes": [9, 10, 11], "leather": "suede"}');
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await pool.query(
-      'INSERT INTO products (name, attributes) VALUES ($1, $2)',
-      ['Trail Runner', { color: 'teal', sizes: [8, 9, 10], waterproof: true }],
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    import json
-
-    cur.execute(
-        "INSERT INTO products (name, attributes) VALUES (%s, %s)",
-        ("Trail Runner", json.dumps({"color": "teal", "sizes": [8, 9, 10], "waterproof": True})),
-    )
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    attrs := map[string]any{"color": "teal", "sizes": []int{8, 9, 10}, "waterproof": true}
-    _, err := conn.Exec(ctx,
-        "INSERT INTO products (name, attributes) VALUES ($1, $2)",
-        "Trail Runner", attrs)
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let attrs = serde_json::json!({ "color": "teal", "sizes": [8, 9, 10], "waterproof": true });
-    sqlx::query("INSERT INTO products (name, attributes) VALUES ($1, $2)")
-        .bind("Trail Runner")
-        .bind(attrs)
-        .execute(&pool)
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-**In pgAdmin:** the `attributes` cell shows the JSON document; double-click it to open a larger editor view of the value.
-
-## Reaching inside a document
-
-A handful of operators pull values out of a `jsonb` value. The two you reach for most are `->` and `->>`.
-
-| Operator | Returns                          | Example                          |
-|----------|----------------------------------|----------------------------------|
-| `->`     | A `jsonb` value (object or array)| `attributes -> 'sizes'`          |
-| `->>`    | The value as `text`              | `attributes ->> 'color'`         |
-| `#>`     | A `jsonb` value at a path        | `attributes #> '{sizes,0}'`      |
-| `#>>`    | Text at a path                   | `attributes #>> '{sizes,0}'`     |
-
-The difference between `->` and `->>` matters: `->` keeps the result as `jsonb` (good for chaining further into nested data), while `->>` gives you plain `text` you can compare with strings or cast to a number.
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    SELECT name,
-           attributes ->> 'color'        AS color,
-           attributes -> 'sizes'         AS sizes,
-           attributes #>> '{sizes, 0}'   AS smallest_size
-    FROM products;
+    -- sql/native-read.sql
+    SELECT attributes FROM products WHERE name = 'Trail Jacket';
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(
-      `SELECT name,
-              attributes ->> 'color'      AS color,
-              attributes -> 'sizes'       AS sizes,
-              attributes #>> '{sizes, 0}' AS smallest_size
-       FROM products`,
+      "SELECT attributes FROM products WHERE name = 'Trail Jacket'",
     );
-    console.log(res.rows);
+    const attributes = res.rows[0].attributes;
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    cur.execute(
-        """
-        SELECT name,
-               attributes ->> 'color'      AS color,
-               attributes -> 'sizes'       AS sizes,
-               attributes #>> '{sizes, 0}' AS smallest_size
-        FROM products
-        """
-    )
-    rows = cur.fetchall()
+    cur.execute("SELECT attributes FROM products WHERE name = 'Trail Jacket'")
+    attributes = cur.fetchone()[0]
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    rows, err := conn.Query(ctx, `
-        SELECT name,
-               attributes ->> 'color'      AS color,
-               attributes -> 'sizes'       AS sizes,
-               attributes #>> '{sizes, 0}' AS smallest_size
-        FROM products`)
+    var attributes map[string]any
+    err := conn.QueryRow(ctx,
+        "SELECT attributes FROM products WHERE name = 'Trail Jacket'").Scan(&attributes)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let rows = sqlx::query(
-        "SELECT name, \
-                attributes ->> 'color'      AS color, \
-                attributes -> 'sizes'       AS sizes, \
-                attributes #>> '{sizes, 0}' AS smallest_size \
-         FROM products",
+    // sqlx decodes jsonb into serde_json::Value only with its "json" feature;
+    // without it, ask PostgreSQL for the text form
+    let attributes: String = sqlx::query_scalar(
+        "SELECT attributes::text FROM products WHERE name = 'Trail Jacket'",
     )
-    .fetch_all(&pool)
+    .fetch_one(&pool)
     .await?;
     ```
   </TabItem>
 </Tabs>
 
 ```text
-     name     | color |   sizes    | smallest_size
---------------+-------+------------+---------------
- Trail Runner | teal  | [8, 9, 10] | 8
- City Loafer  | brown | [9, 10, 11]| 9
-(2 rows)
+                                                   attributes                                                   
+----------------------------------------------------------------------------------------------------------------
+ {"tags": ["outdoor", "rain"], "color": "teal", "price": 129.5, "specs": {"weight_g": 480, "waterproof": true}}
+(1 row)
+```
+
+```text
+$ (each snippet run once against the products above)
+[containment with a parameter]  Node.js (pg 8.23.0):       [ 'Trail Jacket', 'Wool Socks' ]
+[containment with a parameter]  Python (psycopg 3.3.6):    ['Trail Jacket', 'Wool Socks']
+[containment with a parameter]  Go (pgx v5.11.0):          [Trail Jacket Wool Socks]
+[containment with a parameter]  Rust (sqlx 0.9.0):         ["Trail Jacket", "Wool Socks"]
+[jsonb column read natively]    Node.js:                   object 129.5 480
+[jsonb column read natively]    Python:                    dict 129.5 480
+[jsonb column read natively]    Go:                        map[string]interface {} 129.5 480
+[jsonb column read natively]    Rust (text via ::text):    String {"tags": ["outdoor", "rain"], "color": "teal", "price": 129.5, "specs": {"weight_g": 480, "waterproof": true}}
+```
+
+The last four lines show the native read: Node.js, Python and Go hand you an object, a `dict` and a `map`, so `attributes["price"]` just works. The first four lines are the parameterized containment query from the next sections. (Rust's `sqlx` needs its `json` feature for `serde_json::Value`, which is not enabled in this run, so the snippet reads the text form.)
+
+## Reaching inside a document
+
+`->` returns a `jsonb` value, `->>` returns `text`, and `#>` / `#>>` follow a path. A missing key returns `NULL`, not an error:
+
+```sql
+-- sql/operators.sql
+SELECT name,
+       attributes -> 'color'                     AS color_jsonb,
+       attributes ->> 'color'                    AS color_text,
+       attributes #>> '{specs,weight_g}'         AS weight,
+       attributes -> 'tags' -> 0                 AS first_tag,
+       attributes ->> 'missing'                  AS missing_key
+FROM products
+ORDER BY id;
+```
+
+```text
+     name      | color_jsonb | color_text | weight | first_tag | missing_key 
+---------------+-------------+------------+--------+-----------+-------------
+ Trail Jacket  | "teal"      | teal       | 480    | "outdoor" | 
+ City Backpack | "black"     | black      | 900    | "urban"   | 
+ Camp Stove    | "silver"    | silver     | 350    | "outdoor" | 
+ Wool Socks    | "teal"      | teal       |        | "outdoor" | 
+ Rain Poncho   | "yellow"    | yellow     |        | "rain"    | 
+(5 rows)
+```
+
+Because `->>` gives text, arithmetic and numeric comparison need a cast:
+
+```sql
+-- sql/numeric-cast.sql
+SELECT name, (attributes ->> 'price')::numeric AS price
+FROM products
+WHERE (attributes ->> 'price')::numeric > 40
+ORDER BY price DESC;
+```
+
+```text
+     name      | price 
+---------------+-------
+ Trail Jacket  | 129.5
+ City Backpack |    89
+ Camp Stove    |    45
+(3 rows)
 ```
 
 ## Filtering with containment and key tests
 
-Two operators are built for searching. The containment operator `@>` asks whether the left document contains the right one, and the existence operator `?` asks whether a top-level key is present.
+`@>` asks "does the left document contain the right one?". It matches nested objects and array elements, which is exactly what makes it indexable. `?`, `?|` and `?&` test for keys:
+
+```sql
+-- sql/containment.sql
+SELECT name FROM products WHERE attributes @> '{"color": "teal"}' ORDER BY id;
+-- nested keys and array elements work in containment too
+SELECT name FROM products WHERE attributes @> '{"specs": {"waterproof": true}, "tags": ["rain"]}' ORDER BY id;
+-- key existence, any key, all keys
+SELECT name FROM products WHERE attributes ? 'specs' ORDER BY id;
+SELECT name FROM products WHERE attributes ?| array['specs', 'discount'] ORDER BY id;
+SELECT name FROM products WHERE attributes ?& array['specs', 'tags'] ORDER BY id;
+```
+
+```text
+     name     
+--------------
+ Trail Jacket
+ Wool Socks
+(2 rows)
+
+     name     
+--------------
+ Trail Jacket
+ Rain Poncho
+(2 rows)
+
+     name      
+---------------
+ Trail Jacket
+ City Backpack
+ Camp Stove
+ Rain Poncho
+(4 rows)
+
+     name      
+---------------
+ Trail Jacket
+ City Backpack
+ Camp Stove
+ Rain Poncho
+(4 rows)
+
+     name      
+---------------
+ Trail Jacket
+ City Backpack
+ Camp Stove
+ Rain Poncho
+(4 rows)
+```
+
+The containment query with a parameter, from each driver (pass the document as a JSON string and cast with `::jsonb`):
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    -- products whose document contains color = teal
-    SELECT name FROM products
-    WHERE attributes @> '{"color": "teal"}';
-
-    -- products that have a top-level "leather" key
-    SELECT name FROM products
-    WHERE attributes ? 'leather';
+    -- sql/param-containment.sql
+    SELECT name FROM products WHERE attributes @> $1::jsonb ORDER BY name \bind '{"color": "teal"}' \g
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const teal = await pool.query(
-      "SELECT name FROM products WHERE attributes @> $1",
-      [{ color: 'teal' }],
-    );
-    const leather = await pool.query(
-      "SELECT name FROM products WHERE attributes ? 'leather'",
+    const res = await pool.query(
+      'SELECT name FROM products WHERE attributes @> $1::jsonb ORDER BY name',
+      [JSON.stringify({ color: 'teal' })],
     );
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute(
-        "SELECT name FROM products WHERE attributes @> %s",
+        "SELECT name FROM products WHERE attributes @> %s::jsonb ORDER BY name",
         (json.dumps({"color": "teal"}),),
     )
-    teal = cur.fetchall()
-    cur.execute("SELECT name FROM products WHERE attributes ? 'leather'")
-    leather = cur.fetchall()
+    rows = cur.fetchall()
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx,
-        "SELECT name FROM products WHERE attributes @> $1",
-        map[string]any{"color": "teal"})
+        "SELECT name FROM products WHERE attributes @> $1::jsonb ORDER BY name",
+        `{"color": "teal"}`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let teal = sqlx::query("SELECT name FROM products WHERE attributes @> $1")
-        .bind(serde_json::json!({ "color": "teal" }))
+    let rows = sqlx::query("SELECT name FROM products WHERE attributes @> $1::jsonb ORDER BY name")
+        .bind(r#"{"color": "teal"}"#)
         .fetch_all(&pool)
         .await?;
     ```
@@ -216,96 +293,473 @@ Two operators are built for searching. The containment operator `@>` asks whethe
 </Tabs>
 
 ```text
-     name
+     name     
 --------------
- Trail Runner
+ Trail Jacket
+ Wool Socks
+(2 rows)
+```
+
+**jsonpath** ([docs](https://www.postgresql.org/docs/18/functions-json.html#FUNCTIONS-SQLJSON-PATH)) is a small query language over the document. `jsonb_path_query` extracts, `@?` tests existence with a filter, `jsonb_path_exists` is the function form:
+
+```sql
+-- sql/jsonpath.sql
+SELECT name, jsonb_path_query(attributes, '$.specs.weight_g') AS weight_g
+FROM products ORDER BY id;
+SELECT name FROM products WHERE attributes @? '$.specs ? (@.weight_g < 500)' ORDER BY id;
+SELECT name FROM products WHERE jsonb_path_exists(attributes, '$.tags[*] ? (@ == "cooking")') ORDER BY id;
+```
+
+```text
+     name      | weight_g 
+---------------+----------
+ Trail Jacket  | 480
+ City Backpack | 900
+ Camp Stove    | 350
+(3 rows)
+
+     name     
+--------------
+ Trail Jacket
+ Camp Stove
+(2 rows)
+
+    name    
+------------
+ Camp Stove
 (1 row)
+```
+
+PostgreSQL 17 added `JSON_TABLE`, which turns a document into relational columns in one clause (missing values are `NULL`):
+
+```sql
+-- sql/json-table.sql
+SELECT p.name, jt.color, jt.price, jt.weight_g
+FROM products AS p,
+     JSON_TABLE(p.attributes, '$' COLUMNS (
+       color    text    PATH '$.color',
+       price    numeric PATH '$.price',
+       weight_g int     PATH '$.specs.weight_g'
+     )) AS jt
+ORDER BY p.id;
+```
+
+```text
+     name      | color  | price | weight_g 
+---------------+--------+-------+----------
+ Trail Jacket  | teal   | 129.5 |      480
+ City Backpack | black  |    89 |      900
+ Camp Stove    | silver |    45 |      350
+ Wool Socks    | teal   |  12.5 |         
+ Rain Poncho   | yellow |     9 |         
+(5 rows)
+```
+
+And to turn array elements into rows, `jsonb_array_elements_text`; to go the other way, `jsonb_build_object` and `jsonb_agg`:
+
+```sql
+-- sql/expand-arrays.sql
+SELECT tag, count(*) AS products
+FROM products, jsonb_array_elements_text(attributes -> 'tags') AS tag
+GROUP BY tag
+ORDER BY products DESC, tag;
+```
+
+```text
+   tag   | products 
+---------+----------
+ outdoor |        4
+ rain    |        2
+ cooking |        1
+ urban   |        1
+(4 rows)
+```
+
+```sql
+-- sql/build-and-agg.sql
+SELECT jsonb_build_object('total', count(*), 'names', jsonb_agg(name ORDER BY name)) AS summary
+FROM products
+WHERE attributes @> '{"tags": ["outdoor"]}';
+```
+
+```text
+                                      summary                                       
+------------------------------------------------------------------------------------
+ {"names": ["Camp Stove", "Rain Poncho", "Trail Jacket", "Wool Socks"], "total": 4}
+(1 row)
+```
+
+### The two traps
+
+The first: comparing `->` output with a bare string. `->` returns `jsonb`, so the right-hand side is parsed as JSON, and `teal` is not valid JSON. The error is a JSON parse error, not a type error:
+
+```sql
+-- @expect-error 22P02
+SELECT name FROM products WHERE attributes -> 'color' = 'teal';
+```
+
+```text
+ERROR:  invalid input syntax for type json
+LINE 1: ...ECT name FROM products WHERE attributes -> 'color' = 'teal';
+                                                                ^
+DETAIL:  Token "teal" is invalid.
+CONTEXT:  JSON data, line 1: teal
+```
+
+Both of these work: compare against a JSON string (`'"teal"'`), or extract text with `->>` and compare with an ordinary string:
+
+```sql
+-- sql/equality-forms.sql
+SELECT name FROM products WHERE attributes -> 'color' = '"teal"' ORDER BY id;
+SELECT name FROM products WHERE attributes ->> 'color' = 'teal' ORDER BY id;
+```
+
+```text
+     name     
+--------------
+ Trail Jacket
+ Wool Socks
+(2 rows)
+
+     name     
+--------------
+ Trail Jacket
+ Wool Socks
+(2 rows)
+```
+
+The second trap: `->>` returns **text**, and text compares character by character. `'9' > '50'` is true, `'129.5' > '50'` is false. This is a silent wrong answer, and the *Reading AI-generated code* section below is built on it:
+
+```sql
+-- sql/text-comparison-trap.sql
+-- ->> returns text, and text compares character by character: '9' sorts after '89'
+SELECT name, attributes ->> 'price' AS price_text
+FROM products
+WHERE attributes ->> 'price' > '50'
+ORDER BY name;
+```
+
+```text
+     name      | price_text 
+---------------+------------
+ City Backpack | 89
+ Rain Poncho   | 9
+(2 rows)
 ```
 
 ## Updating part of a document
 
-To change one field without rewriting the whole document, use `jsonb_set`. It takes the column, a path as a text array, and the new value as `jsonb`.
+`||` merges two documents, but only at the top level. Setting `specs` this way **replaces the whole `specs` object** (the `waterproof` key is gone). `jsonb_set(doc, path, value)` changes one nested path and keeps its siblings. The optional fourth argument `create_missing` (default `true`) decides whether a missing last key is created; `-` and `#-` remove a key or a nested key. Everything below is in transactions that roll back:
 
 ```sql
-UPDATE products
-SET attributes = jsonb_set(attributes, '{color}', '"midnight"')
-WHERE name = 'Trail Runner'
-RETURNING name, attributes ->> 'color' AS color;
+-- sql/update-documents.sql
+BEGIN;
+-- || merges TOP-LEVEL keys only: the whole "specs" object is replaced
+UPDATE products SET attributes = attributes || '{"specs": {"weight_g": 470}}' WHERE name = 'Trail Jacket'
+RETURNING name, attributes -> 'specs' AS specs_after_concat;
+ROLLBACK;
+BEGIN;
+-- jsonb_set changes one nested path and keeps its siblings
+UPDATE products SET attributes = jsonb_set(attributes, '{specs,weight_g}', '470') WHERE name = 'Trail Jacket'
+RETURNING name, attributes -> 'specs' AS specs_after_set;
+-- missing path: create_missing (default true) creates the last key, false leaves the row alone
+UPDATE products SET attributes = jsonb_set(attributes, '{specs,fabric}', '"nylon"', false) WHERE name = 'Trail Jacket'
+RETURNING attributes -> 'specs' AS specs_create_missing_false;
+-- remove a key, and a nested key
+UPDATE products SET attributes = attributes - 'tags' #- '{specs,waterproof}' WHERE name = 'Trail Jacket'
+RETURNING attributes;
+ROLLBACK;
 ```
 
 ```text
-     name     |  color
---------------+----------
- Trail Runner | midnight
+BEGIN
+     name     | specs_after_concat 
+--------------+--------------------
+ Trail Jacket | {"weight_g": 470}
 (1 row)
-```
 
-To add a brand-new field you can also use the concatenation operator: `attributes || '{"on_sale": true}'` merges the right document into the left.
+UPDATE 1
+ROLLBACK
+BEGIN
+     name     |            specs_after_set            
+--------------+---------------------------------------
+ Trail Jacket | {"weight_g": 470, "waterproof": true}
+(1 row)
+
+UPDATE 1
+      specs_create_missing_false       
+---------------------------------------
+ {"weight_g": 470, "waterproof": true}
+(1 row)
+
+UPDATE 1
+                          attributes                           
+---------------------------------------------------------------
+ {"color": "teal", "price": 129.5, "specs": {"weight_g": 470}}
+(1 row)
+
+UPDATE 1
+ROLLBACK
+```
 
 ## Indexing for containment queries
 
-Without an index, a `@>` query scans every row and tests each document. A **GIN** index changes that: it indexes the keys and values inside the `jsonb`, so containment and key-existence lookups become fast.
+Without an index, a containment query reads every row. Here is a 100 000-row `catalog` with the same kind of document; the query asks for teal items tagged `t7`:
 
 ```sql
-CREATE INDEX idx_products_attributes ON products USING gin (attributes);
+-- sql/catalog-setup.sql
+CREATE TABLE catalog (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  attributes jsonb NOT NULL
+);
+INSERT INTO catalog (attributes)
+SELECT jsonb_build_object(
+         'color',  (ARRAY['teal', 'black', 'silver', 'yellow', 'red', 'green', 'blue', 'white'])[1 + h % 8],
+         'price',  5 + (h / 8) % 200,
+         'tags',   jsonb_build_array('t' || (h / 1600) % 60, 't' || (h / 96000) % 97),
+         'specs',  jsonb_build_object('weight_g', 100 + (h / 7) % 900))
+FROM (SELECT ('x' || substr(md5(g::text), 1, 7))::bit(28)::int AS h FROM generate_series(1, 100000) g) s;
+ANALYZE catalog;
+SELECT count(*) AS rows, pg_size_pretty(pg_relation_size('catalog')) AS heap FROM catalog;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+ANALYZE
+  rows  | heap  
+--------+-------
+ 100000 | 15 MB
+(1 row)
+```
+
+```sql
+-- sql/catalog-no-index.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM catalog WHERE attributes @> '{"color": "teal", "tags": ["t7"]}';
+```
+
+```text
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Aggregate (actual time=15.556..15.561 rows=1.00 loops=1)
+   ->  Seq Scan on catalog (actual time=0.133..15.531 rows=330.00 loops=1)
+         Filter: (attributes @> '{"tags": ["t7"], "color": "teal"}'::jsonb)
+         Rows Removed by Filter: 99670
+ Planning Time: 0.215 ms
+ Execution Time: 15.599 ms
+(6 rows)
+```
+
+A GIN index with `jsonb_path_ops` (smaller and faster for `@>`; the default `jsonb_ops` class also supports `?`) turns it into an index lookup:
+
+```sql
+-- sql/catalog-gin.sql
+CREATE INDEX catalog_attr_gin ON catalog USING gin (attributes jsonb_path_ops);
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM catalog WHERE attributes @> '{"color": "teal", "tags": ["t7"]}';
+SELECT pg_size_pretty(pg_relation_size('catalog_attr_gin')) AS gin_size;
 ```
 
 ```text
 CREATE INDEX
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
+ Aggregate (actual time=0.729..0.733 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on catalog (actual time=0.268..0.716 rows=330.00 loops=1)
+         Recheck Cond: (attributes @> '{"tags": ["t7"], "color": "teal"}'::jsonb)
+         Heap Blocks: exact=305
+         ->  Bitmap Index Scan on catalog_attr_gin (actual time=0.234..0.234 rows=330.00 loops=1)
+               Index Cond: (attributes @> '{"tags": ["t7"], "color": "teal"}'::jsonb)
+               Index Searches: 1
+ Planning Time: 0.261 ms
+ Execution Time: 0.775 ms
+(9 rows)
+
+ gin_size 
+----------
+ 1664 kB
+(1 row)
 ```
 
-After this, queries using `@>`, `?`, `?|`, and `?&` can use the index. If you only ever query one specific path, an expression index on that path can be smaller and faster than indexing the whole document.
+16 ms became 0.8 ms for 330 matching rows, at a cost of a 1.7 MB index on a 15 MB table. The index serves only operators on the column itself (`@>`, `?`, `@?`): an extracted expression like `attributes->>'color'` needs its own B-tree expression index. The specialized indexes lesson compares the GIN operator classes in detail.
+
+### Big documents and TOAST
+
+A row larger than about 2 kB has its big values moved out of line into a **TOAST** table (and compressed if that helps). `jsonb` documents are stored as one value, so changing one small key rewrites the whole document. 2 000 documents of about 9.6 kB each (random text, which does not compress):
+
+```sql
+-- sql/toast.sql
+CREATE TABLE docs (id int PRIMARY KEY, body jsonb NOT NULL);
+INSERT INTO docs
+SELECT g, jsonb_build_object('id', g, 'note', 'first', 'blob', (SELECT string_agg(md5(random()::text), '') FROM generate_series(1, 300)))
+FROM generate_series(1, 2000) g;
+ANALYZE docs;
+SELECT pg_column_size(body) AS stored_bytes, octet_length(body::text) AS as_text_bytes FROM docs WHERE id = 1;
+SELECT pg_size_pretty(pg_relation_size('docs')) AS heap,
+       pg_size_pretty(pg_relation_size((SELECT reltoastrelid FROM pg_class WHERE relname = 'docs'))) AS toast;
+-- change ONE small key in every document
+UPDATE docs SET body = jsonb_set(body, '{note}', '"second"');
+SELECT pg_size_pretty(pg_relation_size((SELECT reltoastrelid FROM pg_class WHERE relname = 'docs'))) AS toast_after_small_update;
+```
+
+```text
+CREATE TABLE
+INSERT 0 2000
+ANALYZE
+ stored_bytes | as_text_bytes 
+--------------+---------------
+         9653 |          9638
+(1 row)
+
+  heap  | toast 
+--------+-------
+ 104 kB | 20 MB
+(1 row)
+
+UPDATE 2000
+ toast_after_small_update 
+--------------------------
+ 39 MB
+(1 row)
+```
+
+The heap is 104 kB and the documents live in TOAST (20 MB). Changing the small `note` key in every document made the TOAST table grow to 39 MB: each update wrote a full new copy of the document, and the old copies wait for `VACUUM`. If you update one field of a large document often, that field belongs in its own column.
+
+## Reading AI-generated code
+
+An assistant is asked for "products over 100" from a `jsonb` price and writes the obvious query:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "products over 100"
+SELECT name, attributes ->> 'price' AS price
+FROM products
+WHERE attributes ->> 'price' > '100'
+ORDER BY name;`}>
+
+The result looks plausible and is wrong. `->>` yields text, and text sorts character by character, so `'9'`, `'12.5'`, `'45'` and `'89'` are all "greater than" `'100'`. On this data the query returns **every** product, including the ones priced 9 and 12.5, and would drop or include the wrong ones as prices change:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT name, attributes ->> 'price' AS price
+FROM products
+WHERE attributes ->> 'price' > '100'
+ORDER BY name;
+```
+
+```text
+     name      | price 
+---------------+-------
+ Camp Stove    | 45
+ City Backpack | 89
+ Rain Poncho   | 9
+ Trail Jacket  | 129.5
+ Wool Socks    | 12.5
+(5 rows)
+```
+
+Cast to `numeric` before comparing (and, if this filter matters, index the expression `((attributes->>'price')::numeric)`):
+
+```sql
+-- sql/stb-fixed.sql
+SELECT name, attributes ->> 'price' AS price
+FROM products
+WHERE (attributes ->> 'price')::numeric > 100
+ORDER BY name;
+```
+
+```text
+     name     | price 
+--------------+-------
+ Trail Jacket | 129.5
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`jsonb` is a value type that happens to have keys. You can extract from it (`->`, `->>`, jsonpath), test it (`@>`, `?`), rebuild it (`||`, `jsonb_set`, `-`), and unnest it into rows (`jsonb_each`, `jsonb_array_elements`, `JSON_TABLE`). Extraction gives you either `jsonb` or `text`: pick deliberately, and cast before you compare numbers or dates. Storage is one opaque value per row: a GIN index makes containment fast, and every write to any key rewrites the whole value.
 
 ## Tips / gotchas
 
-- Prefer `jsonb` over `json` for almost everything. The `json` type stores the exact text you sent (preserving whitespace and order) but cannot be indexed and re-parses on every access.
-- Use `jsonb` for genuinely variable data, not as a way to dodge schema design. If a field is always present and always the same type, a real column gives you type checking, defaults, and constraints.
-- Add a GIN index only when you actually query inside the document. Indexing data you only ever read back whole is wasted space and write overhead.
-- Remember `->` returns `jsonb` and `->>` returns `text`. Comparing `attributes -> 'color' = 'teal'` fails because the left side is `jsonb`; use `->>` for text comparisons.
+- Use `jsonb`, not `json`, unless you must preserve the exact original text.
+- `->` returns `jsonb`, `->>` returns `text`; cast (`::numeric`, `::date`) before comparing numbers or dates.
+- Prefer `@>` for filters you want indexed; `attributes->>'k' = 'v'` needs an expression index instead.
+- `||` is a shallow merge; use `jsonb_set` for nested changes.
+- Give columns you filter, join or update often a real column of their own; keep `jsonb` for the truly flexible remainder.
+- Drivers differ: `pg` parses to objects, `psycopg` gives `dict`, `pgx` gives `map[string]any`, `sqlx` needs a feature flag.
 
-<Callout title="Document store inside your relational database">
-A `jsonb` column lets one table mix rigid, well-typed columns with a flexible document field. That hybrid is often all the schema flexibility an application needs — no separate document database required. Just keep the truly stable parts in real columns where Postgres can enforce them.
+<Callout title="A column of documents is not a schema">
+`jsonb` lets you defer decisions, but it does not remove them. Constraints, types and foreign keys live on real columns. A good pattern is real columns for what you query, join and constrain, and one `jsonb` column for the long tail.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| `jsonb` column | Flexible schema — add or remove fields without a migration | Postgres cannot enforce types or foreign keys inside the document; correctness must come from the application |
-| Ordinary relational columns | Real type checking, constraints, and foreign keys enforced by Postgres | Every field must be known ahead of time, and every schema change needs a migration |
+| `jsonb` column | Flexible shape, no migration per attribute, GIN-indexable | No type checking of keys; a small change rewrites the whole document (TOAST 20 MB to 39 MB above) |
+| Real columns | Types, constraints, foreign keys, cheap updates | Schema change (migration) for each new attribute |
+| `json` (text) | Exact original text preserved | Reparsed on every access, cannot be indexed |
+| GIN `jsonb_path_ops` | 16 ms to 0.8 ms for `@>` | 1.7 MB here; no `?` key-existence support |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Dumping everything into one giant JSONB blob** — if the data is genuinely structured and needs to reference another table, use a relational column with a foreign key instead, since Postgres cannot validate a relationship hidden inside JSONB.
-- **Forgetting a GIN index on a column you query often** — with no index, every containment query scans the whole table. Add `USING gin (column)` as soon as you start regularly querying inside the document.
-- **Using JSONB just to avoid writing a migration** — if a field is always present and always the same type, a real column is safer and easier to read. Reserve JSONB for data that genuinely varies.
-
-> 💡 Real-world example
->
-> **Flexible content platforms** — store highly variable content, such as page or block content that changes shape often, in `jsonb`, while keeping ownership, permissions, and workspace structure in strictly relational tables.
->
-> **E-commerce and marketplace platforms** — store per-merchant custom fields on products and orders (often called metafields) in a flexible column so store-to-store variation does not require changing the platform's core schema.
+- **"`->` returns text."** It returns `jsonb`; comparing it with `'teal'` is a JSON parse error. `->>` returns text.
+- **"`jsonb` keeps my key order and duplicates."** It keeps neither: `{"a": 3, "b": 1}`.
+- **"`||` merges nested objects."** It replaces the whole nested object: `specs` lost `waterproof`.
+- **"Comparing `->>` values numerically works."** It compares text: `'9' > '50'`.
+- **"A GIN index speeds up any filter on the column."** Only containment/existence operators on the column, not `->>` expressions.
 
 export const quizJsonb = [
   {
-    q: 'What is the key practical advantage of jsonb over the plain json type?',
+    q: 'What is the difference between the -> and ->> operators?',
     options: [
-      'It preserves whitespace and key order',
-      'It can be indexed and is stored in a decomposed binary form',
-      'It allows duplicate keys',
-      'It is the only type that accepts arrays',
+      'They are the same',
+      '-> returns jsonb, ->> returns text',
+      '-> returns text, ->> returns jsonb',
+      '->> is for arrays only',
     ],
     answer: 1,
+    explain: 'That is why `attributes -> \'color\' = \'teal\'` is a JSON parse error, while `attributes ->> \'color\' = \'teal\'` works.',
   },
   {
-    q: 'Which operator tests whether a jsonb document contains a given key/value pair?',
-    options: ['->>', '#>', '@>', '||'],
-    answer: 2,
-  },
-  {
-    q: 'Which index type makes jsonb containment queries fast?',
-    options: ['B-tree', 'GIN', 'Hash', 'BRIN'],
+    q: 'Which operator tests whether a jsonb document contains another, and can use a GIN index?',
+    options: ['->', '@>', '||', '#>>'],
     answer: 1,
+    explain: '@> (containment) is what a GIN index on the column supports; it matched Trail Jacket and Wool Socks for {"color": "teal"}.',
+  },
+  {
+    q: 'After `attributes || \'{"specs": {"weight_g": 470}}\'`, what happened to the `waterproof` key inside `specs`?',
+    options: [
+      'It was kept',
+      'It was lost: || replaced the whole specs object',
+      'It was set to null',
+      'The statement failed',
+    ],
+    answer: 1,
+    explain: '|| merges top-level keys only. jsonb_set(attributes, \'{specs,weight_g}\', \'470\') changes just that path and keeps waterproof.',
+  },
+  {
+    q: '`WHERE attributes ->> \'price\' > \'100\'` returns every product, even the ones priced 9 and 89. Why?',
+    options: [
+      'jsonb rounds numbers',
+      '->> returns text, and text comparison is character by character (\'9\' > \'100\')',
+      'The index is stale',
+      'PostgreSQL bug',
+    ],
+    answer: 1,
+    explain: 'Cast first: (attributes ->> \'price\')::numeric > 100 returns only Trail Jacket.',
+  },
+  {
+    q: 'You change one small key of a 9.6 kB jsonb document in 2,000 rows. What did the lesson measure in the TOAST table?',
+    options: [
+      'No change: only the key is rewritten',
+      'It grew from 20 MB to 39 MB: each update writes a full new copy of the document',
+      'It shrank',
+      'It was compressed to nothing',
+    ],
+    answer: 1,
+    explain: 'jsonb is one value; an update writes a new whole value, and the old one waits for VACUUM. Frequently updated fields belong in their own columns.',
   },
 ];
 
