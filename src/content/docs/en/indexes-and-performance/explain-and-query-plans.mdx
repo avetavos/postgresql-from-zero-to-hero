@@ -1,6 +1,6 @@
 ---
-title: EXPLAIN and query plans
-description: Read the planner's output with EXPLAIN and EXPLAIN (ANALYZE, BUFFERS), tell Seq Scan from Index Scan and Bitmap, read cost and rows and timing, and learn why an index is sometimes ignored.
+title: EXPLAIN and Query Plans
+description: Read real PostgreSQL 18 EXPLAIN (ANALYZE, BUFFERS) output line by line, tell Seq, Index, Index Only and Bitmap scans apart on 500,000 rows, and see why a planner ignores an index, misestimates rows, or gets fooled by a cast.
 sidebar:
   order: 3
 ---
@@ -10,164 +10,763 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 When a query is slow, guessing is a waste of time. PostgreSQL will tell you exactly how it intends to run a query, and how it actually ran. The tool is `EXPLAIN`, and learning to read its output is the single most useful performance skill you can pick up.
 
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). Every plan is pasted from `psql`, never typed, and timings are from this Mac (single runs, so small differences are noise).
+
 ## The planner chooses a plan
 
-You write *what* you want; the **query planner** decides *how* to get it. For a given query there can be many possible plans — scan the whole table, use this index, use that one, combine two — and the planner estimates the cost of each, then picks the cheapest.
+You write *what* you want; the **query planner** decides *how* to get it. For a given query there can be many possible plans (scan the whole table, use this index, use that one, combine two), and the planner estimates the cost of each, then picks the cheapest.
 
 export const plannerFlow = `flowchart LR
-  Q[Your SQL query] --> P[Query planner]
-  P --> E1[Estimate: Seq Scan cost]
-  P --> E2[Estimate: Index Scan cost]
-  P --> E3[Estimate: Bitmap Scan cost]
-  E1 --> C[Pick the cheapest plan]
+  Q["Your SQL query"] --> P["Query planner"]
+  P --> E1["Estimate: Seq Scan cost"]
+  P --> E2["Estimate: Index Scan cost"]
+  P --> E3["Estimate: Bitmap Scan cost"]
+  E1 --> C["Pick the cheapest plan"]
   E2 --> C
   E3 --> C
-  C --> X[Execute chosen plan]`;
+  C --> X["Execute chosen plan"]`;
 
 <Mermaid code={plannerFlow} title="How the planner chooses a plan" />
 
-Those cost estimates depend on statistics about your data — how many rows the table has, how many distinct values a column holds, and so on. If the statistics are stale, the planner makes bad guesses, which is the topic of the final lesson in this module.
+Those cost estimates depend on statistics about your data: how many rows the table has, how many distinct values a column holds, how common each value is. If the statistics are stale or too crude, the planner makes bad guesses; both cases appear below.
+
+## The dataset
+
+Plans are only meaningful on realistic volumes, so this lesson builds an `orders` table with 500 000 rows: 10 000 customers, three statuses (skewed on purpose), one order every 90 seconds since 1 January 2024, and a `city` that always determines its `country`. There are indexes on `customer_id`, `created_at` and `status`.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE orders (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id int NOT NULL,
+  status      text NOT NULL,
+  created_at  timestamptz NOT NULL,
+  amount      numeric(10, 2) NOT NULL,
+  city        int NOT NULL,
+  country     int NOT NULL
+);
+INSERT INTO orders (customer_id, status, created_at, amount, city, country)
+SELECT 1 + (g::bigint * 7919) % 10000,
+       CASE WHEN g % 200 = 0 THEN 'refunded' WHEN g % 12 = 0 THEN 'pending' ELSE 'paid' END,
+       timestamptz '2024-01-01 00:00:00+00' + g * interval '90 seconds',
+       (g % 500) + 0.99,
+       g % 100,
+       (g % 100) % 10
+FROM generate_series(1, 500000) AS g;
+CREATE INDEX orders_customer_id_idx ON orders (customer_id);
+CREATE INDEX orders_created_at_idx  ON orders (created_at);
+CREATE INDEX orders_status_idx      ON orders (status);
+ANALYZE orders;
+SELECT status, count(*) FROM orders GROUP BY status ORDER BY 2 DESC;
+```
+
+```text
+CREATE TABLE
+INSERT 0 500000
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+ANALYZE
+  status  | count  
+----------+--------
+ paid     | 456667
+ pending  |  40833
+ refunded |   2500
+(3 rows)
+```
 
 ## EXPLAIN: the estimated plan
 
-`EXPLAIN` prints the plan the planner *would* use, without running the query. It is instant and safe to run on anything.
+Plain `EXPLAIN` plans the query but does not run it, so it is instant and safe on anything:
 
 ```sql
-EXPLAIN SELECT * FROM books WHERE author_id = 4;
+-- sql/explain-estimate.sql
+EXPLAIN SELECT * FROM orders WHERE customer_id = 42;
 ```
 
 ```text
-                              QUERY PLAN
-----------------------------------------------------------------------
- Index Scan using books_author_idx on books  (cost=0.42..12.61 rows=6 width=64)
-   Index Cond: (author_id = 4)
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Bitmap Heap Scan on orders  (cost=4.81..189.92 rows=50 width=39)
+   Recheck Cond: (customer_id = 42)
+   ->  Bitmap Index Scan on orders_customer_id_idx  (cost=0.00..4.80 rows=50 width=0)
+         Index Cond: (customer_id = 42)
+(4 rows)
 ```
 
-Read the numbers in parentheses:
-
-- `cost=0.42..12.61` — two figures in arbitrary cost units. The first is the estimated startup cost (work before the first row appears); the second is the estimated total cost. Lower is cheaper; the planner compares these across candidate plans.
-- `rows=6` — how many rows the planner *estimates* this node will return.
-- `width=64` — the estimated average row size in bytes.
-
-The top line also names the strategy: here, an `Index Scan` using a named index, with the `Index Cond` showing which condition the index handled.
+Read a node like this: `cost=4.81..189.92` is the estimated cost to return the first row, then all rows, in arbitrary units (one sequential page read is 1.0, from `seq_page_cost`); `rows=50` is how many rows the planner expects to come out; `width=39` is the average row size in bytes. The plan is a tree, read from the inside out: the most indented node (`Bitmap Index Scan`) runs first and feeds its parent (`Bitmap Heap Scan`).
 
 ## EXPLAIN ANALYZE: what really happened
 
-`EXPLAIN ANALYZE` actually *runs* the query and reports real timings alongside the estimates. As of PostgreSQL 18, `ANALYZE` automatically includes buffer usage too — how many data pages were read, which tells you whether the work came from cache or from disk — so you no longer need to spell out `BUFFERS` separately (on older versions, or to be explicit, you can still write `EXPLAIN (ANALYZE, BUFFERS)`; add `BUFFERS OFF` if you specifically want to suppress it).
+`EXPLAIN ANALYZE` actually executes the query and adds the measured numbers next to the estimates. Since PostgreSQL 18 it prints buffer usage by default; older versions need `BUFFERS` spelled out ([release notes](https://www.postgresql.org/docs/18/release-18.html)):
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/explain-analyze.sql
+    EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE customer_id = 42;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE customer_id = 42',
+    );
+    const plan = res.rows.map((r) => r['QUERY PLAN']);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE customer_id = 42"
+    )
+    plan = [row[0] for row in cur.fetchall()]
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    rows, err := conn.Query(ctx,
+        "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE customer_id = 42")
+    defer rows.Close()
+    var plan []string
+    for rows.Next() {
+    	var line string
+    	rows.Scan(&line)
+    	plan = append(plan, line)
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let rows = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE customer_id = 42",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let plan = rows;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+                                                             QUERY PLAN                                                             
+------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on orders  (cost=4.81..189.92 rows=50 width=39) (actual time=0.054..0.267 rows=50.00 loops=1)
+   Recheck Cond: (customer_id = 42)
+   Heap Blocks: exact=50
+   Buffers: shared hit=50 read=3
+   ->  Bitmap Index Scan on orders_customer_id_idx  (cost=0.00..4.80 rows=50 width=0) (actual time=0.041..0.041 rows=50.00 loops=1)
+         Index Cond: (customer_id = 42)
+         Index Searches: 1
+         Buffers: shared read=3
+ Planning:
+   Buffers: shared hit=135
+ Planning Time: 0.284 ms
+ Execution Time: 0.304 ms
+(12 rows)
+```
+
+Line by line:
+
+- `actual time=0.054..0.267`: milliseconds until the first row and until the last row, per loop. `rows=50.00` is the *actual* rows per loop, shown with decimals since PostgreSQL 18 (an average when a node loops); the estimate was `rows=50`, so this plan is well estimated.
+- `loops=1`: how many times this node ran. In a nested loop the inner node's numbers are *per loop*, so multiply.
+- `Recheck Cond` and `Heap Blocks: exact=50`: the bitmap said which pages hold matches; the executor re-applies the condition on those 50 pages.
+- `Buffers: shared hit=50 read=3`: 8 kB blocks found in `shared_buffers` (hit) versus fetched from the operating system or disk (read). It is the honest measure of I/O.
+- `Index Searches: 1`: PG 18 shows how many times the index was descended.
+- `Planning: Buffers` and `Planning Time`: the cost of building the plan itself, separate from `Execution Time`.
+
+Sending the same statement from application code returns the plan as ordinary rows, one text line each. Each driver ran it once against the dataset and reported the number of plan lines, the start of the first line and the last line:
+
+```text
+$ (each driver runs the EXPLAIN once and reports: number of plan lines, start of the first line, the last line)
+Node.js (pg 8.23.0):    12 Bitmap Heap Scan on orders  (cost=4.81..189.92 rows=50 width ... Execution Time: 0.529 ms
+Python (psycopg 3.3.6): 12 Bitmap Heap Scan on orders  (cost=4.81..189.92 rows=50 width ... Execution Time: 0.527 ms
+Go (pgx v5.11.0):       12 Bitmap Heap Scan on orders  (cost=4.81..189.92 rows=50 width ... Execution Time: 0.287 ms
+Rust (sqlx 0.9.0):      12 Bitmap Heap Scan on orders  (cost=4.81..189.92 rows=50 width ... Execution Time: 0.260 ms
+```
+
+### Other options
+
+`EXPLAIN (COSTS OFF)` removes the cost numbers when you only care about the shape. `VERBOSE` adds the output column list and schema-qualified names, and `SETTINGS` lists any planner setting that differs from the default, which makes a pasted plan reproducible. Here a lowered `random_page_cost` (a value commonly suggested for SSDs, see the [planner settings](https://www.postgresql.org/docs/18/runtime-config-query.html)) flips the same query from a bitmap scan to a plain index scan:
 
 ```sql
-EXPLAIN ANALYZE
-SELECT * FROM books WHERE author_id = 4;
+-- sql/explain-options.sql
+BEGIN;
+SET LOCAL random_page_cost = 1.1;
+EXPLAIN (COSTS OFF, SETTINGS, VERBOSE) SELECT id, amount FROM orders WHERE customer_id = 42;
+ROLLBACK;
 ```
 
 ```text
-                                                  QUERY PLAN
---------------------------------------------------------------------------------------------------------------
- Index Scan using books_author_idx on books  (cost=0.42..12.61 rows=6 width=64) (actual time=0.018..0.024 rows=6 loops=1)
-   Index Cond: (author_id = 4)
-   Buffers: shared hit=4
- Planning Time: 0.092 ms
- Execution Time: 0.041 ms
+BEGIN
+SET
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Index Scan using orders_customer_id_idx on public.orders
+   Output: id, amount
+   Index Cond: (orders.customer_id = 42)
+ Settings: random_page_cost = '1.1'
+(4 rows)
+
+ROLLBACK
 ```
 
-The new `actual time=0.018..0.024 rows=6 loops=1` block is the truth: real startup and total time in milliseconds, the real row count, and how many times this node ran. Compare estimated `rows` to actual `rows`: a large gap is the classic sign of stale statistics or a misled planner. `Buffers: shared hit=4` means four pages were served from cache and none from disk.
+`EXPLAIN` can also print a `JIT:` block when the server compiles expressions to machine code, which it does only for queries whose estimated cost is above `jit_above_cost` (default 100000). This image has JIT available; with the threshold forced to 0 on a cheap query, the block appears and the compile time is part of the total:
+
+```sql
+-- sql/jit-available.sql
+SHOW jit;
+SELECT pg_jit_available();
+-- teaching switch: pretend the query is expensive enough to be compiled
+BEGIN;
+SET LOCAL jit_above_cost = 0;
+EXPLAIN (ANALYZE, BUFFERS OFF) SELECT sum(amount) FROM orders WHERE status = 'paid';
+ROLLBACK;
+EXPLAIN (ANALYZE, BUFFERS OFF) SELECT sum(amount) FROM orders WHERE status = 'paid';
+```
+
+```text
+ jit 
+-----
+ on
+(1 row)
+
+ pg_jit_available 
+------------------
+ t
+(1 row)
+
+BEGIN
+SET
+                                                                 QUERY PLAN                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=8755.30..8755.31 rows=1 width=32) (actual time=35.988..38.974 rows=1.00 loops=1)
+   ->  Gather  (cost=8755.08..8755.29 rows=2 width=32) (actual time=35.892..38.963 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate  (cost=7755.08..7755.09 rows=1 width=32) (actual time=26.891..26.891 rows=1.00 loops=3)
+               ->  Parallel Seq Scan on orders  (cost=0.00..7278.72 rows=190541 width=6) (actual time=3.231..16.431 rows=152222.33 loops=3)
+                     Filter: (status = 'paid'::text)
+                     Rows Removed by Filter: 14444
+ Planning Time: 0.315 ms
+ JIT:
+   Functions: 17
+   Options: Inlining false, Optimization false, Expressions true, Deforming true
+   Timing: Generation 0.635 ms (Deform 0.217 ms), Inlining 0.000 ms, Optimization 0.508 ms, Emission 9.160 ms, Total 10.303 ms
+ Execution Time: 40.122 ms
+(14 rows)
+
+ROLLBACK
+                                                                 QUERY PLAN                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=8755.30..8755.31 rows=1 width=32) (actual time=29.617..32.130 rows=1.00 loops=1)
+   ->  Gather  (cost=8755.08..8755.29 rows=2 width=32) (actual time=29.552..32.123 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate  (cost=7755.08..7755.09 rows=1 width=32) (actual time=21.125..21.125 rows=1.00 loops=3)
+               ->  Parallel Seq Scan on orders  (cost=0.00..7278.72 rows=190541 width=6) (actual time=0.009..11.380 rows=152222.33 loops=3)
+                     Filter: (status = 'paid'::text)
+                     Rows Removed by Filter: 14444
+ Planning Time: 0.077 ms
+ Execution Time: 32.152 ms
+(10 rows)
+```
+
+The JIT run took 40.1 ms against 32.2 ms without it (10.3 ms of it was compiling): for short queries JIT is pure overhead, which is why the default threshold is so high.
 
 ## Telling the scan types apart
 
-Three scan strategies appear constantly. Learning to recognise them is most of the battle.
+The same table produces different scan nodes as the query changes. Four kinds to recognize:
 
-- **Seq Scan** — reads the whole table top to bottom. Expected when no useful index exists, or when the query returns a large fraction of the rows anyway.
-- **Index Scan** — walks an index, then fetches each matching row from the table. Best when the query is *selective*, returning a small slice of the table.
-- **Bitmap Heap Scan** (paired with a **Bitmap Index Scan**) — builds a bitmap of matching row locations from the index, sorts it, then reads the table in physical order. PostgreSQL chooses this middle ground when a query matches more rows than an index scan handles well but fewer than a full seq scan.
+**Seq Scan** reads the whole table and filters. It wins when most rows qualify. **Index Scan** walks the index and fetches each matching row from the table. **Bitmap Heap Scan** first collects all matching row locations from the index, then fetches the pages in physical order: the middle ground for hundreds to thousands of rows. **Index Only Scan** answers from the index alone, when the query needs nothing but the indexed columns.
 
-A bitmap plan looks like this:
+An hour of orders and a day of orders both use an Index Scan; so, surprisingly, do 175 680 rows (six months, 35 % of the table) in 15 ms:
 
-```text
-                                  QUERY PLAN
-------------------------------------------------------------------------------
- Bitmap Heap Scan on books  (cost=12.10..520.30 rows=900 width=64)
-   Recheck Cond: (published > 2000)
-   ->  Bitmap Index Scan on books_published_idx  (cost=0.00..11.88 rows=900 width=0)
-         Index Cond: (published > 2000)
+```sql
+-- sql/scan-types.sql
+-- the same table, three time windows: 1 hour, 1 day, about half of the table
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF)
+SELECT * FROM orders WHERE created_at >= '2024-06-01 00:00+00' AND created_at < '2024-06-01 01:00+00';
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF)
+SELECT * FROM orders WHERE created_at >= '2024-06-01 00:00+00' AND created_at < '2024-06-02 00:00+00';
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF)
+SELECT * FROM orders WHERE created_at >= '2024-06-01 00:00+00' AND created_at < '2024-12-01 00:00+00';
 ```
 
-The indented `->` line is a child node feeding its parent. Plans are trees: read them from the most-indented node outward, because inner nodes run first and pass their rows up.
+```text
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using orders_created_at_idx on orders (actual rows=40.00 loops=1)
+   Index Cond: ((created_at >= '2024-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2024-06-01 01:00:00+00'::timestamp with time zone))
+   Index Searches: 1
+ Planning Time: 0.276 ms
+ Execution Time: 0.091 ms
+(5 rows)
+
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using orders_created_at_idx on orders (actual rows=960.00 loops=1)
+   Index Cond: ((created_at >= '2024-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2024-06-02 00:00:00+00'::timestamp with time zone))
+   Index Searches: 1
+ Planning Time: 0.034 ms
+ Execution Time: 0.107 ms
+(5 rows)
+
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using orders_created_at_idx on orders (actual rows=175680.00 loops=1)
+   Index Cond: ((created_at >= '2024-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2024-12-01 00:00:00+00'::timestamp with time zone))
+   Index Searches: 1
+ Planning Time: 0.021 ms
+ Execution Time: 15.029 ms
+(5 rows)
+```
+
+Why does a scan of a third of the table still pick the index? Because `created_at` is perfectly correlated with the physical row order (the table was filled in time order), so the index scan reads the heap pages one after another. The planner knows this from the statistics:
+
+```sql
+-- sql/correlation.sql
+SELECT attname, round(correlation::numeric, 3) AS correlation
+FROM pg_stats
+WHERE tablename = 'orders' AND attname IN ('created_at', 'customer_id', 'status')
+ORDER BY attname;
+```
+
+```text
+   attname   | correlation 
+-------------+-------------
+ created_at  |       1.000
+ customer_id |       0.000
+ status      |       0.842
+(3 rows)
+```
+
+`created_at` has correlation 1.000; `customer_id` is 0.000, random. For a random column a thousand matching rows are spread over a thousand pages, and the planner chooses a Bitmap Heap Scan (2.4 ms below), until `VACUUM` builds the visibility map and the same query becomes an **Index Only Scan** with `Heap Fetches: 0` (0.044 ms):
+
+```sql
+-- sql/index-only-scan.sql
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF)
+SELECT customer_id FROM orders WHERE customer_id BETWEEN 1 AND 20;
+VACUUM orders;
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF)
+SELECT customer_id FROM orders WHERE customer_id BETWEEN 1 AND 20;
+```
+
+```text
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Bitmap Heap Scan on orders (actual rows=1000.00 loops=1)
+   Recheck Cond: ((customer_id >= 1) AND (customer_id <= 20))
+   Heap Blocks: exact=1000
+   ->  Bitmap Index Scan on orders_customer_id_idx (actual rows=1000.00 loops=1)
+         Index Cond: ((customer_id >= 1) AND (customer_id <= 20))
+         Index Searches: 1
+ Planning Time: 0.321 ms
+ Execution Time: 2.381 ms
+(8 rows)
+
+VACUUM
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Index Only Scan using orders_customer_id_idx on orders (actual rows=1000.00 loops=1)
+   Index Cond: ((customer_id >= 1) AND (customer_id <= 20))
+   Heap Fetches: 0
+   Index Searches: 1
+ Planning Time: 0.080 ms
+ Execution Time: 0.044 ms
+(6 rows)
+```
+
+An Index Only Scan needs the visibility map: before `VACUUM` the planner did not choose it because every entry would have needed a trip to the heap to check the row is visible. `Heap Fetches` counts those trips.
 
 ## Why the planner sometimes ignores an index
 
-A common surprise: you create an index, but `EXPLAIN` still shows a `Seq Scan`. This is usually the planner being *right*, not wrong:
+A common surprise: you create an index, but `EXPLAIN` still shows a `Seq Scan`. This is usually the planner being *right*, not wrong. The same `status` column, with an index on it, gives both answers:
 
-- **The query is not selective.** If a condition matches half the table, jumping back and forth between the index and the table is slower than reading the table straight through. A seq scan wins.
-- **The table is tiny.** On a table of a few hundred rows, a seq scan is essentially free, and the planner skips the index overhead.
-- **Statistics are stale.** If the planner thinks a condition matches far more rows than it really does, it may avoid the index. Running `ANALYZE` on the table fixes the estimates.
-- **The condition cannot use the index.** A leading-wildcard `LIKE`, a function wrapped around the column, or a type mismatch can all make an existing index unusable.
+```sql
+-- sql/selectivity.sql
+-- 0.5 % of the rows versus 91 % of the rows
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF) SELECT * FROM orders WHERE status = 'refunded';
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF) SELECT * FROM orders WHERE status = 'paid';
+```
 
-**In pgAdmin:** the Explain button runs `EXPLAIN`, and the Explain menu has an Analyze option for `EXPLAIN ANALYZE`. The result is drawn as a graphical tree where each node shows its scan type and cost, and thicker arrows mean more rows — a fast way to spot the expensive node.
+```text
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Index Scan using orders_status_idx on orders (actual rows=2500.00 loops=1)
+   Index Cond: (status = 'refunded'::text)
+   Index Searches: 1
+ Planning Time: 0.257 ms
+ Execution Time: 3.280 ms
+(5 rows)
+
+                     QUERY PLAN                     
+----------------------------------------------------
+ Seq Scan on orders (actual rows=456667.00 loops=1)
+   Filter: (status = 'paid'::text)
+   Rows Removed by Filter: 43333
+ Planning Time: 0.059 ms
+ Execution Time: 22.528 ms
+(5 rows)
+```
+
+- **The query is not selective.** `refunded` is 0.5 % of the table: Index Scan, 3.3 ms. `paid` is 91 %: Seq Scan, 22.5 ms. To prove the planner right, forbid the seq scan and index scans for `paid`. The index plan reads more buffers and is slower (51.4 ms against 43.7 ms for the default choice, single runs):
+
+```sql
+-- sql/forced-index.sql
+-- diagnosis only: forbid the seq scan and see what the planner was avoiding
+BEGIN;
+SET LOCAL enable_seqscan = off;
+SET LOCAL enable_bitmapscan = off;
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE status = 'paid';
+ROLLBACK;
+EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE status = 'paid';
+```
+
+```text
+BEGIN
+SET
+SET
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using orders_status_idx on orders  (cost=0.42..18036.68 rows=457517 width=39) (actual time=0.037..37.370 rows=456667.00 loops=1)
+   Index Cond: (status = 'paid'::text)
+   Index Searches: 1
+   Buffers: shared hit=4674 read=386
+ Planning:
+   Buffers: shared hit=135
+ Planning Time: 0.278 ms
+ Execution Time: 51.363 ms
+(8 rows)
+
+ROLLBACK
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Seq Scan on orders  (cost=0.00..10923.00 rows=457517 width=39) (actual time=0.015..29.868 rows=456667.00 loops=1)
+   Filter: (status = 'paid'::text)
+   Rows Removed by Filter: 43333
+   Buffers: shared hit=4673
+ Planning Time: 0.071 ms
+ Execution Time: 43.737 ms
+(6 rows)
+```
+
+`SET enable_seqscan = off` is a **diagnostic**, never a fix: it changes the planner for the whole session, and here it only proves that the default was right.
+
+- **The table is tiny.** On 100 rows the planner does not use the primary-key index for `id = 7`, because reading the single page is cheaper:
+
+```sql
+-- sql/tiny-table.sql
+CREATE TABLE colors (id int PRIMARY KEY, name text);
+INSERT INTO colors SELECT g, 'color ' || g FROM generate_series(1, 100) g;
+ANALYZE colors;
+EXPLAIN SELECT * FROM colors WHERE id = 7;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100
+ANALYZE
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Seq Scan on colors  (cost=0.00..2.25 rows=1 width=12)
+   Filter: (id = 7)
+(2 rows)
+```
+
+- **Statistics are stale.** After a bulk load, the planner still believes what `ANALYZE` saw earlier. Here 200 000 `new` rows land in a table whose statistics say 1 000 rows, all `old`. The planner estimates `rows=1` (actual 200 000) and picks an Index Scan; after `ANALYZE` it estimates `rows=199975` and switches to a Seq Scan. The estimate gap is the signal; the query time difference (21 ms against 17 ms) is modest here but grows with row count:
+
+```sql
+-- sql/stale-statistics.sql
+CREATE TABLE jobs (id int, kind text);
+CREATE INDEX jobs_kind_idx ON jobs (kind);
+INSERT INTO jobs SELECT g, 'old' FROM generate_series(1, 1000) g;
+ANALYZE jobs;
+-- a bulk load lands before autovacuum has had a chance to re-analyze
+INSERT INTO jobs SELECT g, 'new' FROM generate_series(1, 200000) g;
+EXPLAIN (ANALYZE, COSTS ON, BUFFERS OFF) SELECT * FROM jobs WHERE kind = 'new';
+ANALYZE jobs;
+EXPLAIN (ANALYZE, COSTS ON, BUFFERS OFF) SELECT * FROM jobs WHERE kind = 'new';
+```
+
+```text
+CREATE TABLE
+CREATE INDEX
+INSERT 0 1000
+ANALYZE
+INSERT 0 200000
+                                                         QUERY PLAN                                                          
+-----------------------------------------------------------------------------------------------------------------------------
+ Index Scan using jobs_kind_idx on jobs  (cost=0.29..4.31 rows=1 width=8) (actual time=0.009..16.086 rows=200000.00 loops=1)
+   Index Cond: (kind = 'new'::text)
+   Index Searches: 1
+ Planning Time: 0.079 ms
+ Execution Time: 21.091 ms
+(5 rows)
+
+ANALYZE
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Seq Scan on jobs  (cost=0.00..3402.50 rows=199975 width=8) (actual time=0.047..12.370 rows=200000.00 loops=1)
+   Filter: (kind = 'new'::text)
+   Rows Removed by Filter: 1000
+ Planning Time: 0.077 ms
+ Execution Time: 17.370 ms
+(5 rows)
+```
+
+- **The condition cannot use the index.** A function or cast around the column, a leading-wildcard `LIKE`, or a type mismatch. That case is the *Reading AI-generated code* section below.
+
+**In pgAdmin:** the Explain button runs `EXPLAIN`, and the Explain menu has an Analyze option for `EXPLAIN ANALYZE`. The result is drawn as a graphical tree where each node shows its scan type and cost, and thicker arrows mean more rows: a fast way to spot the expensive node (pgAdmin is not part of this lesson's run).
+
+## When the estimate is wrong: correlated columns
+
+The planner multiplies the selectivities of separate conditions as if the columns were independent. In `orders`, `city = 7` always implies `country = 7`, but the planner does not know. It estimates 487 rows; the actual is 5 000, ten times more. `CREATE STATISTICS` with `dependencies` tells it, and the estimate becomes 4 617:
+
+```sql
+-- sql/correlated-columns.sql
+-- city 7 always lies in country 7, but the planner multiplies the two selectivities
+EXPLAIN (ANALYZE, COSTS ON, BUFFERS OFF, TIMING OFF)
+SELECT * FROM orders WHERE city = 7 AND country = 7;
+CREATE STATISTICS orders_city_country (dependencies) ON city, country FROM orders;
+ANALYZE orders;
+EXPLAIN (ANALYZE, COSTS ON, BUFFERS OFF, TIMING OFF)
+SELECT * FROM orders WHERE city = 7 AND country = 7;
+```
+
+```text
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Gather  (cost=1000.00..8846.70 rows=487 width=39) (actual rows=5000.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Parallel Seq Scan on orders  (cost=0.00..7798.00 rows=203 width=39) (actual rows=1666.67 loops=3)
+         Filter: ((city = 7) AND (country = 7))
+         Rows Removed by Filter: 165000
+ Planning Time: 0.240 ms
+ Execution Time: 10.584 ms
+(8 rows)
+
+CREATE STATISTICS
+ANALYZE
+                                                QUERY PLAN                                                
+----------------------------------------------------------------------------------------------------------
+ Gather  (cost=1000.00..9259.70 rows=4617 width=39) (actual rows=5000.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Parallel Seq Scan on orders  (cost=0.00..7798.00 rows=1924 width=39) (actual rows=1666.67 loops=3)
+         Filter: ((city = 7) AND (country = 7))
+         Rows Removed by Filter: 165000
+ Planning Time: 0.113 ms
+ Execution Time: 10.469 ms
+(8 rows)
+```
+
+Here both plans were parallel sequential scans and ran in about the same 10 ms, so the wrong estimate cost nothing. In a bigger query the wrong estimate decides the join order or the join algorithm, and *that* is where a factor of ten can turn milliseconds into minutes ([docs on extended statistics](https://www.postgresql.org/docs/18/planner-stats.html)).
+
+## EXPLAIN on writes
+
+`EXPLAIN ANALYZE` really runs an `UPDATE` or `DELETE`. To read the plan without keeping the change, wrap it in a transaction and roll back. The sums below prove it: 16999.50 before, 17049.50 inside the transaction (50 rows changed by +1), 16999.50 after the rollback:
+
+```sql
+-- sql/explain-update.sql
+SELECT sum(amount) AS total_before FROM orders WHERE customer_id = 42;
+BEGIN;
+EXPLAIN (ANALYZE, BUFFERS)
+UPDATE orders SET amount = amount + 1 WHERE customer_id = 42;
+SELECT sum(amount) AS total_inside_transaction FROM orders WHERE customer_id = 42;
+ROLLBACK;
+SELECT sum(amount) AS total_after_rollback FROM orders WHERE customer_id = 42;
+```
+
+```text
+ total_before 
+--------------
+     16999.50
+(1 row)
+
+BEGIN
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Update on orders  (cost=4.81..190.17 rows=0 width=0) (actual time=1.111..1.111 rows=0.00 loops=1)
+   Buffers: shared hit=879 read=38 dirtied=53 written=1
+   ->  Bitmap Heap Scan on orders  (cost=4.81..190.17 rows=50 width=22) (actual time=0.017..0.052 rows=50.00 loops=1)
+         Recheck Cond: (customer_id = 42)
+         Heap Blocks: exact=50
+         Buffers: shared hit=53
+         ->  Bitmap Index Scan on orders_customer_id_idx  (cost=0.00..4.80 rows=50 width=0) (actual time=0.007..0.007 rows=50.00 loops=1)
+               Index Cond: (customer_id = 42)
+               Index Searches: 1
+               Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=3
+ Planning Time: 0.040 ms
+ Execution Time: 1.154 ms
+(14 rows)
+
+ total_inside_transaction 
+--------------------------
+                 17049.50
+(1 row)
+
+ROLLBACK
+ total_after_rollback 
+----------------------
+             16999.50
+(1 row)
+```
+
+## Reading AI-generated code
+
+An assistant is asked for the number of orders placed on 1 March 2024 and writes something readable, with a comment claiming it uses the index on `created_at`:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "orders placed on March 1st - uses the index on created_at"
+SELECT count(*) FROM orders WHERE created_at::date = '2024-03-01';`}>
+
+The result is right and the index is ignored. `created_at::date` wraps the indexed column in an expression, and the plain index is on the column itself, so the planner cannot use it. It scans all 500 000 rows (`Rows Removed by Filter: 166347` in each of three workers), 15.9 ms:
+
+```sql
+-- sql/stb-wrong.sql
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF)
+SELECT count(*) FROM orders WHERE created_at::date = '2024-03-01';
+```
+
+```text
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Finalize Aggregate (actual rows=1.00 loops=1)
+   ->  Gather (actual rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate (actual rows=1.00 loops=3)
+               ->  Parallel Seq Scan on orders (actual rows=320.00 loops=3)
+                     Filter: ((created_at)::date = '2024-03-01'::date)
+                     Rows Removed by Filter: 166347
+ Planning Time: 0.271 ms
+ Execution Time: 15.871 ms
+(10 rows)
+```
+
+The fix is to compare the bare column with a half-open range, which is what "on that date" means. The same count is now an `Index Only Scan`: 0.69 ms, 23 times faster (and the gap grows with the table):
+
+```sql
+-- sql/stb-fixed.sql
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF)
+SELECT count(*) FROM orders
+WHERE created_at >= '2024-03-01 00:00+00' AND created_at < '2024-03-02 00:00+00';
+```
+
+```text
+                                                                           QUERY PLAN                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   ->  Index Only Scan using orders_created_at_idx on orders (actual rows=960.00 loops=1)
+         Index Cond: ((created_at >= '2024-03-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2024-03-02 00:00:00+00'::timestamp with time zone))
+         Heap Fetches: 0
+         Index Searches: 1
+ Planning Time: 0.465 ms
+ Execution Time: 0.688 ms
+(7 rows)
+```
+
+If the query must use the cast, index the expression (`CREATE INDEX ON orders ((created_at::date))`), which the next lesson covers. Beware that `::date` on a `timestamptz` depends on the session `TimeZone`.
+
+</SpotTheBug>
+
+## Mental Model
+
+`EXPLAIN` is the planner's plan; `EXPLAIN ANALYZE` adds what the executor saw. The distance between the two `rows=` numbers is the health of the statistics. Almost every slow query is one of three things: a scan that reads far more than it returns, a wrong estimate that picked the wrong strategy, or a condition that hides the column from an index. The plan tells you which, if you read it inside-out and compare estimate against actual.
 
 ## Tips / gotchas
 
-- `EXPLAIN ANALYZE` actually executes the query. For a `SELECT` that is harmless, but for an `UPDATE` or `DELETE` it will change your data — wrap it in a transaction you `ROLLBACK` if you need to inspect a write.
+- `EXPLAIN ANALYZE` actually executes the query. For a `SELECT` that is harmless, but for an `UPDATE` or `DELETE` it will change your data: wrap it in a transaction you `ROLLBACK`.
 - Plans are only meaningful on realistic data. A query that seq-scans a 100-row test table may index-scan the same table with a million rows. Test against representative volumes.
-- Always compare estimated `rows` against actual `rows`. A big mismatch points to statistics that need refreshing.
-- Read plan trees inside-out: the most indented nodes execute first and feed their parents.
+- Always compare estimated `rows` against actual `rows`. A big mismatch points to stale statistics (`ANALYZE`) or correlated columns (`CREATE STATISTICS`).
+- Read plan trees inside-out and multiply per-loop numbers by `loops`.
+- `SET enable_seqscan = off` (and friends) proves what the planner avoided; do not ship it.
+- Do not compare plan `cost=` numbers across different queries: they are only meaningful for choosing between plans of the same query.
 
 <Callout title="Let EXPLAIN replace guessing">
-Before you add an index or rewrite a query, run `EXPLAIN (ANALYZE, BUFFERS)` (or just `EXPLAIN ANALYZE` on PostgreSQL 18+) and read what PostgreSQL actually does. The plan tells you the scan type, where the time goes, and whether your estimates match reality — turning performance work from guesswork into measurement.
+Before you add an index or rewrite a query, run `EXPLAIN (ANALYZE, BUFFERS)` (on PostgreSQL 18, `EXPLAIN ANALYZE` already includes buffers) and read what PostgreSQL actually does. The plan tells you the scan type, where the time goes, and whether your estimates match reality, turning performance work from guesswork into measurement.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| `EXPLAIN` | Runs instantly, safe on any query since nothing actually executes | Only gives statistics-based estimates, not real numbers |
-| `EXPLAIN ANALYZE` | Shows real timing, real row counts, and (since PostgreSQL 18) buffer usage by default | Actually runs the query — an `UPDATE`/`DELETE` really changes data |
-| `EXPLAIN (ANALYZE, BUFFERS OFF)` | Slightly less output when you only care about timing, not I/O | You lose the cache-vs-disk information `Buffers` gives you |
+| `EXPLAIN` | Runs instantly, safe on any query since nothing executes | Only statistics-based estimates, no real numbers |
+| `EXPLAIN ANALYZE` | Real timing, real row counts, buffer usage (default in PG 18) | Actually runs the query: an `UPDATE`/`DELETE` really changes data |
+| `EXPLAIN (ANALYZE, BUFFERS OFF)` | Less output when you only care about timing | You lose the cache-vs-disk information |
+| `enable_*` switches | Show the alternative plan the planner rejected | Session-wide; hides the real problem if left on |
+| `CREATE STATISTICS` | Fixes estimates for correlated columns | Extra work at `ANALYZE` time; only helps queries that filter those columns together |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Tuning a query by guesswork instead of running `EXPLAIN` first** — guessing why a query is slow is usually wrong. Run `EXPLAIN` to see what strategy the planner actually chose before changing anything.
-- **Running `EXPLAIN ANALYZE` on an `UPDATE`/`DELETE` without wrapping it in a rollback-able transaction** — `EXPLAIN ANALYZE` really executes the query, so a write statement really changes the data. Wrap it in a transaction and `ROLLBACK` once you have read the plan.
-- **Ignoring a large gap between estimated and actual `rows`** — a wide gap is a sign that statistics are stale, which leads to bad plans. Run `ANALYZE` to refresh those estimates.
-
-> 💡 Real-world example
->
-> **[pganalyze](https://pganalyze.com/)** — automatically collects `EXPLAIN` plans and tracks query performance trends over time, helping teams catch a regression before users feel it.
->
-> **[GitLab's database review process](https://docs.gitlab.com/development/database_review/)** — requires a link to an `EXPLAIN ANALYZE` plan for any new or changed query in a merge request, so reviewers see the real impact before it merges.
+- **"An index is always used if it exists."** `paid` (91 % of the rows) ignored its index, correctly: forcing it was slower (51.4 ms against 43.7 ms).
+- **"A seq scan means a missing index."** Sometimes it is the cheapest plan (tiny tables, unselective conditions).
+- **"Index scans are always fast."** 175 680 rows by index scan took 15 ms; whether it is cheap depends on the correlation between index order and heap order.
+- **"`WHERE col::date = ...` uses the index on `col`."** It does not; a range on the bare column does (15.9 ms against 0.69 ms).
+- **"EXPLAIN ANALYZE on an UPDATE is a dry run."** It really updates; only the rollback restores the data.
 
 export const quizExplain = [
   {
     q: 'What is the difference between EXPLAIN and EXPLAIN ANALYZE?',
     options: [
       'There is no difference',
-      'EXPLAIN only estimates the plan; EXPLAIN ANALYZE actually runs the query and reports real timings',
-      'EXPLAIN ANALYZE is faster',
-      'EXPLAIN ANALYZE only works on indexes',
+      'EXPLAIN only estimates; EXPLAIN ANALYZE executes the query and shows real timings and row counts',
+      'EXPLAIN ANALYZE only estimates',
+      'EXPLAIN is faster because it skips planning',
     ],
     answer: 1,
+    explain: 'EXPLAIN shows the planner\'s estimates without running anything. EXPLAIN ANALYZE runs the query, which is why an UPDATE inside it must be rolled back.',
   },
   {
-    q: 'You create an index but EXPLAIN still shows a Seq Scan. What is a likely reason?',
+    q: 'In `Bitmap Heap Scan ... (actual time=0.054..0.267 rows=50.00 loops=1)`, what does `rows=50.00` mean?',
     options: [
-      'PostgreSQL never uses indexes automatically',
-      'The query matches a large fraction of the table, so a seq scan is cheaper',
-      'Indexes only work inside transactions',
+      'The planner estimated 50 rows',
+      'The node actually returned 50 rows per loop (PostgreSQL 18 shows decimals)',
+      'The table has 50 rows',
+      'The index has 50 entries',
+    ],
+    answer: 1,
+    explain: 'The estimate is the plain `rows=50` inside the cost parentheses. Inside `actual` it is the measured average per loop; compare the two to judge the statistics.',
+  },
+  {
+    q: '91 % of the orders are `paid` and there is an index on `status`. Why does `WHERE status = \'paid\'` use a Seq Scan?',
+    options: [
       'The index is corrupt',
+      'Fetching most of the table through the index costs more than reading it straight through; forcing the index was slower (51 ms vs 44 ms)',
+      'PostgreSQL never uses indexes on text',
+      'A Seq Scan is always fastest',
     ],
     answer: 1,
+    explain: 'The planner picks the cheapest plan by cost, and the forced-index experiment confirmed it. `refunded` (0.5 %) used the index.',
   },
   {
-    q: 'In a plan, what does a large gap between estimated rows and actual rows usually indicate?',
+    q: 'What made the plan for `WHERE created_at::date = \'2024-03-01\'` a Seq Scan?',
     options: [
-      'The query is wrong',
-      'The planner statistics are stale or misleading',
-      'The table has no primary key',
-      'The index is unique',
+      'created_at has no index',
+      'The cast wraps the indexed column, so the plain index cannot be used; a range on the bare column gets an Index Only Scan',
+      'dates cannot be indexed',
+      'ANALYZE was not run',
     ],
     answer: 1,
+    explain: 'The index is on created_at, not on created_at::date. The rewrite `created_at >= ... AND created_at < ...` ran in 0.69 ms instead of 15.9 ms.',
+  },
+  {
+    q: 'The planner estimated `rows=1` but 200 000 rows came back after a bulk load. What is the most likely fix?',
+    options: [
+      'Add more RAM',
+      'Run ANALYZE so the statistics reflect the new data',
+      'Rewrite the query with a CTE',
+      'Drop the index',
+    ],
+    answer: 1,
+    explain: 'Stale statistics; after ANALYZE the estimate became `rows=199975` and the plan switched from an Index Scan to a Seq Scan. For correlated columns use CREATE STATISTICS instead.',
   },
 ];
 
