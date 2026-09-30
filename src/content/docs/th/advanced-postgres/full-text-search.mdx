@@ -1,6 +1,6 @@
 ---
-title: Full-text search
-description: เปลี่ยนข้อความให้เป็น tsvector จับคู่กับ tsquery ด้วย operator @@ จัดอันดับผลลัพธ์ด้วย ts_rank และทำ index การค้นหาด้วย GIN index หรือ column tsvector แบบ generated
+title: Full-Text Search
+description: ค้นข้อความแบบเข้าใจคำแทนการเทียบตัวอักษร — tsvector, tsquery และ stemming, สี่วิธีสร้าง query, การจัดอันดับแบบถ่วงน้ำหนัก, headline, generated column พร้อม GIN index ที่วัดบน 100,000 เอกสาร และเหตุที่ config ไม่ตรงปิด index อย่างเงียบ ๆ
 sidebar:
   order: 3
 ---
@@ -9,48 +9,247 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-query แบบ `LIKE '%search%'` หา substring ที่ตรงเป๊ะได้ แต่ไม่เข้าใจภาษา บอกไม่ได้ว่า "running" กับ "ran" มีรากศัพท์ร่วมกัน ไม่ตัดคำที่ไม่มีความหมายอย่าง "the" ทิ้ง และจัดอันดับไม่ได้ว่า match ไหนดีกว่ากัน full-text search ของ PostgreSQL แก้ครบทั้งสามข้อ โดยย่อข้อความให้เป็นคำค้นที่ทำให้เป็นมาตรฐาน (normalized) แล้วจับคู่ query กับคำเหล่านั้น พร้อมให้คะแนนว่าแต่ละ row เข้ากันได้ดีแค่ไหน
+`LIKE '%word%'` เทียบตัวอักษร มันจัดอันดับผลไม่ได้ เจอตัวอักษรที่ซ่อนอยู่ในคำอื่น ไม่รู้ว่า `runs` กับ `running` เป็นรูปของคำเดียวกัน และถ้าไม่มี index พิเศษมันอ่านทุก row PostgreSQL มีคำตอบในตัว: **full-text search** เอกสารถูกลดรูปเป็นชุดคำที่ปรับมาตรฐานแล้ว (`tsvector`) การค้นหาคือชุดคำที่เชื่อมด้วยตรรกะ (`tsquery`) และ operator `@@` ถามว่า query ตรงกับเอกสารไหม
 
-ในบทนี้เราค้นหา table ของ articles ตามเนื้อความ (body text)
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ผลลัพธ์คัดลอกจาก `psql` และเวลาเป็นการรันครั้งเดียวจาก Mac เครื่องนี้
 
-## สองชนิดข้อมูลใหม่
+## ชุดข้อมูล
 
-full-text search แนะนำสองชนิดข้อมูล `tsvector` คือเอกสารที่ถูกแตกออกเป็น **lexeme** (คำรากศัพท์) ที่ทำให้เป็นมาตรฐานแล้ว พร้อมตำแหน่งของแต่ละคำ ส่วน `tsquery` คือนิพจน์การค้นหาของ lexeme ที่รวมกันด้วย operator `&` (and), `|` (or) และ `!` (not)
+บทความสั้นแปดชิ้น เล็กพอให้อ่านทุกผล แต่มีคำซ้อนกัน (running, runner, shoes, trail, waterproof) พอให้การจัดอันดับน่าสนใจ:
 
 ```sql
+-- sql/setup.sql
 CREATE TABLE articles (
   id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   title text NOT NULL,
   body  text NOT NULL
 );
+INSERT INTO articles (title, body) VALUES
+  ('Trail running shoes',          'Lightweight trail shoes grip wet rock and mud. A good runner rotates two pairs of shoes.'),
+  ('Marathon training plan',       'Twelve weeks of running: long runs on Sunday, easy runs midweek. The runner who ran the most miles improved fastest.'),
+  ('Caring for leather boots',     'Clean leather boots after each hike, then condition the leather. Waterproofing wax protects the stitching.'),
+  ('Waterproof jackets compared',  'We tested five waterproof jackets in heavy rain. The best jacket kept us dry and never wetted out.'),
+  ('Stretching after a run',       'A short stretching routine after a run reduces stiffness. Runners often skip stretching.'),
+  ('Choosing trail food',          'Nuts, dried fruit and cheese travel well. Avoid heavy food before a long run.'),
+  ('Rain gear for cyclists',       'Cyclists need waterproof shoe covers and a rain jacket that breathes.'),
+  ('Shoe care',                    'Wash muddy shoes with a soft brush. Never machine-dry running shoes.');
 ```
 
-คุณแปลงข้อความเป็นชนิดเหล่านี้ด้วยฟังก์ชัน `to_tsvector(config, text)` สร้าง `tsvector` ส่วน `to_tsquery(config, text)` parse query ที่มีโครงสร้าง และ `plainto_tsquery(config, text)` เปลี่ยน input ดิบจากผู้ใช้ให้เป็น query โดย and คำเหล่านั้นเข้าด้วยกัน
+## สองชนิดใหม่
+
+`tsvector` คือรายการเรียงลำดับของ **lexeme** (คำที่ปรับมาตรฐานแล้ว) พร้อมตำแหน่ง การสร้างมันทิ้ง stop word เช่น "the" และ "were" แปลงเป็นตัวพิมพ์เล็ก และ **stem**: ลดแต่ละคำเป็นรากตามกฎของ text search configuration `SHOW default_text_search_config` บอกว่าค่าเริ่มต้นที่นี่คืออะไร:
 
 ```sql
-SELECT to_tsvector('english', 'The cats were running quickly');
+-- sql/tsvector.sql
+SHOW default_text_search_config;
+SELECT to_tsvector('english', 'The quick brown foxes were running quickly');
+SELECT to_tsvector('english', title) FROM articles WHERE id IN (1, 5) ORDER BY id;
 ```
 
 ```text
-                to_tsvector
---------------------------------------------
- 'cat':2 'quick':5 'run':4
+ default_text_search_config 
+----------------------------
+ pg_catalog.english
+(1 row)
+
+              to_tsvector              
+---------------------------------------
+ 'brown':3 'fox':4 'quick':2,7 'run':6
+(1 row)
+
+        to_tsvector         
+----------------------------
+ 'run':2 'shoe':3 'trail':1
+ 'run':4 'stretch':1
+(2 rows)
+```
+
+สังเกตว่าค่าเริ่มต้นบน server นี้คือ `pg_catalog.english` `initdb` หามาจาก locale ของ cluster (ใต้ locale `C` มันจะเป็น `simple` ที่ไม่ stem และไม่ทิ้ง stop word) จึงระบุ configuration ให้ชัดเสมอ เหมือนทุก query ในบทนี้ ([docs](https://www.postgresql.org/docs/18/textsearch-configuration.html)) ในบรรทัดแรก "quick" และ "quickly" กลายเป็น `quick` ทั้งคู่ (ตำแหน่ง 2 และ 7), "foxes" กลายเป็น `fox`, "running" กลายเป็น `run`
+
+stemming รวมรูปที่ตามกฎ และเฉพาะรูปเหล่านั้น `running` match `run` แต่อดีตกาลไม่ปกติ `ran` เป็นคนละ lexeme และ `mice` ไม่กลายเป็น `mouse` dictionary เป็นแบบอิงกฎ ไม่ใช่ thesaurus:
+
+```sql
+-- sql/stemming.sql
+-- stemming maps different forms to one lexeme; irregular forms are NOT joined
+SELECT to_tsvector('english', 'I ran home')                               AS ran_home,
+       to_tsvector('english', 'I ran home') @@ plainto_tsquery('english', 'running') AS running_matches_ran,
+       to_tsvector('english', 'I run home') @@ plainto_tsquery('english', 'running') AS running_matches_run,
+       to_tsvector('english', 'mice geese')                               AS irregular;
+```
+
+```text
+     ran_home     | running_matches_ran | running_matches_run |     irregular     
+------------------+---------------------+---------------------+-------------------
+ 'home':3 'ran':2 | f                   | t                   | 'gees':2 'mice':1
 (1 row)
 ```
 
-สังเกตว่าเกิดอะไรขึ้น "The" และ "were" ถูกตัดทิ้งในฐานะ stop word "cats" กลายเป็น "cat" "running" กลายเป็น "run" และ "quickly" กลายเป็น "quick" ทั้งเอกสารและ query ผ่านการทำให้เป็นมาตรฐานแบบเดียวกัน ดังนั้น "running" ในการค้นหาจึง match กับ "runs" หรือ "run" ในข้อความ (stemmer ไม่แปลงรูปพิเศษอย่าง "ran" เป็น "run")
+## การสร้าง query
 
-## การจับคู่ด้วย operator @@
+`tsquery` คือชุด lexeme พร้อม `&` (และ), `|` (หรือ), `!` (ไม่) และ `<->` (ตามด้วย) PostgreSQL มีตัวสร้างสี่แบบ จากเข้มงวดที่สุดไปเป็นมิตรที่สุด:
 
-match operator `@@` คืนค่า true เมื่อ `tsvector` ตอบสนองต่อ `tsquery` นี่คือหัวใจของทุก full-text query
+```sql
+-- sql/tsquery-forms.sql
+SELECT plainto_tsquery('english', 'trail running shoes')            AS plain,
+       to_tsquery('english', 'trail & (shoes | boots) & !leather')  AS operators,
+       phraseto_tsquery('english', 'trail running shoes')           AS phrase,
+       websearch_to_tsquery('english', '"trail shoes" -leather')    AS websearch;
+```
+
+```text
+          plain           |                 operators                  |            phrase            |            websearch            
+--------------------------+--------------------------------------------+------------------------------+---------------------------------
+ 'trail' & 'run' & 'shoe' | 'trail' & ( 'shoe' | 'boot' ) & !'leather' | 'trail' <-> 'run' <-> 'shoe' | 'trail' <-> 'shoe' & !'leather'
+(1 row)
+```
+
+`plainto_tsquery` AND ทุกคำ `to_tsquery` รับ syntax แบบ operator และเข้มงวด (ช่องว่างเปล่า ๆ เป็น syntax error ดังข้างล่าง) `phraseto_tsquery` ต้องการคำเรียงตามลำดับ `websearch_to_tsquery` อ่านสิ่งที่ผู้ใช้พิมพ์จริง: เครื่องหมายคำพูดทำเป็นวลี `or` คือ OR, `-` คือ NOT และมันไม่ส่ง syntax error กับ input ผู้ใช้ จึงเป็นตัวที่ควรวางหลังช่องค้นหา
+
+```sql
+-- @expect-error 42601
+SELECT to_tsquery('english', 'trail shoes');
+```
+
+```text
+ERROR:  syntax error in tsquery: "trail shoes"
+```
+
+## จับคู่ด้วย operator @@
+
+`tsvector @@ tsquery` เป็นจริงเมื่อเอกสารตรง เพราะ `runs`, `run` และ `running` ใช้ stem `run` เดียวกัน การค้นหา "runs" จึงเจอบทความทั้งห้าชิ้นที่ใช้รูปใดรูปหนึ่ง:
+
+```sql
+-- sql/match.sql
+SELECT id, title
+FROM articles
+WHERE to_tsvector('english', title || ' ' || body) @@ plainto_tsquery('english', 'runs')
+ORDER BY id;
+```
+
+```text
+ id |         title          
+----+------------------------
+  1 | Trail running shoes
+  2 | Marathon training plan
+  5 | Stretching after a run
+  6 | Choosing trail food
+  8 | Shoe care
+(5 rows)
+```
+
+เทียบกับ `LIKE` ที่ match ตัวอักษร ไม่ใช่คำ มันเจอ `runs` ตามตัวอักษร (หนึ่งบทความ) และที่แย่กว่าคือเจอตัวอักษรข้างในคำอื่นที่ไม่เกี่ยว:
+
+```sql
+-- sql/like-contrast.sql
+-- LIKE compares characters: it finds the literal "runs" but not run / running
+SELECT id, title FROM articles WHERE title || ' ' || body ILIKE '%runs%' ORDER BY id;
+-- and it finds letters inside other words
+SELECT 'a lovely brunch' ILIKE '%run%' AS like_says,
+       to_tsvector('english', 'a lovely brunch') @@ plainto_tsquery('english', 'run') AS fts_says;
+```
+
+```text
+ id |         title          
+----+------------------------
+  2 | Marathon training plan
+(1 row)
+
+ like_says | fts_says 
+-----------+----------
+ t         | f
+(1 row)
+```
+
+## จัดอันดับผลลัพธ์
+
+การ match ไม่ใช่การ match ที่ดี `ts_rank` ให้คะแนนตามความถี่ของคำ; `ts_rank_cd` ให้รางวัลคำที่อยู่ใกล้กัน (cover density) เพิ่มด้วย เพื่อให้ผลตรงใน title มีน้ำหนักมากกว่าใน body ให้ถ่วงน้ำหนักแต่ละส่วนด้วย `setweight` (`A` หนักสุด; ค่าเริ่มต้นคือ 1.0 สำหรับ A, 0.4 สำหรับ B, 0.2 สำหรับ C และ 0.1 สำหรับ D) ค้นหา "trail or shoes":
+
+```sql
+-- sql/ranking.sql
+SELECT id, title,
+       round(ts_rank(setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B'),
+                     websearch_to_tsquery('english', 'trail or shoes'))::numeric, 4) AS rank,
+       round(ts_rank_cd(setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B'),
+                        websearch_to_tsquery('english', 'trail or shoes'))::numeric, 4) AS rank_cd
+FROM articles
+WHERE (setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B'))
+      @@ websearch_to_tsquery('english', 'trail or shoes')
+ORDER BY rank DESC, id;
+```
+
+```text
+ id |         title          |  rank  | rank_cd 
+----+------------------------+--------+---------
+  1 | Trail running shoes    | 0.6822 |  3.2000
+  8 | Shoe care              | 0.3479 |  1.8000
+  6 | Choosing trail food    | 0.3040 |  1.0000
+  7 | Rain gear for cyclists | 0.1216 |  0.4000
+(4 rows)
+```
+
+"Trail running shoes" ชนะเพราะทั้งสองคำอยู่ใน title (น้ำหนัก A) "Shoe care" เหนือ "Choosing trail food" (0.3479 เทียบกับ 0.3040): *shoe* ปรากฏสามครั้งในนั้น (title หนึ่ง body สอง) ขณะที่ *trail* ปรากฏครั้งเดียวในอีกอัน `ts_headline` สร้าง snippet ที่ทำเครื่องหมายคำที่ตรง สำหรับหน้าผลลัพธ์:
+
+```sql
+-- sql/headline.sql
+SELECT id, ts_headline('english', body, websearch_to_tsquery('english', 'trail or shoes'),
+                       'StartSel=<b>, StopSel=</b>, MaxWords=12, MinWords=5') AS snippet
+FROM articles
+WHERE to_tsvector('english', body) @@ websearch_to_tsquery('english', 'trail or shoes')
+ORDER BY id;
+```
+
+```text
+ id |                 snippet                 
+----+-----------------------------------------
+  1 | <b>trail</b> <b>shoes</b> grip wet rock
+  7 | <b>shoe</b> covers and a rain
+  8 | <b>shoes</b> with a soft brush
+(3 rows)
+```
+
+## Index การค้นหา
+
+การคำนวณ `to_tsvector` ใหม่ทุก row ทุกครั้งที่ค้นหาช้า มีสองแบบที่หลีกเลี่ยงได้ แบบที่สะอาดคือ **generated column** ที่เก็บ `tsvector` บวก GIN index บนมัน PostgreSQL ดูแลให้ column ตรงกันเอง และ query สั้น:
+
+```sql
+-- sql/generated-column.sql
+ALTER TABLE articles ADD COLUMN search tsvector
+  GENERATED ALWAYS AS (setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B')) STORED;
+CREATE INDEX articles_search_idx ON articles USING gin (search);
+SELECT id, title FROM articles WHERE search @@ websearch_to_tsquery('english', 'trail shoes -leather') ORDER BY id;
+```
+
+```text
+ALTER TABLE
+CREATE INDEX
+ id |        title        
+----+---------------------
+  1 | Trail running shoes
+(1 row)
+```
+
+query เดียวกันแบบมี parameter จากแต่ละ driver (ข้อความ `websearch_to_tsquery` เดียวกันส่งเป็นค่า bind จึงปลอดภัยที่จะเปิดให้ input ผู้ใช้):
+
+```sql
+-- sql/param-search.sql
+SELECT title
+FROM articles
+WHERE search @@ websearch_to_tsquery('english', $1)
+ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id
+\bind 'trail or shoes -leather' \g
+```
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/param-search.sql
     SELECT title
     FROM articles
-    WHERE to_tsvector('english', body) @@ plainto_tsquery('english', 'running shoes');
+    WHERE search @@ websearch_to_tsquery('english', $1)
+    ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id
+    \bind 'trail or shoes -leather' \g
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -58,41 +257,44 @@ match operator `@@` คืนค่า true เมื่อ `tsvector` ตอบ
     const res = await pool.query(
       `SELECT title
        FROM articles
-       WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)`,
-      ['running shoes'],
+       WHERE search @@ websearch_to_tsquery('english', $1)
+       ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id`,
+      ['trail or shoes -leather'],
     );
-    console.log(res.rows);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute(
-        """
-        SELECT title
-        FROM articles
-        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', %s)
-        """,
-        ("running shoes",),
+        """SELECT title
+           FROM articles
+           WHERE search @@ websearch_to_tsquery('english', %s)
+           ORDER BY ts_rank(search, websearch_to_tsquery('english', %s)) DESC, id""",
+        ("trail or shoes -leather",) * 2,
     )
     rows = cur.fetchall()
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    rows, err := conn.Query(ctx, `
-        SELECT title
-        FROM articles
-        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)`,
-        "running shoes")
+    rows, err := conn.Query(ctx,
+        `SELECT title
+         FROM articles
+         WHERE search @@ websearch_to_tsquery('english', $1)
+         ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id`,
+        "trail or shoes -leather")
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT title FROM articles \
-         WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)",
+        "SELECT title
+         FROM articles
+         WHERE search @@ websearch_to_tsquery('english', $1)
+         ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id",
     )
-    .bind("running shoes")
+    .bind("trail or shoes -leather")
     .fetch_all(&pool)
     .await?;
     ```
@@ -100,182 +302,287 @@ match operator `@@` คืนค่า true เมื่อ `tsvector` ตอบ
 </Tabs>
 
 ```text
-        title
-----------------------
- Choosing trail shoes
+         title          
+------------------------
+ Trail running shoes
+ Shoe care
+ Choosing trail food
+ Rain gear for cyclists
+(4 rows)
+```
+
+```text
+$ (each snippet run once against the articles above; multi-line driver output joined onto one line)
+Node.js (pg 8.23.0):    [ 'Trail running shoes', 'Shoe care', 'Choosing trail food', 'Rain gear for cyclists' ]
+Python (psycopg 3.3.6): ['Trail running shoes', 'Shoe care', 'Choosing trail food', 'Rain gear for cyclists']
+Go (pgx v5.11.0):       Trail running shoes / Shoe care / Choosing trail food / Rain gear for cyclists
+Rust (sqlx 0.9.0):      Trail running shoes / Shoe care / Choosing trail food / Rain gear for cyclists
+```
+
+สังเกตว่า column เป็น `STORED` PostgreSQL 18 ทำให้ `VIRTUAL` เป็นค่าเริ่มต้นของ generated column แต่ virtual column ถูกคำนวณตอนอ่านและ index ไม่ได้:
+
+```sql
+-- @expect-error 0A000
+CREATE TABLE virtual_demo (
+  id   int,
+  body text,
+  doc  tsvector GENERATED ALWAYS AS (to_tsvector('english', body)) VIRTUAL
+);
+CREATE INDEX ON virtual_demo USING gin (doc);
+```
+
+```text
+CREATE TABLE
+ERROR:  indexes on virtual generated columns are not supported
+```
+
+### index ให้อะไร
+
+บนบทความ 100 000 ชิ้นชิ้นละ 30 คำ (สุ่มจากคลังคำ 3 000 คำ) การค้นหาเดียวกัน ก่อนและหลัง GIN index:
+
+```sql
+-- sql/big-articles.sql
+CREATE TABLE big_articles (
+  id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title  text NOT NULL,
+  body   text NOT NULL
+);
+-- 100 000 articles of 30 words each, drawn from a vocabulary of 3 000 words (w0 ... w2999)
+INSERT INTO big_articles (title, body)
+SELECT 'Article ' || g,
+       (SELECT string_agg('w' || (('x' || substr(md5(g::text || ':' || i::text), 1, 6))::bit(24)::int % 3000), ' ')
+        FROM generate_series(1, 30) AS i)
+FROM generate_series(1, 100000) AS g;
+ALTER TABLE big_articles ADD COLUMN search tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED;
+ANALYZE big_articles;
+SELECT count(*) AS rows, pg_size_pretty(pg_relation_size('big_articles')) AS heap FROM big_articles;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+ALTER TABLE
+ANALYZE
+  rows  | heap  
+--------+-------
+ 100000 | 66 MB
 (1 row)
 ```
 
-สำหรับ query ที่มีโครงสร้างให้ใช้ `to_tsquery` ซึ่งเข้าใจ boolean operator ตัวอย่าง `to_tsquery('english', 'shoe & !leather')` จะ match เอกสารเกี่ยวกับรองเท้าที่ไม่กล่าวถึงหนัง
-
-## การจัดอันดับผลลัพธ์
-
-การ match เป็นแค่ใช่หรือไม่ใช่ แต่ผลการค้นหาต้องมีลำดับ `ts_rank` ให้คะแนนว่า `tsvector` match กับ `tsquery` ได้ดีแค่ไหน โดยคืนค่า `real` ที่คุณนำมาเรียงจากมากไปน้อยได้
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    SELECT title,
-           ts_rank(to_tsvector('english', body),
-                   plainto_tsquery('english', 'running shoes')) AS rank
-    FROM articles
-    WHERE to_tsvector('english', body) @@ plainto_tsquery('english', 'running shoes')
-    ORDER BY rank DESC;
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const res = await pool.query(
-      `SELECT title,
-              ts_rank(to_tsvector('english', body),
-                      plainto_tsquery('english', $1)) AS rank
-       FROM articles
-       WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)
-       ORDER BY rank DESC`,
-      ['running shoes'],
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute(
-        """
-        SELECT title,
-               ts_rank(to_tsvector('english', body),
-                       plainto_tsquery('english', %(q)s)) AS rank
-        FROM articles
-        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', %(q)s)
-        ORDER BY rank DESC
-        """,
-        {"q": "running shoes"},
-    )
-    rows = cur.fetchall()
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    rows, err := conn.Query(ctx, `
-        SELECT title,
-               ts_rank(to_tsvector('english', body),
-                       plainto_tsquery('english', $1)) AS rank
-        FROM articles
-        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)
-        ORDER BY rank DESC`,
-        "running shoes")
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let rows = sqlx::query(
-        "SELECT title, \
-                ts_rank(to_tsvector('english', body), plainto_tsquery('english', $1)) AS rank \
-         FROM articles \
-         WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1) \
-         ORDER BY rank DESC",
-    )
-    .bind("running shoes")
-    .fetch_all(&pool)
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
+```sql
+-- sql/fts-no-index.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM big_articles WHERE search @@ to_tsquery('english', 'w17 & w42');
+```
 
 ```text
-        title         |   rank
-----------------------+-----------
- Choosing trail shoes | 0.0607927
- Marathon training    | 0.0303964
-(2 rows)
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Aggregate (actual time=16.778..16.783 rows=1.00 loops=1)
+   ->  Seq Scan on big_articles (actual time=0.905..16.771 rows=15.00 loops=1)
+         Filter: (search @@ '''w17'' & ''w42'''::tsquery)
+         Rows Removed by Filter: 99985
+ Planning Time: 0.303 ms
+ Execution Time: 16.803 ms
+(6 rows)
 ```
 
-## การทำ index ให้การค้นหา
-
-query ข้างต้นคำนวณ `to_tsvector(body)` ใหม่สำหรับทุก row ในทุกการค้นหา ซึ่งจะช้าลงเมื่อ table โตขึ้น มีสองแพตเทิร์นที่แก้ปัญหานี้ และใช้ร่วมกันได้ดีด้วย
-
-ข้อแรก เก็บ `tsvector` ไว้ครั้งเดียวใน **generated column** เพื่อให้คำนวณตอนเขียน ไม่ใช่ตอนอ่าน:
-
 ```sql
-ALTER TABLE articles
-  ADD COLUMN search tsvector
-  GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED;
-```
-
-จากนั้นใส่ **GIN** index บน column นั้นเพื่อให้การจับคู่ไม่ต้อง scan ทุก row:
-
-```sql
-CREATE INDEX idx_articles_search ON articles USING gin (search);
+-- sql/fts-gin.sql
+CREATE INDEX big_articles_search_idx ON big_articles USING gin (search);
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM big_articles WHERE search @@ to_tsquery('english', 'w17 & w42');
+SELECT pg_size_pretty(pg_relation_size('big_articles_search_idx')) AS gin_size;
 ```
 
 ```text
 CREATE INDEX
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
+ Aggregate (actual time=0.258..0.261 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on big_articles (actual time=0.156..0.255 rows=15.00 loops=1)
+         Recheck Cond: (search @@ '''w17'' & ''w42'''::tsquery)
+         Heap Blocks: exact=15
+         ->  Bitmap Index Scan on big_articles_search_idx (actual time=0.076..0.076 rows=15.00 loops=1)
+               Index Cond: (search @@ '''w17'' & ''w42'''::tsquery)
+               Index Searches: 1
+ Planning Time: 0.330 ms
+ Execution Time: 0.277 ms
+(9 rows)
+
+ gin_size 
+----------
+ 15 MB
+(1 row)
 ```
 
-ตอนนี้การค้นหาจะอ่าน column ที่คำนวณไว้ล่วงหน้าและใช้ index:
+16.8 ms กลายเป็น 0.28 ms สำหรับ 15 บทความที่ตรง; ราคาคือ GIN index 15 MB บน table 66 MB index ใหญ่ขึ้นตามคลังคำและปริมาณข้อความ และทำให้ insert และ update ช้าลง เหมือน index ทุกตัว
+
+## เทียบเคียง: trigram และเครื่องหมายกำกับ
+
+full-text search match คำเต็มที่สะกดถูก คำสะกดผิด (`runing`) stem เป็น lexeme อื่นและไม่เจออะไร สำหรับการ match แบบ fuzzy extension `pg_trgm` เทียบชิ้นส่วนสามตัวอักษร และ `unaccent` ตัดเครื่องหมายกำกับให้ `café` match `cafe` ([pg_trgm](https://www.postgresql.org/docs/18/pgtrgm.html), [unaccent](https://www.postgresql.org/docs/18/unaccent.html)):
 
 ```sql
-SELECT title, ts_rank(search, plainto_tsquery('english', 'running shoes')) AS rank
-FROM articles
-WHERE search @@ plainto_tsquery('english', 'running shoes')
-ORDER BY rank DESC;
+-- sql/trigram.sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+SELECT similarity('runing', 'running') AS typo_score,
+       'runing' % 'running'            AS typo_matches,
+       to_tsvector('english', 'runing') @@ plainto_tsquery('english', 'running') AS fts_matches_typo,
+       unaccent('caf' || chr(233) || ' cr' || chr(232) || 'me') AS unaccented;
 ```
 
-**ใน pgAdmin:** column `search` แบบ generated จะปรากฏใน table เหมือน column อื่น ๆ แต่เป็นแบบอ่านอย่างเดียว คุณแก้ค่าตรง ๆ ไม่ได้เพราะ Postgres ดึงค่ามาจาก `title` และ `body`
+```text
+CREATE EXTENSION
+CREATE EXTENSION
+ typo_score | typo_matches | fts_matches_typo | unaccented 
+------------+--------------+------------------+------------
+  0.6666667 | t            | f                | cafe creme
+(1 row)
+```
+
+คำสะกดผิดได้คะแนนความคล้าย 0.67 และ match ด้วย operator `%` ขณะที่ full-text search ไม่เจออะไร ใช้ `pg_trgm` สำหรับ "หมายถึงคำนี้ไหม" และ autocomplete ใช้ full-text search สำหรับข้อความร้อยแก้วที่จัดอันดับตามความเกี่ยวข้อง
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอให้ทำการค้นหาบทความเร็วขึ้น มันเขียน expression index บน `to_tsvector('english', body)` และ query ค้นหา พร้อมคอมเมนต์ว่า index รองรับ:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "GIN index on the article text - search is now fast"
+CREATE INDEX big_articles_body_gin ON big_articles USING gin (to_tsvector('english', body));
+
+SELECT id, title FROM big_articles
+WHERE to_tsvector(body) @@ to_tsquery('w17 & w42');`}>
+
+index กับ query ใช้ expression *คนละตัว*: index อยู่บน `to_tsvector('english', body)` ส่วน query เรียก `to_tsvector(body)` แบบ argument เดียว ซึ่งใช้ `default_text_search_config` สำหรับ planner นี่คือคนละฟังก์ชัน จึงใช้ index ไม่ได้ และ query คำนวณ tsvector ทุก row: 573 ms สำหรับ 100 000 row สั้น ๆ
+
+```sql
+-- sql/stb-wrong.sql
+CREATE INDEX big_articles_body_gin ON big_articles USING gin (to_tsvector('english', body));
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT id, title FROM big_articles
+WHERE to_tsvector(body) @@ to_tsquery('w17 & w42');
+```
+
+```text
+CREATE INDEX
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Gather (actual time=48.420..573.384 rows=15.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Parallel Seq Scan on big_articles (actual time=37.433..570.271 rows=5.00 loops=3)
+         Filter: (to_tsvector(body) @@ to_tsquery('w17 & w42'::text))
+         Rows Removed by Filter: 33328
+ Planning Time: 0.258 ms
+ Execution Time: 573.417 ms
+(8 rows)
+```
+
+วิธีแก้คือเขียน expression ซ้ำให้เหมือนเป๊ะ โดยระบุ configuration ทั้งสองที่ การค้นหาลดจาก 573 ms เหลือ 0.16 ms (การออกแบบด้วย generated column ข้างบนหลีกเลี่ยง bug ประเภทนี้: column เดียว expression เดียว เขียนครั้งเดียว)
+
+```sql
+-- sql/stb-fixed.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT id, title FROM big_articles
+WHERE to_tsvector('english', body) @@ to_tsquery('english', 'w17 & w42');
+```
+
+```text
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on big_articles (actual time=0.105..0.135 rows=15.00 loops=1)
+   Recheck Cond: (to_tsvector('english'::regconfig, body) @@ '''w17'' & ''w42'''::tsquery)
+   Heap Blocks: exact=15
+   ->  Bitmap Index Scan on big_articles_body_gin (actual time=0.096..0.096 rows=15.00 loops=1)
+         Index Cond: (to_tsvector('english'::regconfig, body) @@ '''w17'' & ''w42'''::tsquery)
+         Index Searches: 1
+ Planning Time: 0.331 ms
+ Execution Time: 0.155 ms
+(8 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+full-text search คือ pipeline: parse ข้อความเป็น token, ทิ้ง stop word, stem ที่เหลือด้วย dictionary และเก็บ lexeme พร้อมตำแหน่ง (`tsvector`); ทำเหมือนกันกับ query ของผู้ใช้ เชื่อมด้วย operator (`tsquery`) `@@` เป็นตรรกะเซตบน lexeme ไม่ใช่การเทียบสตริง มันจึง index ได้เร็ว (GIN แมปแต่ละ lexeme ไปยังเอกสาร) และมองไม่เห็นสิ่งที่ dictionary ไม่ได้เชื่อม เช่นรูปไม่ปกติและคำสะกดผิด การจัดอันดับเป็นอีกขั้นบนผลที่ match
 
 ## เคล็ดลับและข้อควรระวัง
 
-- ส่ง language configuration อย่าง `'english'` เสมอ configuration นี้ควบคุม stemming และ stop word การใช้ผิด (หรือใช้ `simple` ซึ่งไม่ทำทั้งสองอย่าง) จะเปลี่ยนว่า row ใดจะ match
-- ใช้ configuration เดียวกันทั้งสำหรับ `tsvector` ที่เก็บไว้และสำหรับ query เอกสารที่สร้างด้วย `english` จะไม่ match กับ query ที่ parse ด้วย configuration อื่น
-- คำนวณ `tsvector` ล่วงหน้าใน generated column สำหรับ table ใด ๆ ที่คุณค้นหาซ้ำ ๆ วิธีนี้ย้ายต้นทุนไปอยู่ตอนเขียน และปล่อยให้ GIN index ทำงานได้เต็มที่
-- เลือกฟังก์ชัน query ให้ถูก: `plainto_tsquery` สำหรับ input ดิบจากผู้ใช้ (จะ and คำทั้งหมดเข้าด้วยกัน), `to_tsquery` เมื่อคุณต้องการ operator `&`, `|` และ `!` ที่ระบุชัดเจน และ `websearch_to_tsquery` สำหรับวลีในเครื่องหมายคำพูดแบบ Google
+- ระบุ configuration เสมอ (`to_tsvector('english', ...)`) อย่าพึ่ง `default_text_search_config`
+- สำหรับช่องค้นหาใช้ `websearch_to_tsquery`: มันไม่ส่ง syntax error กับ input ผู้ใช้
+- index column `tsvector` แบบ generated ที่ `STORED` ด้วย GIN virtual generated column index ไม่ได้
+- expression index ถูกใช้เฉพาะเมื่อ query เขียน expression เดิมซ้ำ รวม configuration
+- ถ่วงน้ำหนัก title เหนือ body ด้วย `setweight`; จัดอันดับด้วย `ts_rank` หรือ `ts_rank_cd` แล้ว order ตามนั้น
+- stemming อิงกฎ: `ran` ไม่ใช่ `run`; คำสะกดผิดต้องใช้ `pg_trgm`
 
-<Callout title="Search engine ในกล่อง">
-สำหรับหลายแอปพลิเคชัน full-text search ของ PostgreSQL ตัดความจำเป็นในการมี search service แยกต่างหากออกไป คุณได้ stemming, stop word, boolean query และการจัดอันดับใน SQL ธรรมดา โดยทำ index ด้วย GIN หยิบ search engine เฉพาะทางมาใช้ก็ต่อเมื่อคุณโตจนเกินขีดของ PostgreSQL แล้ว ไม่ใช่ใช้เป็นค่าตั้งต้น
+<Callout title="การค้นหาเป็นฟีเจอร์ ไม่ใช่แค่ query">
+`@@` ตอบ "ตรงไหม?" ช่องค้นหาจริงยังต้องมีการจัดอันดับ snippet การทนคำสะกดผิด ตัวกรอง และ pagination PostgreSQL ให้ส่วนประกอบเหล่านี้ในฐานข้อมูลเดียวที่สอดคล้องแบบ transaction; search engine เฉพาะทางคุ้มกับต้นทุนการดูแลเมื่อคุณต้องการมากกว่านั้นมากเท่านั้น
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| PostgreSQL full-text search | ไม่ต้องดูแล service เพิ่ม ข้อมูลกับ index อยู่ที่เดียวกัน การจัดอันดับ "ดีพอ" สำหรับหลายกรณี | tuning เรื่อง relevance และ faceted search ทำได้จำกัดกว่า engine เฉพาะทาง |
-| Elasticsearch (หรือ search engine แยก) | relevance tuning ละเอียด รองรับ facet และ scale การค้นหาได้ดีกว่ามาก | ต้องรัน service เพิ่ม ต้องดูแลการ sync ข้อมูลระหว่างสอง system |
+| `LIKE '%x%'` / `ILIKE` | ไม่ต้องตั้งค่า ตัวอักษรตรงเป๊ะ | Seq Scan ถ้าไม่มี trigram index; ไม่มี stemming การจัดอันดับ หรือขอบเขตคำ |
+| Full-text search + GIN | รู้จักคำ จัดอันดับได้ 16.8 ms เหลือ 0.28 ms บน 100 000 row | index 15 MB; กฎ stemming ไม่ทนคำสะกดผิด |
+| `pg_trgm` | ทนคำสะกดผิด substring ใดก็ได้ | index ใหญ่กว่า; ความคล้าย ไม่ใช่ภาษา |
+| `tsvector` แบบ generated ที่ stored | expression เดียว ตรงกันเสมอ index ได้ | ดิสก์เพิ่มสำหรับ column; การเขียนคำนวณใหม่ |
+| Expression index | ไม่ต้องมี column เพิ่ม | query ต้องเขียน expression เดิมเป๊ะ (573 ms เมื่อไม่ตรง) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **หยิบ Elasticsearch มาใช้เป็นค่าเริ่มต้นโดยไม่เช็คก่อน** — หลายระบบมี traffic และความต้องการด้าน relevance ที่ full-text search ของ PostgreSQL รองรับได้สบาย ๆ อยู่แล้ว ลองของที่มีอยู่แล้วก่อนเพิ่ม infrastructure ใหม่
-- **ลืมทำ GIN index บน column `tsvector`** — ไม่มี index แปลว่าทุกการค้นหาต้อง scan ทุก row และคำนวณ `to_tsvector` ใหม่ทุกครั้ง ซึ่งช้าลงเรื่อย ๆ เมื่อ table โต
-- **ไม่อัปเดต search vector เมื่อข้อความต้นทางเปลี่ยน** — ถ้าไม่ใช้ generated column หรือ trigger ที่คอยอัปเดต `tsvector` ให้ตรงกับ `title`/`body` ล่าสุด การค้นหาจะอ้างอิงข้อความเก่าที่ไม่ตรงกับสิ่งที่ผู้ใช้เห็นจริง
-
-> 💡 ตัวอย่างจากของจริง
->
-> **Hasura และ API ที่สร้างบน PostgREST** — มักเปิดใช้ full-text search ของ PostgreSQL ตรง ๆ ผ่าน `tsvector`/`tsquery` แทนที่จะต่อ search service แยก เพราะ query layer เชื่อมกับฐานข้อมูลอยู่แล้ว
->
-> **SaaS ขนาดเล็กถึงกลางจำนวนมาก** — ย้ายออกจาก Elasticsearch cluster แยกต่างหากมาใช้ full-text search ของ PostgreSQL เมื่อพบว่าปริมาณการค้นหาจริงไม่ได้ต้องการ infrastructure ขนาดนั้น ลดทั้งต้นทุนและความซับซ้อนในการดูแล
+- **"Full-text search เข้าใจภาษา"** มันใช้ dictionary: `running` match `run`, `ran` ไม่ match
+- **"FTS คือ LIKE ที่เร็วกว่า"** มัน match lexeme จัดอันดับได้ และหา substring เช่น `%un%` ไม่ได้
+- **"config เริ่มต้นคือ `simple`"** ที่นี่คือ `english` (หามาจาก locale); `simple` ใต้ `C`
+- **"index รองรับ query ถ้า column ตรงกัน"** expression ทั้งหมดต้องตรงกัน รวม configuration
+- **"ฉัน index virtual generated column ได้"** PostgreSQL 18 ปฏิเสธ: `indexes on virtual generated columns are not supported`
 
 export const quizFts = [
   {
-    q: 'to_tsvector ทำอะไรกับวลีอย่าง "The cats were running"?',
-    options: [
-      'เก็บข้อความไว้ตามตัวอักษรเพื่อจับคู่ substring แบบเป๊ะ ๆ',
-      'ทำให้เป็นมาตรฐานเป็น lexeme ตัด stop word ทิ้งและทำ stemming คำ',
-      'แปลข้อความเป็นอีกภาษาหนึ่ง',
-      'เข้ารหัสข้อความเพื่อเก็บอย่างปลอดภัย',
-    ],
+    q: 'operator ไหนทดสอบว่า tsvector ตรงกับ tsquery?',
+    options: ['=', '@@', '~~', '@>'],
     answer: 1,
+    explain: '`document @@ query` เป็นจริงเมื่อ lexeme เป็นไปตาม query ส่วน `@>` คือ containment ของ jsonb/array',
   },
   {
-    q: 'operator ใดทดสอบว่า tsvector ตอบสนองต่อ tsquery หรือไม่?',
-    options: ['@>', '@@', '->>', '&&'],
-    answer: 1,
+    q: 'ฟังก์ชันไหนปลอดภัยที่สุดสำหรับ parse ข้อความดิบที่ผู้ใช้พิมพ์ในช่องค้นหา?',
+    options: ['to_tsquery', 'plainto_tsquery อย่างเดียว', 'websearch_to_tsquery', 'to_tsvector'],
+    answer: 2,
+    explain: 'มันเข้าใจเครื่องหมายคำพูด "or" และ "-" และไม่ส่ง syntax error; `to_tsquery(\'trail shoes\')` ล้มด้วย `syntax error in tsquery`',
   },
   {
-    q: 'วิธีที่แนะนำในการทำให้การค้นหา full-text ซ้ำ ๆ เร็วขึ้นคืออะไร?',
+    q: '`to_tsvector(\'english\', \'I ran home\') @@ plainto_tsquery(\'english\', \'running\')` match ไหม?',
     options: [
-      'รัน VACUUM ก่อนการค้นหาแต่ละครั้ง',
-      'เก็บ tsvector ใน generated column แล้วเพิ่ม GIN index ทับ column นั้น',
-      'ใช้ LIKE แทน',
-      'เพิ่ม B-tree index บน column body',
+      'match เพราะ ran กับ running มีรากเดียวกัน',
+      'ไม่: stemming อิงกฎ และ ran เป็นคนละ lexeme กับ run',
+      'เฉพาะ configuration แบบ simple',
+      'ส่ง error',
     ],
     answer: 1,
+    explain: 'ได้ f ส่วน `I run home` ได้ t รูปไม่ปกติไม่ถูก dictionary english เชื่อมเข้าด้วยกัน',
+  },
+  {
+    q: 'ทำไมการค้นหาที่ใช้ `to_tsvector(body)` ละเลย index ที่สร้างบน `to_tsvector(\'english\', body)`?',
+    options: [
+      'GIN index text ไม่ได้',
+      'สอง expression เป็นคนละฟังก์ชันสำหรับ planner index จึงไม่ตรง',
+      'index ไม่ได้ analyze',
+      'to_tsvector index ไม่ได้',
+    ],
+    answer: 1,
+    explain: 'รูปแบบ argument เดียวใช้ default_text_search_config ความไม่ตรงนี้เสีย 573 ms; การเขียน expression เดิมเป๊ะได้ 0.16 ms',
+  },
+  {
+    q: 'คุณประกาศ `doc tsvector GENERATED ALWAYS AS (...) VIRTUAL` แล้วลองสร้าง GIN index บนมัน จะเกิดอะไรขึ้น?',
+    options: [
+      'ใช้ได้และเร็วกว่า',
+      'PostgreSQL 18 ปฏิเสธ: indexes on virtual generated columns are not supported; ใช้ STORED',
+      'สร้าง index แต่ถูกละเลย',
+      'column ถูกแปลงเป็น STORED อัตโนมัติ',
+    ],
+    answer: 1,
+    explain: 'statement ล้มด้วย SQLSTATE 0A000 generated column แบบ STORED คำนวณตอนเขียนและ index ได้',
   },
 ];
 

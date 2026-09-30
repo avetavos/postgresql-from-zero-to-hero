@@ -1,6 +1,6 @@
 ---
-title: Full-text search
-description: Turn prose into a tsvector, match it against a tsquery with the @@ operator, rank results with ts_rank, and index search with a GIN index or a generated tsvector column.
+title: Full-Text Search
+description: Search text by meaning-ish instead of by characters — tsvector, tsquery and stemming, four ways to build a query, weighted ranking, headlines, a generated column with a GIN index measured on 100,000 documents, and how a config mismatch silently disables the index.
 sidebar:
   order: 3
 ---
@@ -9,48 +9,247 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-A `LIKE '%search%'` query finds an exact substring, but it does not understand language. It cannot tell that "running" and "ran" share a root, it ignores nothing-words like "the", and it cannot rank one match above another. PostgreSQL's full-text search solves all three: it reduces text to normalized search terms, matches queries against them, and scores how well each row fits.
+`LIKE '%word%'` compares characters. It cannot rank results, it finds letters hiding inside other words, it does not know that `runs` and `running` are forms of the same word, and without a special index it reads every row. PostgreSQL has a built-in answer: **full-text search**. A document is reduced to a set of normalized words (a `tsvector`), a search is a set of words joined by logic (a `tsquery`), and the `@@` operator asks whether the query matches the document.
 
-For this lesson we search a table of articles by their body text.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The `sql` fences run top to bottom in one empty database, the outputs are pasted from `psql`, and the timings are single runs from this Mac.
 
-## Two new types
+## The dataset
 
-Full-text search introduces two types. A `tsvector` is a document broken into normalized **lexemes** (root words) with their positions. A `tsquery` is a search expression of lexemes combined with the operators `&` (and), `|` (or), and `!` (not).
+Eight short articles, small enough to read every result but with enough overlap (running, runner, shoes, trail, waterproof) to make ranking interesting:
 
 ```sql
+-- sql/setup.sql
 CREATE TABLE articles (
   id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   title text NOT NULL,
   body  text NOT NULL
 );
+INSERT INTO articles (title, body) VALUES
+  ('Trail running shoes',          'Lightweight trail shoes grip wet rock and mud. A good runner rotates two pairs of shoes.'),
+  ('Marathon training plan',       'Twelve weeks of running: long runs on Sunday, easy runs midweek. The runner who ran the most miles improved fastest.'),
+  ('Caring for leather boots',     'Clean leather boots after each hike, then condition the leather. Waterproofing wax protects the stitching.'),
+  ('Waterproof jackets compared',  'We tested five waterproof jackets in heavy rain. The best jacket kept us dry and never wetted out.'),
+  ('Stretching after a run',       'A short stretching routine after a run reduces stiffness. Runners often skip stretching.'),
+  ('Choosing trail food',          'Nuts, dried fruit and cheese travel well. Avoid heavy food before a long run.'),
+  ('Rain gear for cyclists',       'Cyclists need waterproof shoe covers and a rain jacket that breathes.'),
+  ('Shoe care',                    'Wash muddy shoes with a soft brush. Never machine-dry running shoes.');
 ```
 
-You convert text into these types with functions. `to_tsvector(config, text)` produces a `tsvector`; `to_tsquery(config, text)` parses a structured query; and `plainto_tsquery(config, text)` turns plain user input into a query by anding the words together.
+## Two new types
+
+A `tsvector` is a sorted list of **lexemes** (normalized words) with their positions. Producing one drops stop words such as "the" and "were", lowercases, and **stems**: it reduces each word to a root using the rules of a text search configuration. `SHOW default_text_search_config` tells you which one is the default here:
 
 ```sql
-SELECT to_tsvector('english', 'The cats were running quickly');
+-- sql/tsvector.sql
+SHOW default_text_search_config;
+SELECT to_tsvector('english', 'The quick brown foxes were running quickly');
+SELECT to_tsvector('english', title) FROM articles WHERE id IN (1, 5) ORDER BY id;
 ```
 
 ```text
-                to_tsvector
---------------------------------------------
- 'cat':2 'quick':5 'run':4
+ default_text_search_config 
+----------------------------
+ pg_catalog.english
+(1 row)
+
+              to_tsvector              
+---------------------------------------
+ 'brown':3 'fox':4 'quick':2,7 'run':6
+(1 row)
+
+        to_tsvector         
+----------------------------
+ 'run':2 'shoe':3 'trail':1
+ 'run':4 'stretch':1
+(2 rows)
+```
+
+Note the default is `pg_catalog.english` on this server. `initdb` derives it from the locale of the cluster (under the `C` locale it would be `simple`, which does no stemming and drops no stop words), so always pass the configuration explicitly, as every query in this lesson does ([docs](https://www.postgresql.org/docs/18/textsearch-configuration.html)). In the first line, "quick" and "quickly" both became `quick` (positions 2 and 7), "foxes" became `fox`, "running" became `run`.
+
+Stemming joins forms that follow rules, and only those. `running` matches `run`, but the irregular past tense `ran` is a different lexeme, and `mice` does not become `mouse`. The dictionaries are rule-based; they are not a thesaurus:
+
+```sql
+-- sql/stemming.sql
+-- stemming maps different forms to one lexeme; irregular forms are NOT joined
+SELECT to_tsvector('english', 'I ran home')                               AS ran_home,
+       to_tsvector('english', 'I ran home') @@ plainto_tsquery('english', 'running') AS running_matches_ran,
+       to_tsvector('english', 'I run home') @@ plainto_tsquery('english', 'running') AS running_matches_run,
+       to_tsvector('english', 'mice geese')                               AS irregular;
+```
+
+```text
+     ran_home     | running_matches_ran | running_matches_run |     irregular     
+------------------+---------------------+---------------------+-------------------
+ 'home':3 'ran':2 | f                   | t                   | 'gees':2 'mice':1
 (1 row)
 ```
 
-Notice what happened: "The" and "were" were dropped as stop words, "cats" became "cat", "running" became "run", and "quickly" became "quick". Both a document and a query pass through the same normalization, so "running" in a search matches "runs" or "run" in the text (the stemmer does not map irregular forms such as "ran" to "run").
+## Building a query
+
+A `tsquery` is a set of lexemes with `&` (and), `|` (or), `!` (not) and `<->` (followed by). PostgreSQL has four constructors, from strictest to friendliest:
+
+```sql
+-- sql/tsquery-forms.sql
+SELECT plainto_tsquery('english', 'trail running shoes')            AS plain,
+       to_tsquery('english', 'trail & (shoes | boots) & !leather')  AS operators,
+       phraseto_tsquery('english', 'trail running shoes')           AS phrase,
+       websearch_to_tsquery('english', '"trail shoes" -leather')    AS websearch;
+```
+
+```text
+          plain           |                 operators                  |            phrase            |            websearch            
+--------------------------+--------------------------------------------+------------------------------+---------------------------------
+ 'trail' & 'run' & 'shoe' | 'trail' & ( 'shoe' | 'boot' ) & !'leather' | 'trail' <-> 'run' <-> 'shoe' | 'trail' <-> 'shoe' & !'leather'
+(1 row)
+```
+
+`plainto_tsquery` ANDs every word. `to_tsquery` takes operator syntax and is strict about it (a bare space is a syntax error, below). `phraseto_tsquery` requires the words in order. `websearch_to_tsquery` reads what users actually type: quotes make a phrase, `or` is OR, `-` is NOT, and it never raises a syntax error on user input, which is why it is the one to put behind a search box.
+
+```sql
+-- @expect-error 42601
+SELECT to_tsquery('english', 'trail shoes');
+```
+
+```text
+ERROR:  syntax error in tsquery: "trail shoes"
+```
 
 ## Matching with the @@ operator
 
-The match operator `@@` returns true when a `tsvector` satisfies a `tsquery`. This is the heart of every full-text query.
+`tsvector @@ tsquery` is true when the document matches. Because `runs` and `run` and `running` share the stem `run`, a search for "runs" finds all five articles that use any of those forms:
+
+```sql
+-- sql/match.sql
+SELECT id, title
+FROM articles
+WHERE to_tsvector('english', title || ' ' || body) @@ plainto_tsquery('english', 'runs')
+ORDER BY id;
+```
+
+```text
+ id |         title          
+----+------------------------
+  1 | Trail running shoes
+  2 | Marathon training plan
+  5 | Stretching after a run
+  6 | Choosing trail food
+  8 | Shoe care
+(5 rows)
+```
+
+Compare with `LIKE`, which matches characters, not words. It finds the literal `runs` (one article) and, worse, finds letters inside unrelated words:
+
+```sql
+-- sql/like-contrast.sql
+-- LIKE compares characters: it finds the literal "runs" but not run / running
+SELECT id, title FROM articles WHERE title || ' ' || body ILIKE '%runs%' ORDER BY id;
+-- and it finds letters inside other words
+SELECT 'a lovely brunch' ILIKE '%run%' AS like_says,
+       to_tsvector('english', 'a lovely brunch') @@ plainto_tsquery('english', 'run') AS fts_says;
+```
+
+```text
+ id |         title          
+----+------------------------
+  2 | Marathon training plan
+(1 row)
+
+ like_says | fts_says 
+-----------+----------
+ t         | f
+(1 row)
+```
+
+## Ranking results
+
+A match is not a good match. `ts_rank` scores by term frequency; `ts_rank_cd` also rewards words that appear close together (cover density). To make a title hit count more than a body hit, weight the parts with `setweight` (`A` is heaviest; the defaults are 1.0 for A, 0.4 for B, 0.2 for C and 0.1 for D). Search "trail or shoes":
+
+```sql
+-- sql/ranking.sql
+SELECT id, title,
+       round(ts_rank(setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B'),
+                     websearch_to_tsquery('english', 'trail or shoes'))::numeric, 4) AS rank,
+       round(ts_rank_cd(setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B'),
+                        websearch_to_tsquery('english', 'trail or shoes'))::numeric, 4) AS rank_cd
+FROM articles
+WHERE (setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B'))
+      @@ websearch_to_tsquery('english', 'trail or shoes')
+ORDER BY rank DESC, id;
+```
+
+```text
+ id |         title          |  rank  | rank_cd 
+----+------------------------+--------+---------
+  1 | Trail running shoes    | 0.6822 |  3.2000
+  8 | Shoe care              | 0.3479 |  1.8000
+  6 | Choosing trail food    | 0.3040 |  1.0000
+  7 | Rain gear for cyclists | 0.1216 |  0.4000
+(4 rows)
+```
+
+"Trail running shoes" wins because both words are in its title (weight A). "Shoe care" beats "Choosing trail food" (0.3479 against 0.3040): *shoe* occurs three times in it (once in the title, twice in the body) while *trail* occurs once in the other. `ts_headline` builds a snippet with the matched words marked, for the results page:
+
+```sql
+-- sql/headline.sql
+SELECT id, ts_headline('english', body, websearch_to_tsquery('english', 'trail or shoes'),
+                       'StartSel=<b>, StopSel=</b>, MaxWords=12, MinWords=5') AS snippet
+FROM articles
+WHERE to_tsvector('english', body) @@ websearch_to_tsquery('english', 'trail or shoes')
+ORDER BY id;
+```
+
+```text
+ id |                 snippet                 
+----+-----------------------------------------
+  1 | <b>trail</b> <b>shoes</b> grip wet rock
+  7 | <b>shoe</b> covers and a rain
+  8 | <b>shoes</b> with a soft brush
+(3 rows)
+```
+
+## Indexing the search
+
+Recomputing `to_tsvector` for every row on every search is slow. Two designs avoid that. The clean one is a **generated column** holding the `tsvector`, plus a GIN index on it. The column is kept in sync by PostgreSQL itself, and the query is short:
+
+```sql
+-- sql/generated-column.sql
+ALTER TABLE articles ADD COLUMN search tsvector
+  GENERATED ALWAYS AS (setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', body), 'B')) STORED;
+CREATE INDEX articles_search_idx ON articles USING gin (search);
+SELECT id, title FROM articles WHERE search @@ websearch_to_tsquery('english', 'trail shoes -leather') ORDER BY id;
+```
+
+```text
+ALTER TABLE
+CREATE INDEX
+ id |        title        
+----+---------------------
+  1 | Trail running shoes
+(1 row)
+```
+
+The same query with parameters, from each driver (the same `websearch_to_tsquery` text goes in as a bind value, so it is safe to expose to user input):
+
+```sql
+-- sql/param-search.sql
+SELECT title
+FROM articles
+WHERE search @@ websearch_to_tsquery('english', $1)
+ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id
+\bind 'trail or shoes -leather' \g
+```
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/param-search.sql
     SELECT title
     FROM articles
-    WHERE to_tsvector('english', body) @@ plainto_tsquery('english', 'running shoes');
+    WHERE search @@ websearch_to_tsquery('english', $1)
+    ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id
+    \bind 'trail or shoes -leather' \g
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -58,41 +257,44 @@ The match operator `@@` returns true when a `tsvector` satisfies a `tsquery`. Th
     const res = await pool.query(
       `SELECT title
        FROM articles
-       WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)`,
-      ['running shoes'],
+       WHERE search @@ websearch_to_tsquery('english', $1)
+       ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id`,
+      ['trail or shoes -leather'],
     );
-    console.log(res.rows);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute(
-        """
-        SELECT title
-        FROM articles
-        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', %s)
-        """,
-        ("running shoes",),
+        """SELECT title
+           FROM articles
+           WHERE search @@ websearch_to_tsquery('english', %s)
+           ORDER BY ts_rank(search, websearch_to_tsquery('english', %s)) DESC, id""",
+        ("trail or shoes -leather",) * 2,
     )
     rows = cur.fetchall()
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    rows, err := conn.Query(ctx, `
-        SELECT title
-        FROM articles
-        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)`,
-        "running shoes")
+    rows, err := conn.Query(ctx,
+        `SELECT title
+         FROM articles
+         WHERE search @@ websearch_to_tsquery('english', $1)
+         ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id`,
+        "trail or shoes -leather")
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT title FROM articles \
-         WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)",
+        "SELECT title
+         FROM articles
+         WHERE search @@ websearch_to_tsquery('english', $1)
+         ORDER BY ts_rank(search, websearch_to_tsquery('english', $1)) DESC, id",
     )
-    .bind("running shoes")
+    .bind("trail or shoes -leather")
     .fetch_all(&pool)
     .await?;
     ```
@@ -100,182 +302,287 @@ The match operator `@@` returns true when a `tsvector` satisfies a `tsquery`. Th
 </Tabs>
 
 ```text
-        title
-----------------------
- Choosing trail shoes
+         title          
+------------------------
+ Trail running shoes
+ Shoe care
+ Choosing trail food
+ Rain gear for cyclists
+(4 rows)
+```
+
+```text
+$ (each snippet run once against the articles above; multi-line driver output joined onto one line)
+Node.js (pg 8.23.0):    [ 'Trail running shoes', 'Shoe care', 'Choosing trail food', 'Rain gear for cyclists' ]
+Python (psycopg 3.3.6): ['Trail running shoes', 'Shoe care', 'Choosing trail food', 'Rain gear for cyclists']
+Go (pgx v5.11.0):       Trail running shoes / Shoe care / Choosing trail food / Rain gear for cyclists
+Rust (sqlx 0.9.0):      Trail running shoes / Shoe care / Choosing trail food / Rain gear for cyclists
+```
+
+Note the column is `STORED`. PostgreSQL 18 makes `VIRTUAL` the default for generated columns, but a virtual column is computed on read and cannot be indexed:
+
+```sql
+-- @expect-error 0A000
+CREATE TABLE virtual_demo (
+  id   int,
+  body text,
+  doc  tsvector GENERATED ALWAYS AS (to_tsvector('english', body)) VIRTUAL
+);
+CREATE INDEX ON virtual_demo USING gin (doc);
+```
+
+```text
+CREATE TABLE
+ERROR:  indexes on virtual generated columns are not supported
+```
+
+### What the index buys
+
+On 100 000 articles of 30 words each (drawn from a 3 000-word vocabulary) the same search, before and after the GIN index:
+
+```sql
+-- sql/big-articles.sql
+CREATE TABLE big_articles (
+  id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title  text NOT NULL,
+  body   text NOT NULL
+);
+-- 100 000 articles of 30 words each, drawn from a vocabulary of 3 000 words (w0 ... w2999)
+INSERT INTO big_articles (title, body)
+SELECT 'Article ' || g,
+       (SELECT string_agg('w' || (('x' || substr(md5(g::text || ':' || i::text), 1, 6))::bit(24)::int % 3000), ' ')
+        FROM generate_series(1, 30) AS i)
+FROM generate_series(1, 100000) AS g;
+ALTER TABLE big_articles ADD COLUMN search tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED;
+ANALYZE big_articles;
+SELECT count(*) AS rows, pg_size_pretty(pg_relation_size('big_articles')) AS heap FROM big_articles;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+ALTER TABLE
+ANALYZE
+  rows  | heap  
+--------+-------
+ 100000 | 66 MB
 (1 row)
 ```
 
-For structured queries use `to_tsquery`, which understands the boolean operators: `to_tsquery('english', 'shoe & !leather')` matches documents about shoes that do not mention leather.
-
-## Ranking results
-
-A match is yes-or-no, but search results need an order. `ts_rank` scores how well a `tsvector` matches a `tsquery`, returning a `real` number you can sort by descending.
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    SELECT title,
-           ts_rank(to_tsvector('english', body),
-                   plainto_tsquery('english', 'running shoes')) AS rank
-    FROM articles
-    WHERE to_tsvector('english', body) @@ plainto_tsquery('english', 'running shoes')
-    ORDER BY rank DESC;
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    const res = await pool.query(
-      `SELECT title,
-              ts_rank(to_tsvector('english', body),
-                      plainto_tsquery('english', $1)) AS rank
-       FROM articles
-       WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)
-       ORDER BY rank DESC`,
-      ['running shoes'],
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute(
-        """
-        SELECT title,
-               ts_rank(to_tsvector('english', body),
-                       plainto_tsquery('english', %(q)s)) AS rank
-        FROM articles
-        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', %(q)s)
-        ORDER BY rank DESC
-        """,
-        {"q": "running shoes"},
-    )
-    rows = cur.fetchall()
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    rows, err := conn.Query(ctx, `
-        SELECT title,
-               ts_rank(to_tsvector('english', body),
-                       plainto_tsquery('english', $1)) AS rank
-        FROM articles
-        WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1)
-        ORDER BY rank DESC`,
-        "running shoes")
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    let rows = sqlx::query(
-        "SELECT title, \
-                ts_rank(to_tsvector('english', body), plainto_tsquery('english', $1)) AS rank \
-         FROM articles \
-         WHERE to_tsvector('english', body) @@ plainto_tsquery('english', $1) \
-         ORDER BY rank DESC",
-    )
-    .bind("running shoes")
-    .fetch_all(&pool)
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
+```sql
+-- sql/fts-no-index.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM big_articles WHERE search @@ to_tsquery('english', 'w17 & w42');
+```
 
 ```text
-        title         |   rank
-----------------------+-----------
- Choosing trail shoes | 0.0607927
- Marathon training    | 0.0303964
-(2 rows)
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Aggregate (actual time=16.778..16.783 rows=1.00 loops=1)
+   ->  Seq Scan on big_articles (actual time=0.905..16.771 rows=15.00 loops=1)
+         Filter: (search @@ '''w17'' & ''w42'''::tsquery)
+         Rows Removed by Filter: 99985
+ Planning Time: 0.303 ms
+ Execution Time: 16.803 ms
+(6 rows)
 ```
 
-## Indexing the search
-
-The queries above recompute `to_tsvector(body)` for every row on every search, which gets slow as the table grows. Two patterns fix this, and they combine well.
-
-First, store the `tsvector` once in a **generated column** so it is computed on write, not on read:
-
 ```sql
-ALTER TABLE articles
-  ADD COLUMN search tsvector
-  GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED;
-```
-
-Then put a **GIN** index on that column so matching does not scan every row:
-
-```sql
-CREATE INDEX idx_articles_search ON articles USING gin (search);
+-- sql/fts-gin.sql
+CREATE INDEX big_articles_search_idx ON big_articles USING gin (search);
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM big_articles WHERE search @@ to_tsquery('english', 'w17 & w42');
+SELECT pg_size_pretty(pg_relation_size('big_articles_search_idx')) AS gin_size;
 ```
 
 ```text
 CREATE INDEX
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
+ Aggregate (actual time=0.258..0.261 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on big_articles (actual time=0.156..0.255 rows=15.00 loops=1)
+         Recheck Cond: (search @@ '''w17'' & ''w42'''::tsquery)
+         Heap Blocks: exact=15
+         ->  Bitmap Index Scan on big_articles_search_idx (actual time=0.076..0.076 rows=15.00 loops=1)
+               Index Cond: (search @@ '''w17'' & ''w42'''::tsquery)
+               Index Searches: 1
+ Planning Time: 0.330 ms
+ Execution Time: 0.277 ms
+(9 rows)
+
+ gin_size 
+----------
+ 15 MB
+(1 row)
 ```
 
-Now searches read the precomputed column and use the index:
+16.8 ms became 0.28 ms for 15 matching articles; the price is a 15 MB GIN index on a 66 MB table. The index gets bigger with the vocabulary and the text volume, and it slows inserts and updates, as any index does.
+
+## A contrast: trigrams and accents
+
+Full-text search matches whole, correctly spelled words. A typo (`runing`) stems to a different lexeme and finds nothing. For fuzzy matching, the `pg_trgm` extension compares three-letter fragments; and `unaccent` strips accents so `café` matches `cafe` ([pg_trgm](https://www.postgresql.org/docs/18/pgtrgm.html), [unaccent](https://www.postgresql.org/docs/18/unaccent.html)):
 
 ```sql
-SELECT title, ts_rank(search, plainto_tsquery('english', 'running shoes')) AS rank
-FROM articles
-WHERE search @@ plainto_tsquery('english', 'running shoes')
-ORDER BY rank DESC;
+-- sql/trigram.sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+SELECT similarity('runing', 'running') AS typo_score,
+       'runing' % 'running'            AS typo_matches,
+       to_tsvector('english', 'runing') @@ plainto_tsquery('english', 'running') AS fts_matches_typo,
+       unaccent('caf' || chr(233) || ' cr' || chr(232) || 'me') AS unaccented;
 ```
 
-**In pgAdmin:** the generated `search` column appears in the table like any other, but it is read-only — you cannot edit its value directly because Postgres derives it from `title` and `body`.
+```text
+CREATE EXTENSION
+CREATE EXTENSION
+ typo_score | typo_matches | fts_matches_typo | unaccented 
+------------+--------------+------------------+------------
+  0.6666667 | t            | f                | cafe creme
+(1 row)
+```
+
+The typo scores 0.67 similarity and matches with the `%` operator, while full-text search finds nothing. Use `pg_trgm` for "did you mean" and autocomplete, full-text search for relevance-ranked prose.
+
+## Reading AI-generated code
+
+An assistant is asked to make article search fast. It writes an expression index on `to_tsvector('english', body)` and a search query, with a comment saying the index handles it:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "GIN index on the article text - search is now fast"
+CREATE INDEX big_articles_body_gin ON big_articles USING gin (to_tsvector('english', body));
+
+SELECT id, title FROM big_articles
+WHERE to_tsvector(body) @@ to_tsquery('w17 & w42');`}>
+
+The index and the query use *different* expressions: the index is on `to_tsvector('english', body)`, the query calls the one-argument `to_tsvector(body)`, which uses `default_text_search_config`. To the planner these are different functions, so the index cannot be used, and the query computes a tsvector for every row: 573 ms for 100 000 short rows.
+
+```sql
+-- sql/stb-wrong.sql
+CREATE INDEX big_articles_body_gin ON big_articles USING gin (to_tsvector('english', body));
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT id, title FROM big_articles
+WHERE to_tsvector(body) @@ to_tsquery('w17 & w42');
+```
+
+```text
+CREATE INDEX
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Gather (actual time=48.420..573.384 rows=15.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Parallel Seq Scan on big_articles (actual time=37.433..570.271 rows=5.00 loops=3)
+         Filter: (to_tsvector(body) @@ to_tsquery('w17 & w42'::text))
+         Rows Removed by Filter: 33328
+ Planning Time: 0.258 ms
+ Execution Time: 573.417 ms
+(8 rows)
+```
+
+The fix is to repeat the expression exactly, with the configuration spelled out in both places. The search drops from 573 ms to 0.16 ms. (The generated-column design above avoids this class of bug: one column, one expression, written once.)
+
+```sql
+-- sql/stb-fixed.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT id, title FROM big_articles
+WHERE to_tsvector('english', body) @@ to_tsquery('english', 'w17 & w42');
+```
+
+```text
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on big_articles (actual time=0.105..0.135 rows=15.00 loops=1)
+   Recheck Cond: (to_tsvector('english'::regconfig, body) @@ '''w17'' & ''w42'''::tsquery)
+   Heap Blocks: exact=15
+   ->  Bitmap Index Scan on big_articles_body_gin (actual time=0.096..0.096 rows=15.00 loops=1)
+         Index Cond: (to_tsvector('english'::regconfig, body) @@ '''w17'' & ''w42'''::tsquery)
+         Index Searches: 1
+ Planning Time: 0.331 ms
+ Execution Time: 0.155 ms
+(8 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Full-text search is a pipeline: parse the text into tokens, throw away stop words, stem the rest with a dictionary, and store lexemes with positions (`tsvector`); do the same to the user's query, joined by operators (`tsquery`). `@@` is set logic over lexemes, not string matching, so it is fast to index (GIN maps each lexeme to its documents) and blind to anything the dictionaries do not connect, such as irregular forms and typos. Ranking is a separate step over the matches.
 
 ## Tips / gotchas
 
-- Always pass a language configuration such as `'english'`. The configuration controls stemming and stop words; the wrong one (or `simple`, which does neither) changes which rows match.
-- Use the same configuration for both the stored `tsvector` and the query. A document built with `english` will not match a query parsed with a different configuration.
-- Precompute the `tsvector` in a generated column for any table you search repeatedly. It moves the cost to write time and lets a GIN index do its job.
-- Pick the right query function: `plainto_tsquery` for raw user input (it ands the words), `to_tsquery` when you need explicit `&`, `|`, and `!` operators, and `websearch_to_tsquery` for Google-style quoted phrases.
+- Always pass the configuration (`to_tsvector('english', ...)`); never depend on `default_text_search_config`.
+- For search boxes use `websearch_to_tsquery`: it never raises syntax errors on user input.
+- Index a stored generated `tsvector` column with GIN. A virtual generated column cannot be indexed.
+- An expression index is used only when the query repeats the same expression, configuration included.
+- Weight title over body with `setweight`; rank with `ts_rank` or `ts_rank_cd` and order by it.
+- Stemming is rule-based: `ran` is not `run`; typos need `pg_trgm`.
 
-<Callout title="Search engine in the box">
-For many applications, PostgreSQL full-text search removes the need for a separate search service. You get stemming, stop words, boolean queries, and ranking in plain SQL, indexed by GIN. Reach for a dedicated engine only when you outgrow it — not by default.
+<Callout title="Search is a feature, not just a query">
+`@@` answers "does this match?". A real search box also needs ranking, snippets, typo tolerance, filters and pagination. PostgreSQL gives you the building blocks in one database with transactional consistency; a dedicated search engine is worth its operational cost only when you need much more than that.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| PostgreSQL full-text search | No extra service to run; data and index live together; ranking is "good enough" for many cases | More limited relevance tuning and faceted search than a dedicated engine |
-| Elasticsearch (or a separate search engine) | Fine-grained relevance tuning, facets, and much better search scaling | An extra service to run, plus keeping two systems in sync |
+| `LIKE '%x%'` / `ILIKE` | No setup, exact characters | Seq Scan unless trigram-indexed; no stemming, ranking or word boundaries |
+| Full-text search + GIN | Word-aware, ranked, 16.8 ms to 0.28 ms on 100 000 rows | 15 MB index; stemming rules, no typo tolerance |
+| `pg_trgm` | Typo tolerance, arbitrary substrings | Larger index; similarity, not language |
+| Stored generated `tsvector` | One expression, always in sync, indexable | Extra disk for the column; writes recompute it |
+| Expression index | No extra column | Queries must repeat the exact expression (573 ms when they did not) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Reaching for Elasticsearch by default without checking first** — many systems have traffic and relevance needs that PostgreSQL's full-text search already handles comfortably. Try what you already have before adding new infrastructure.
-- **Forgetting a GIN index on the `tsvector` column** — with no index, every search scans the whole table and recomputes `to_tsvector` each time, which gets slower as the table grows.
-- **Not updating the search vector when the source text changes** — without a generated column or a trigger keeping the `tsvector` in sync with the latest `title`/`body`, search results reference stale text that no longer matches what the user sees.
-
-> 💡 Real-world example
->
-> **Hasura and PostgREST-based APIs** — commonly expose PostgreSQL's full-text search directly through `tsvector`/`tsquery` instead of bolting on a separate search service, since the query layer is already connected to the database.
->
-> **Many small-to-mid-size SaaS products** — move off a separate Elasticsearch cluster onto PostgreSQL full-text search once they find their real search volume does not need infrastructure of that size, cutting both cost and operational complexity.
+- **"Full-text search understands language."** It applies dictionaries: `running` matches `run`, `ran` does not.
+- **"FTS is just a faster LIKE."** It matches lexemes, ranks, and cannot find substrings like `%un%`.
+- **"The default config is `simple`."** It is `english` here (derived from the locale); `simple` under `C`.
+- **"The index handles the query if the column matches."** The whole expression must match, configuration included.
+- **"I can index a virtual generated column."** PostgreSQL 18 refuses: `indexes on virtual generated columns are not supported`.
 
 export const quizFts = [
   {
-    q: 'What does to_tsvector do to a phrase like "The cats were running"?',
-    options: [
-      'Stores it verbatim for exact substring matching',
-      'Normalizes it into lexemes, dropping stop words and stemming words',
-      'Translates it into another language',
-      'Encrypts it for safe storage',
-    ],
+    q: 'Which operator tests whether a tsvector matches a tsquery?',
+    options: ['=', '@@', '~~', '@>'],
     answer: 1,
+    explain: '`document @@ query` is true when the lexemes satisfy the query. `@>` is jsonb/array containment.',
   },
   {
-    q: 'Which operator tests whether a tsvector satisfies a tsquery?',
-    options: ['@>', '@@', '->>', '&&'],
-    answer: 1,
+    q: 'Which function is the safest choice for parsing raw text a user typed into a search box?',
+    options: ['to_tsquery', 'plainto_tsquery only', 'websearch_to_tsquery', 'to_tsvector'],
+    answer: 2,
+    explain: 'It understands quotes, "or" and "-" and never raises a syntax error; `to_tsquery(\'trail shoes\')` fails with `syntax error in tsquery`.',
   },
   {
-    q: 'What is the recommended way to make repeated full-text searches fast?',
+    q: 'Does `to_tsvector(\'english\', \'I ran home\') @@ plainto_tsquery(\'english\', \'running\')` match?',
     options: [
-      'Run VACUUM before each search',
-      'Store a tsvector in a generated column and add a GIN index on it',
-      'Use LIKE instead',
-      'Add a B-tree index on the body column',
+      'Yes, ran and running share a root',
+      'No: stemming is rule-based and ran is a different lexeme from run',
+      'Only with the simple configuration',
+      'It raises an error',
     ],
     answer: 1,
+    explain: 'It returned f. With `I run home` it returned t. Irregular forms are not joined by the english dictionary.',
+  },
+  {
+    q: 'Why does a search using `to_tsvector(body)` ignore an index built on `to_tsvector(\'english\', body)`?',
+    options: [
+      'GIN cannot index text',
+      'The two expressions are different functions to the planner, so the index does not match',
+      'The index was not analyzed',
+      'to_tsvector cannot be indexed',
+    ],
+    answer: 1,
+    explain: 'The one-argument form uses default_text_search_config. The mismatch cost 573 ms; repeating the exact expression gave 0.16 ms.',
+  },
+  {
+    q: 'You define `doc tsvector GENERATED ALWAYS AS (...) VIRTUAL` and try to create a GIN index on it. What happens?',
+    options: [
+      'It works and is faster',
+      'PostgreSQL 18 refuses: indexes on virtual generated columns are not supported; use STORED',
+      'The index is created but ignored',
+      'The column is converted to STORED automatically',
+    ],
+    answer: 1,
+    explain: 'The statement fails with SQLSTATE 0A000. STORED generated columns are computed on write and can be indexed.',
   },
 ];
 
