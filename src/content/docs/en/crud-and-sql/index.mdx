@@ -1,6 +1,6 @@
 ---
 title: CRUD & SQL
-description: Insert, read, update, and delete rows with SQL — the four verbs you will use every day, shown in psql and four official drivers.
+description: Insert, read, update, and delete rows with SQL — the four verbs you will use every day, shown in psql and four official drivers, on a small dataset every lesson in this module rebuilds from scratch.
 sidebar:
   order: 1
 ---
@@ -13,20 +13,20 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
 A database is only useful when you can put data in, get it back out, change it, and remove it. In PostgreSQL you do all of that by sending **SQL** — a text language the server understands. You never edit table files by hand; instead you write a statement, the server parses it, runs it, and returns either a count of affected rows or a result set.
 
-Almost every SQL statement you write maps to one of four ideas, collectively known as **CRUD**: create, read, update, and delete. This module walks through each one with examples you can paste straight into `psql`, plus the exact same operation expressed in four popular drivers so you can carry the knowledge into real application code.
+Almost every SQL statement you write maps to one of four ideas, collectively known as **CRUD**: create, read, update, and delete. This module walks through each one with examples you can paste straight into `psql`, plus the same operation expressed in four popular drivers so you can carry the knowledge into real application code. Everything in it was run for real on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026); the drivers were pg 8.23.0 (Node.js), psycopg 3.3.6 (Python), pgx v5.11.0 (Go) and sqlx 0.9.0 (Rust).
 
 ## The four verbs
 
 The acronym CRUD lines up with four SQL keywords. Learn these and you can already do most day-to-day database work.
 
-| CRUD action | SQL keyword | What it does                          |
-|-------------|-------------|---------------------------------------|
-| Create      | `INSERT`    | Adds new rows to a table              |
-| Read        | `SELECT`    | Returns rows matching your criteria   |
-| Update      | `UPDATE`    | Changes columns in existing rows      |
-| Delete      | `DELETE`    | Removes rows from a table             |
+| CRUD action | SQL keyword | What it does                          | Command tag you will see |
+|-------------|-------------|---------------------------------------|--------------------------|
+| Create      | `INSERT`    | Adds new rows to a table              | `INSERT 0 1`             |
+| Read        | `SELECT`    | Returns rows matching your criteria   | `(3 rows)`               |
+| Update      | `UPDATE`    | Changes columns in existing rows      | `UPDATE 1`               |
+| Delete      | `DELETE`    | Removes rows from a table             | `DELETE 1`               |
 
-Everything is built around **rows in tables**. A table is a named grid of columns with fixed types; a row is one record. SQL statements describe *what* you want — "give me books published after 2000" — and the server figures out *how* to do it.
+Everything is built around **rows in tables**. A table is a named grid of columns with fixed types; a row is one record. SQL statements describe *what* you want — "give me books published after 2000" — and the server figures out *how* to do it. The command tag after each statement tells you how many rows it touched; you will see them in a minute, once there is a table to touch.
 
 ## How a statement travels
 
@@ -40,25 +40,71 @@ export const overviewDiagram = `flowchart LR
 
 <Mermaid code={overviewDiagram} title="A SQL statement round trip" />
 
-## The example schema
+## The example dataset
 
-To keep things concrete, every lesson in this module reuses one tiny schema: a table of `authors` and a table of `books`. Here is the setup, which you can run once to follow along.
+To keep things concrete, every lesson in this module reuses one tiny dataset: `authors`, `books` and `sales`. Each lesson starts from the same statements, so you can begin at any of them. This is the finished dataset; the *Inserting rows* lesson builds it up one statement at a time:
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+The identity columns (`GENERATED ALWAYS AS IDENTITY`) hand out the ids, `books.author_id` is a foreign key that may be `NULL` (the *Unlinked Draft* has no author), and `sales` has six rows across two regions. Now the four verbs on a scratch author, rolled back so the dataset stays the same. Note the command tags: `INSERT 0 1`, `UPDATE 1`, `DELETE 1`, and `SELECT` reporting its rows as `(1 row)`:
+
+```sql
+-- sql/four-verbs.sql
+BEGIN;
+INSERT INTO authors (name, born) VALUES ('Temp Author', 2000);
+SELECT id, name, born FROM authors WHERE name = 'Temp Author';
+UPDATE authors SET born = 2001 WHERE name = 'Temp Author';
+DELETE FROM authors WHERE name = 'Temp Author';
+ROLLBACK;
+```
+
+```text
+BEGIN
+INSERT 0 1
+ id |    name     | born 
+----+-------------+------
+  4 | Temp Author | 2000
+(1 row)
+
+UPDATE 1
+DELETE 1
+ROLLBACK
+```
+
+The tables are created the same way from any client. For example, the `authors` table from each driver, run once against a scratch database:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
     CREATE TABLE authors (
-      id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      name  text NOT NULL,
-      born  int
-    );
-
-    CREATE TABLE books (
-      id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      title       text NOT NULL,
-      author_id   bigint REFERENCES authors (id),
-      published   int,
-      copies_sold int NOT NULL DEFAULT 0
+      id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      name text NOT NULL,
+      born int
     );
     ```
   </TabItem>
@@ -92,6 +138,7 @@ To keep things concrete, every lesson in this module reuses one tiny schema: a t
         name text NOT NULL,
         born int
       )`)
+    return err
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -109,31 +156,46 @@ To keep things concrete, every lesson in this module reuses one tiny schema: a t
   </TabItem>
 </Tabs>
 
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[CREATE TABLE] Node.js (pg 8.23.0): authors exists: true
+[CREATE TABLE] Python (psycopg 3.3.6): authors exists: true
+[CREATE TABLE] Go (pgx v5.11.0): authors exists: true
+[CREATE TABLE] Rust (sqlx 0.9.0): authors exists: true
+```
+
 **In pgAdmin:** open the Query Tool on your database, paste the `CREATE TABLE` statements, and press the run button. You will see the new tables appear under Schemas then Tables in the left-hand browser tree.
 
 ## What this module covers
 
-- **Insert** — adding rows one at a time or in bulk, letting columns take defaults, and getting generated ids back.
-- **Select and filtering** — choosing columns, narrowing with `WHERE`, sorting, and paging.
-- **Update and delete** — changing and removing rows safely, and why a forgotten `WHERE` is dangerous.
-- **Upsert** — inserting a row, or updating it if it already exists, in a single statement.
+- **Insert** — adding rows one at a time or in bulk, letting columns take defaults, getting generated ids back with `RETURNING`, and what batching buys (50 000 rows took 6.6 s one statement at a time, 34 ms in one multi-row statement, 15 ms with `COPY`).
+- **Select and filtering** — choosing columns, narrowing with `WHERE`, `NULL` handling that surprises everyone once, sorting (and how collation changes the order), and why `LIMIT` needs an `ORDER BY`.
+- **Update and delete** — changing and removing rows safely with `RETURNING`, the missing `WHERE` and the missing join condition that touch every row, and the dead rows both statements leave behind.
+- **Upsert** — inserting a row, or updating it if it already exists, in a single atomic statement; check-then-insert lost the race and made two rows, `ON CONFLICT` did not.
 
 ## Tips / gotchas
 
 - SQL keywords are case-insensitive (`select` equals `SELECT`), but uppercase keywords are a common readability convention used throughout this course.
 - Identifiers like table and column names are folded to lowercase unless you double-quote them, so `Authors` and `authors` refer to the same table.
 - A statement ends with a semicolon in `psql`. Drivers usually send one statement per call, so the semicolon is optional there.
-- Reads (`SELECT`) never change data; the other three verbs do, so treat them with more care.
+- Reads (`SELECT`) never change data; the other three verbs do, so treat them with more care, and pass values as placeholders, never by pasting them into the SQL text.
 
 <Callout title="Mental model">
-Think of SQL as a conversation. You make a request in writing, PostgreSQL does the work against the rows, and it always answers — either with data or with a count of how many rows it touched. The rest of this module is just learning the four kinds of requests.
+Think of SQL as a conversation. You make a request in writing, PostgreSQL does the work against the rows, and it always answers — either with data or with a count of how many rows it touched. The rest of this module is just learning the four kinds of requests, and the ways each one goes wrong.
 </Callout>
+
+## Common Misconceptions
+
+- **"A `SELECT` is always safe."** It never changes data, but without `ORDER BY` its row order is unspecified, and a `NULL` in a comparison silently drops rows.
+- **"`UPDATE` and `DELETE` without `WHERE` are errors."** They are valid, and they touch every row (`UPDATE 4` in the update lesson).
+- **"Ids are gapless."** Identity values are unique, not gapless: rolled-back and conflicting inserts consume them.
 
 export const quizIndex = [
   {
     q: 'Which SQL keyword corresponds to the "read" part of CRUD?',
     options: ['INSERT', 'SELECT', 'UPDATE', 'DELETE'],
     answer: 1,
+    explain: '`SELECT` returns rows and reports `(n rows)`; the other three change data and report a command tag such as `UPDATE 1`.',
   },
   {
     q: 'In PostgreSQL, how do you change data stored on disk?',
@@ -144,11 +206,35 @@ export const quizIndex = [
       'By restarting the server',
     ],
     answer: 1,
+    explain: 'Every client, from psql to a driver, sends SQL text and the server does the work.',
   },
   {
     q: 'Which statement does NOT modify the data in a table?',
     options: ['INSERT', 'UPDATE', 'DELETE', 'SELECT'],
     answer: 3,
+    explain: 'In the four-verbs run, only SELECT left the table as it was; the other three each reported a count of changed rows.',
+  },
+  {
+    q: 'What does the command tag INSERT 0 1 tell you?',
+    options: [
+      'One row was inserted (the 0 is a legacy object id)',
+      'Zero rows were inserted and one failed',
+      'The insert was rolled back',
+      'One column was inserted',
+    ],
+    answer: 0,
+    explain: 'The first number is a legacy field that is always 0 now; the second is the number of rows inserted. `INSERT 0 0` is what `ON CONFLICT DO NOTHING` reports when it skips a row.',
+  },
+  {
+    q: 'You send UPDATE authors SET born = 0 with no WHERE clause. What happens?',
+    options: [
+      'PostgreSQL refuses it',
+      'It updates every row in the table',
+      'It updates only the first row',
+      'It waits for confirmation',
+    ],
+    answer: 1,
+    explain: 'A missing WHERE is valid SQL. That is why the update lesson tests destructive statements inside BEGIN ... ROLLBACK first.',
   },
 ];
 

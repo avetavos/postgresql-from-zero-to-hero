@@ -1,6 +1,6 @@
 ---
 title: CRUD & SQL
-description: เพิ่ม อ่าน แก้ไข และลบ row ด้วย SQL — สี่คำกริยาที่คุณจะใช้ทุกวัน แสดงทั้งใน psql และ driver ทางการสี่ตัว
+description: Insert, อ่าน, update และ delete row ด้วย SQL — สี่คำกริยาที่คุณจะใช้ทุกวัน แสดงใน psql และสี่ driver ทางการ บนชุดข้อมูลเล็ก ๆ ที่ทุกบทในโมดูลนี้สร้างใหม่ตั้งแต่ต้น
 sidebar:
   order: 1
 ---
@@ -11,26 +11,26 @@ import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 
-ฐานข้อมูลจะมีประโยชน์ก็ต่อเมื่อคุณใส่ข้อมูลเข้าไป ดึงกลับออกมา แก้ไข และลบได้ ใน PostgreSQL คุณทำทั้งหมดนั้นได้ด้วยการส่ง **SQL** — ภาษาแบบข้อความที่ server เข้าใจ คุณไม่ต้องแก้ไฟล์ table ด้วยมือ แค่เขียนคำสั่ง (statement) แล้ว server จะ parse และรันให้ ก่อนส่งกลับมาเป็นจำนวน row ที่ได้รับผลกระทบหรือชุดผลลัพธ์ (result set)
+ฐานข้อมูลมีประโยชน์เมื่อคุณใส่ข้อมูลเข้า ดึงกลับออก เปลี่ยน และลบมันได้ ใน PostgreSQL คุณทำทั้งหมดนั้นด้วยการส่ง **SQL** — ภาษาข้อความที่เซิร์ฟเวอร์เข้าใจ คุณไม่เคยแก้ไฟล์ table ด้วยมือ แต่เขียน statement เซิร์ฟเวอร์ parse รัน และคืนจำนวน row ที่ได้รับผลกระทบหรือชุดผลลัพธ์
 
-แทบทุกคำสั่ง SQL ที่คุณเขียนจะตรงกับหนึ่งในสี่แนวคิด ซึ่งรวมเรียกว่า **CRUD**: create, read, update และ delete โมดูลนี้จะพาเดินผ่านแต่ละอันด้วยตัวอย่างที่คุณวางลงใน `psql` ได้ตรง ๆ พร้อมกับ operation เดียวกันเป๊ะ ๆ ที่เขียนในรูปแบบ driver ยอดนิยมสี่ตัว เพื่อให้คุณนำความรู้นี้ไปใช้ในโค้ดแอปพลิเคชันจริงได้
+statement SQL เกือบทุกตัวที่คุณเขียนแมปกับหนึ่งในสี่แนวคิด เรียกรวมกันว่า **CRUD**: create, read, update และ delete โมดูลนี้พาเดินทีละอันด้วยตัวอย่างที่วางลง `psql` ได้เลย พร้อมการดำเนินการเดียวกันใน driver ยอดนิยมสี่ตัวเพื่อให้พกความรู้ไปใช้ในโค้ดแอปจริง ทุกอย่างในนั้นรันจริงบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) driver คือ pg 8.23.0 (Node.js), psycopg 3.3.6 (Python), pgx v5.11.0 (Go) และ sqlx 0.9.0 (Rust)
 
 ## สี่คำกริยา
 
-ตัวย่อ CRUD เรียงตรงกับ SQL keyword สี่คำ เรียนรู้สิ่งเหล่านี้แล้วคุณก็ทำงานฐานข้อมูลในแต่ละวันได้แทบทั้งหมดแล้ว
+ตัวย่อ CRUD ตรงกับสี่คำหลักของ SQL เรียนสิ่งเหล่านี้แล้วคุณก็ทำงานฐานข้อมูลประจำวันได้ส่วนใหญ่
 
-| CRUD action | SQL keyword | What it does                          |
-|-------------|-------------|---------------------------------------|
-| Create      | `INSERT`    | Adds new rows to a table              |
-| Read        | `SELECT`    | Returns rows matching your criteria   |
-| Update      | `UPDATE`    | Changes columns in existing rows      |
-| Delete      | `DELETE`    | Removes rows from a table             |
+| การกระทำ CRUD | คำหลัก SQL | ทำอะไร                          | Command tag ที่คุณจะเห็น |
+|-------------|-------------|---------------------------------------|--------------------------|
+| Create      | `INSERT`    | เพิ่ม row ใหม่ใน table              | `INSERT 0 1`             |
+| Read        | `SELECT`    | คืน row ที่ตรงเงื่อนไข   | `(3 rows)`               |
+| Update      | `UPDATE`    | เปลี่ยน column ใน row ที่มีอยู่      | `UPDATE 1`               |
+| Delete      | `DELETE`    | ลบ row ออกจาก table                | `DELETE 1`               |
 
-ทุกอย่างถูกสร้างขึ้นรอบ ๆ **row ใน table** table คือ table ที่มีชื่อ ประกอบด้วย column ที่มี type ตายตัว ส่วน row คือหนึ่งระเบียน (record) คำสั่ง SQL อธิบายว่า *อะไร* คือสิ่งที่คุณต้องการ — "ขอหนังสือที่ตีพิมพ์หลังปี 2000 ให้หน่อย" — แล้ว server จะคิดเองว่า *จะทำอย่างไร*
+ทุกอย่างสร้างรอบ **row ใน table** table คือตารางที่ตั้งชื่อของ column ที่มีชนิดคงที่ row คือหนึ่งระเบียน statement SQL อธิบาย *อะไร* ที่คุณต้องการ — "ให้หนังสือที่ตีพิมพ์หลังปี 2000" — และเซิร์ฟเวอร์หา *วิธี* เอง command tag หลังแต่ละ statement บอกว่ามันแตะกี่ row; คุณจะเห็นมันในอีกไม่นาน เมื่อมี table ให้แตะ
 
-## คำสั่งหนึ่งเดินทางอย่างไร
+## statement เดินทางอย่างไร
 
-ไม่ว่าคุณจะพิมพ์ใน `psql` หรือเรียก driver จากแอปของคุณ เส้นทางเหมือนกัน: โค้ดของคุณส่ง SQL string ไปให้ server แล้ว server ทำงานกับ row ที่จัดเก็บอยู่ ก่อนส่งคำตอบกลับมา
+ไม่ว่าคุณพิมพ์ใน `psql` หรือเรียก driver จากแอป เส้นทางเหมือนกัน: โค้ดของคุณส่ง string SQL ให้เซิร์ฟเวอร์ เซิร์ฟเวอร์ทำงานกับ row ที่เก็บไว้ และคำตอบกลับมา
 
 export const overviewDiagram = `flowchart LR
   A[Your app or psql] -->|SQL text| B[PostgreSQL server]
@@ -38,27 +38,73 @@ export const overviewDiagram = `flowchart LR
   C -->|result set or row count| B
   B -->|reply| A`;
 
-<Mermaid code={overviewDiagram} title="round trip ของคำสั่ง SQL" />
+<Mermaid code={overviewDiagram} title="การเดินทางไป-กลับของ SQL statement" />
 
-## schema ตัวอย่าง
+## ชุดข้อมูลตัวอย่าง
 
-เพื่อให้ทุกอย่างเป็นรูปธรรม ทุกบทเรียนในโมดูลนี้ใช้ schema เล็ก ๆ อันเดียวซ้ำกัน: table ของ `authors` และ table ของ `books` นี่คือการตั้งค่า ซึ่งคุณรันครั้งเดียวเพื่อทำตามไปด้วยกันได้
+เพื่อให้เป็นรูปธรรม ทุกบทในโมดูลนี้ใช้ชุดข้อมูลเล็กชุดเดียวซ้ำ: `authors`, `books` และ `sales` แต่ละบทเริ่มจาก statement ชุดเดียวกัน คุณจึงเริ่มที่บทใดก็ได้ นี่คือชุดข้อมูลที่เสร็จแล้ว บท *Inserting rows* สร้างมันทีละ statement:
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+column identity (`GENERATED ALWAYS AS IDENTITY`) แจก id, `books.author_id` เป็น foreign key ที่เป็น `NULL` ได้ (*Unlinked Draft* ไม่มีผู้แต่ง) และ `sales` มีหกแถวใน 2 ภูมิภาค ทีนี้สี่คำกริยากับ author ชั่วคราว rollback เพื่อให้ชุดข้อมูลเหมือนเดิม สังเกต command tag: `INSERT 0 1`, `UPDATE 1`, `DELETE 1` และ `SELECT` รายงาน row ของมันเป็น `(1 row)`:
+
+```sql
+-- sql/four-verbs.sql
+BEGIN;
+INSERT INTO authors (name, born) VALUES ('Temp Author', 2000);
+SELECT id, name, born FROM authors WHERE name = 'Temp Author';
+UPDATE authors SET born = 2001 WHERE name = 'Temp Author';
+DELETE FROM authors WHERE name = 'Temp Author';
+ROLLBACK;
+```
+
+```text
+BEGIN
+INSERT 0 1
+ id |    name     | born 
+----+-------------+------
+  4 | Temp Author | 2000
+(1 row)
+
+UPDATE 1
+DELETE 1
+ROLLBACK
+```
+
+table สร้างแบบเดียวกันจาก client ใดก็ได้ ตัวอย่างเช่น table `authors` จากแต่ละ driver รันหนึ่งครั้งกับฐานข้อมูล scratch:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
     CREATE TABLE authors (
-      id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      name  text NOT NULL,
-      born  int
-    );
-
-    CREATE TABLE books (
-      id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      title       text NOT NULL,
-      author_id   bigint REFERENCES authors (id),
-      published   int,
-      copies_sold int NOT NULL DEFAULT 0
+      id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      name text NOT NULL,
+      born int
     );
     ```
   </TabItem>
@@ -92,6 +138,7 @@ export const overviewDiagram = `flowchart LR
         name text NOT NULL,
         born int
       )`)
+    return err
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -109,46 +156,85 @@ export const overviewDiagram = `flowchart LR
   </TabItem>
 </Tabs>
 
-**ใน pgAdmin:** เปิด Query Tool บนฐานข้อมูลของคุณ วางคำสั่ง `CREATE TABLE` แล้วกดปุ่มรัน คุณจะเห็น table ใหม่ปรากฏขึ้นใต้ Schemas แล้ว Tables ในแผนผัง browser ฝั่งซ้าย
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[CREATE TABLE] Node.js (pg 8.23.0): authors exists: true
+[CREATE TABLE] Python (psycopg 3.3.6): authors exists: true
+[CREATE TABLE] Go (pgx v5.11.0): authors exists: true
+[CREATE TABLE] Rust (sqlx 0.9.0): authors exists: true
+```
 
-## โมดูลนี้ครอบคลุมอะไรบ้าง
+**ใน pgAdmin:** เปิด Query Tool บนฐานข้อมูลของคุณ วาง statement `CREATE TABLE` และกดปุ่มรัน คุณจะเห็น table ใหม่ปรากฏใต้ Schemas แล้ว Tables ใน browser tree ทางซ้าย
 
-- **Insert** — เพิ่ม row ทีละ row หรือเป็นชุด ปล่อยให้ column รับค่า default และดึง id ที่ถูกสร้างขึ้นกลับมา
-- **Select and filtering** — เลือก column จำกัดด้วย `WHERE` เรียงลำดับ และแบ่งหน้า
-- **Update and delete** — แก้ไขและลบ row อย่างปลอดภัย และทำไม `WHERE` ที่ลืมใส่จึงอันตราย
-- **Upsert** — เพิ่ม row ใหม่ หรือ update row เดิมถ้ามีอยู่แล้ว ในคำสั่งเดียว
+## โมดูลนี้ครอบคลุมอะไร
+
+- **Insert** — เพิ่ม row ทีละแถวหรือเป็นชุด ให้ column ใช้ค่า default รับ id ที่สร้างกลับด้วย `RETURNING` และสิ่งที่ batching ให้ (50 000 row ใช้ 6.6 วินาทีทีละ statement, 34 ms ใน statement หลาย row เดียว, 15 ms ด้วย `COPY`)
+- **Select และ filtering** — เลือก column, กรองด้วย `WHERE`, การจัดการ `NULL` ที่ทำให้ทุกคนแปลกใจสักครั้ง, การเรียงลำดับ (และ collation เปลี่ยนลำดับอย่างไร) และทำไม `LIMIT` ต้องมี `ORDER BY`
+- **Update และ delete** — เปลี่ยนและลบ row อย่างปลอดภัยด้วย `RETURNING`, `WHERE` ที่หายและเงื่อนไข join ที่หายที่แตะทุก row และ row ตายที่ทั้งสอง statement ทิ้งไว้
+- **Upsert** — insert row หรือ update ถ้ามีอยู่แล้ว ใน statement atomic เดียว; check-then-insert แพ้ race และได้สอง row, `ON CONFLICT` ไม่
 
 ## เคล็ดลับและข้อควรระวัง
 
-- SQL keyword ไม่สนใจตัวพิมพ์เล็กพิมพ์ใหญ่ (`select` เท่ากับ `SELECT`) แต่การเขียน keyword เป็นตัวพิมพ์ใหญ่เป็นธรรมเนียมเพื่อความอ่านง่ายที่ใช้ตลอดทั้งคอร์สนี้
-- identifier อย่างชื่อ table และ column จะถูกแปลงเป็นตัวพิมพ์เล็กเว้นแต่คุณจะใส่เครื่องหมายอัญประกาศคู่ครอบ ดังนั้น `Authors` และ `authors` จึงหมายถึง table เดียวกัน
-- คำสั่งหนึ่งจบด้วยเซมิโคลอนใน `psql` driver มักส่งหนึ่งคำสั่งต่อการเรียกหนึ่งครั้ง ดังนั้นเซมิโคลอนจึงไม่บังคับ
-- การอ่าน (`SELECT`) ไม่เคยเปลี่ยนแปลงข้อมูล ส่วนอีกสามคำกริยาที่เหลือทำ ดังนั้นจงใช้ด้วยความระมัดระวังมากกว่า
+- คำหลัก SQL ไม่แยกตัวพิมพ์ (`select` เท่ากับ `SELECT`) แต่คำหลักตัวพิมพ์ใหญ่เป็นธรรมเนียมเพื่อความอ่านง่ายที่ใช้ตลอดคอร์สนี้
+- identifier เช่นชื่อ table และ column ถูกพับเป็นตัวพิมพ์เล็กเว้นแต่คุณครอบด้วย double quote ดังนั้น `Authors` กับ `authors` หมายถึง table เดียวกัน
+- statement จบด้วย semicolon ใน `psql` driver มักส่งหนึ่ง statement ต่อการเรียก semicolon จึงไม่บังคับที่นั่น
+- การอ่าน (`SELECT`) ไม่เปลี่ยนข้อมูล อีกสามคำกริยาเปลี่ยน จึงต้องระวังมากกว่า และส่งค่าเป็น placeholder ไม่เคยแปะลงในข้อความ SQL
 
-<Callout title="แบบจำลองความคิด">
-ลองคิดว่า SQL คือบทสนทนา คุณยื่นคำขอเป็นลายลักษณ์อักษร PostgreSQL ทำงานกับ row ให้ และตอบกลับเสมอ ไม่ว่าจะเป็นข้อมูลหรือจำนวน row ที่แตะไป ที่เหลือของโมดูลนี้ก็แค่การเรียนรู้คำขอทั้งสี่แบบ
+<Callout title="โมเดลความคิด (Mental model)">
+คิดว่า SQL คือบทสนทนา คุณขอเป็นลายลักษณ์อักษร PostgreSQL ทำงานกับ row และตอบเสมอ — ด้วยข้อมูลหรือจำนวน row ที่มันแตะ ส่วนที่เหลือของโมดูลนี้คือการเรียนสี่ชนิดของคำขอ และวิธีที่แต่ละอันผิดพลาด
 </Callout>
+
+## Common Misconceptions
+
+- **"`SELECT` ปลอดภัยเสมอ"** มันไม่เปลี่ยนข้อมูล แต่ถ้าไม่มี `ORDER BY` ลำดับ row ไม่ถูกกำหนด และ `NULL` ในการเปรียบเทียบทิ้ง row เงียบ ๆ
+- **"`UPDATE` และ `DELETE` ที่ไม่มี `WHERE` เป็น error"** มันถูกต้อง และแตะทุก row (`UPDATE 4` ในบท update)
+- **"id ไม่มีช่องว่าง"** ค่า identity unique ไม่ใช่ไม่มีช่องว่าง: insert ที่ rollback และที่ conflict ใช้ค่าไป
 
 export const quizIndex = [
   {
-    q: 'SQL keyword ตัวไหนตรงกับส่วน "read" ของ CRUD?',
+    q: 'คำหลัก SQL ใดตรงกับส่วน "read" ของ CRUD?',
     options: ['INSERT', 'SELECT', 'UPDATE', 'DELETE'],
     answer: 1,
+    explain: '`SELECT` คืน row และรายงาน `(n rows)`; อีกสามตัวเปลี่ยนข้อมูลและรายงาน command tag เช่น `UPDATE 1`',
   },
   {
-    q: 'ใน PostgreSQL เราแก้ข้อมูลที่เก็บอยู่บน disk ได้อย่างไร?',
+    q: 'ใน PostgreSQL คุณเปลี่ยนข้อมูลที่เก็บบนดิสก์อย่างไร?',
     options: [
-      'แก้ไฟล์ของ table ตรง ๆ ด้วย text editor',
-      'ส่ง SQL statement ให้ server เป็นคนรัน',
-      'ทำได้ผ่าน pgAdmin GUI เท่านั้น',
-      'สั่งรีสตาร์ท server',
+      'แก้ไฟล์ table โดยตรงด้วย text editor',
+      'ส่ง statement SQL ที่เซิร์ฟเวอร์รัน',
+      'ผ่าน GUI pgAdmin เท่านั้น',
+      'restart เซิร์ฟเวอร์',
     ],
     answer: 1,
+    explain: 'ทุก client ตั้งแต่ psql ถึง driver ส่งข้อความ SQL และเซิร์ฟเวอร์ทำงาน',
   },
   {
-    q: 'statement ตัวไหนที่ไม่ได้แก้ข้อมูลใน table?',
+    q: 'statement ใดไม่แก้ข้อมูลใน table?',
     options: ['INSERT', 'UPDATE', 'DELETE', 'SELECT'],
     answer: 3,
+    explain: 'ในการรันสี่คำกริยา มีแค่ SELECT ที่ทิ้ง table ไว้เหมือนเดิม อีกสามตัวรายงานจำนวน row ที่เปลี่ยน',
+  },
+  {
+    q: 'command tag INSERT 0 1 บอกอะไร?',
+    options: [
+      'insert หนึ่ง row (0 เป็น object id แบบ legacy)',
+      'insert ศูนย์ row และล้มหนึ่ง',
+      'insert ถูก rollback',
+      'insert หนึ่ง column',
+    ],
+    answer: 0,
+    explain: 'ตัวเลขแรกเป็น field legacy ที่ตอนนี้เป็น 0 เสมอ ตัวที่สองคือจำนวน row ที่ insert `INSERT 0 0` คือสิ่งที่ `ON CONFLICT DO NOTHING` รายงานเมื่อข้าม row',
+  },
+  {
+    q: 'คุณส่ง UPDATE authors SET born = 0 โดยไม่มี WHERE จะเกิดอะไร?',
+    options: [
+      'PostgreSQL ปฏิเสธ',
+      'update ทุก row ใน table',
+      'update เฉพาะ row แรก',
+      'รอการยืนยัน',
+    ],
+    answer: 1,
+    explain: 'WHERE ที่หายเป็น SQL ที่ถูกต้อง นั่นคือเหตุผลที่บท update ทดสอบ statement ทำลายล้างใน BEGIN ... ROLLBACK ก่อน',
   },
 ];
 
