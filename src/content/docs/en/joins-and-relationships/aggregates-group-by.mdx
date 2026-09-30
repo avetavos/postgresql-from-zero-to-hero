@@ -1,6 +1,6 @@
 ---
 title: Aggregates and GROUP BY
-description: Collapse many rows into summary numbers with count, sum, avg, min, and max, group them with GROUP BY, filter groups with HAVING, and understand count(*) versus count(col).
+description: Collapse many rows into summary numbers with count, sum, avg, min and max, group them with GROUP BY and filter groups with HAVING — plus FILTER, ROLLUP, NULL rules and the plans PostgreSQL really uses.
 sidebar:
   order: 3
 ---
@@ -9,10 +9,42 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-So far every query returned rows that already existed. Aggregate functions are different: they read many rows and produce a single summary value. How many books are there? What are the total copies sold? The average publication year? Each of those is one number squeezed out of a whole column. Add `GROUP BY` and you get one summary number per group instead of one for the whole table.
+So far every query returned rows that already existed. Aggregate functions are different: they read many rows and produce a single summary value. How many sales are there? What are the total copies sold? Each of those is one number squeezed out of a whole column. Add `GROUP BY` and you get one summary number per group instead of one for the whole table.
 
-We continue with the `authors`, `books`, and `sales` tables.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026), copied from `psql`. The `sql` fences run top to bottom in one empty database.
+
+## The dataset
+
+The same canonical dataset as the rest of the module: 6 `sales` rows, 2100 copies in total (East 1150, West 950), with a 400/400 tie in the West.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## Aggregate functions over the whole table
 
@@ -21,11 +53,12 @@ With no `GROUP BY`, an aggregate function folds the entire result down to a sing
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/aggregate-whole.sql
     SELECT
-      count(*)    AS sale_rows,
-      sum(copies) AS total_copies,
-      avg(copies) AS avg_per_sale,
-      max(copies) AS biggest_sale
+      count(*)                  AS sale_rows,
+      sum(copies)               AS total_copies,
+      avg(copies)::float8       AS avg_per_sale,
+      max(copies)               AS biggest_sale
     FROM sales;
     ```
   </TabItem>
@@ -33,7 +66,7 @@ With no `GROUP BY`, an aggregate function folds the entire result down to a sing
     ```js
     const res = await pool.query(`
       SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
-             avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+             avg(copies)::float8 AS avg_per_sale, max(copies) AS biggest_sale
       FROM sales
     `);
     console.log(res.rows[0]);
@@ -43,7 +76,7 @@ With no `GROUP BY`, an aggregate function folds the entire result down to a sing
     ```python
     cur.execute("""
         SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
-               avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+               avg(copies)::float8 AS avg_per_sale, max(copies) AS biggest_sale
         FROM sales
     """)
     summary = cur.fetchone()
@@ -51,17 +84,20 @@ With no `GROUP BY`, an aggregate function folds the entire result down to a sing
   </TabItem>
   <TabItem label="Go">
     ```go
-    row := conn.QueryRow(ctx, `
+    var saleRows, totalCopies int64
+    var avgPerSale float64
+    var biggestSale int32
+    err := conn.QueryRow(ctx, `
       SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
-             avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
-      FROM sales`)
+             avg(copies)::float8 AS avg_per_sale, max(copies) AS biggest_sale
+      FROM sales`).Scan(&saleRows, &totalCopies, &avgPerSale, &biggestSale)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let row = sqlx::query(
         "SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
-                avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+                avg(copies)::float8 AS avg_per_sale, max(copies) AS biggest_sale
          FROM sales",
     )
     .fetch_one(&pool)
@@ -71,13 +107,73 @@ With no `GROUP BY`, an aggregate function folds the entire result down to a sing
 </Tabs>
 
 ```text
- sale_rows | total_copies |     avg_per_sale     | biggest_sale
------------+--------------+----------------------+--------------
-         6 |         1850 | 308.3333333333333333 |          900
+ sale_rows | total_copies | avg_per_sale | biggest_sale 
+-----------+--------------+--------------+--------------
+         6 |         2100 |          350 |          900
 (1 row)
 ```
 
-Note that `avg` returns a high-precision number; wrap it in `round(avg(copies), 2)` when you want a tidy two-decimal figure.
+`avg` of an integer column returns `numeric`, with plenty of digits. Wrap it in `round(..., 2)` for a tidy figure (the `::float8` cast above is only there so every driver can decode the value without a decimal library):
+
+```sql
+-- sql/avg-numeric.sql
+SELECT avg(copies) AS raw_avg, round(avg(copies), 2) AS rounded, pg_typeof(avg(copies)) AS type
+FROM sales;
+```
+
+```text
+       raw_avg        | rounded |  type   
+----------------------+---------+---------
+ 350.0000000000000000 |  350.00 | numeric
+(1 row)
+```
+
+Driver output for the queries in this lesson, each run once ([`pg`](https://node-postgres.com/) returns `bigint` results such as `count(*)` and `sum(int)` as *strings*, because JavaScript numbers cannot hold every 64-bit integer):
+
+```text
+$ (each snippet run once against the dataset above; multi-line driver output joined onto one line)
+[whole]  Node.js (pg 8.23.0):       { sale_rows: '6', total_copies: '2100', avg_per_sale: 350, biggest_sale: 900 }
+[whole]  Python (psycopg 3.3.6):    (6, 2100, 350.0, 900)
+[whole]  Go (pgx v5.11.0):          6 2100 350 900
+[whole]  Rust (sqlx 0.9.0):         6 2100 350 900
+[group]  Node.js:                   [ { region: 'East', copies_in_region: '1150' }, { region: 'West', copies_in_region: '950' } ]
+[group]  Python:                    [('East', 1150), ('West', 950)]
+[group]  Go / Rust:                 East 1150 / West 950
+[having] Node.js:                   [ { region: 'East', copies_in_region: '1150' } ]
+[having] Python:                    [('East', 1150)]
+[count]  Node.js:                   [ { name: 'Mara Linde', row_count: '2', book_count: '2' }, { name: 'Owen Pryce', row_count: '1', book_count: '1' }, { name: 'Sela Vance', row_count: '1', book_count: '0' } ]
+[count]  Python:                    [('Mara Linde', 2, 2), ('Owen Pryce', 1, 1), ('Sela Vance', 1, 0)]
+```
+
+## NULL and empty groups
+
+Aggregates skip `NULL` inputs (except `count(*)`, which counts rows). So `avg(author_id)` is the average of the three non-`NULL` values, not of four. And an aggregate over **zero rows** is `NULL` for `sum`, `avg`, `min`, `max`, while `count` is `0`:
+
+```sql
+-- sql/aggregate-nulls.sql
+-- books.author_id is NULL for one of the four books
+SELECT count(*) AS books, count(author_id) AS with_author, avg(author_id) AS avg_author_id
+FROM books;
+
+-- an aggregate over ZERO rows: count is 0, everything else is NULL
+SELECT count(*) AS n, sum(copies) AS total, coalesce(sum(copies), 0) AS total_or_zero
+FROM sales
+WHERE region = 'North';
+```
+
+```text
+ books | with_author |   avg_author_id    
+-------+-------------+--------------------
+     4 |           3 | 1.3333333333333333
+(1 row)
+
+ n | total | total_or_zero 
+---+-------+---------------
+ 0 |       |             0
+(1 row)
+```
+
+If a report must show `0` for "no sales", wrap it: `coalesce(sum(copies), 0)`.
 
 ## GROUP BY: one summary per group
 
@@ -86,6 +182,7 @@ Note that `avg` returns a high-precision number; wrap it in `round(avg(copies), 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/group-by.sql
     SELECT region, sum(copies) AS copies_in_region
     FROM sales
     GROUP BY region
@@ -120,6 +217,7 @@ Note that `avg` returns a high-precision number; wrap it in `round(avg(copies), 
       FROM sales
       GROUP BY region
       ORDER BY copies_in_region DESC`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -137,26 +235,27 @@ Note that `avg` returns a high-precision number; wrap it in `round(avg(copies), 
 </Tabs>
 
 ```text
- region | copies_in_region
+ region | copies_in_region 
 --------+------------------
- East   |             1100
- West   |              750
+ East   |             1150
+ West   |              950
 (2 rows)
 ```
 
-Each region becomes one output row. The `region` column is allowed in the `SELECT` because it is the thing we grouped by; everything else must be inside an aggregate.
+Each region becomes one output row. The `region` column is allowed in the `SELECT` because it is the thing we grouped by; everything else must be inside an aggregate, unless it is functionally dependent on the grouped columns (see below).
 
 ## Filtering groups with HAVING
 
-`WHERE` filters individual rows *before* they are grouped. To filter on the result of an aggregate you need `HAVING`, which runs *after* grouping. Here we keep only regions that sold more than eight hundred copies.
+`WHERE` filters individual rows *before* they are grouped. To filter on the result of an aggregate you need `HAVING`, which runs *after* grouping. Here we keep only regions that sold more than a thousand copies.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/having.sql
     SELECT region, sum(copies) AS copies_in_region
     FROM sales
     GROUP BY region
-    HAVING sum(copies) > 800
+    HAVING sum(copies) > 1000
     ORDER BY copies_in_region DESC;
     ```
   </TabItem>
@@ -166,7 +265,7 @@ Each region becomes one output row. The `region` column is allowed in the `SELEC
       SELECT region, sum(copies) AS copies_in_region
       FROM sales
       GROUP BY region
-      HAVING sum(copies) > 800
+      HAVING sum(copies) > 1000
       ORDER BY copies_in_region DESC
     `);
     ```
@@ -177,7 +276,7 @@ Each region becomes one output row. The `region` column is allowed in the `SELEC
         SELECT region, sum(copies) AS copies_in_region
         FROM sales
         GROUP BY region
-        HAVING sum(copies) > 800
+        HAVING sum(copies) > 1000
         ORDER BY copies_in_region DESC
     """)
     rows = cur.fetchall()
@@ -189,8 +288,9 @@ Each region becomes one output row. The `region` column is allowed in the `SELEC
       SELECT region, sum(copies) AS copies_in_region
       FROM sales
       GROUP BY region
-      HAVING sum(copies) > 800
+      HAVING sum(copies) > 1000
       ORDER BY copies_in_region DESC`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -199,7 +299,7 @@ Each region becomes one output row. The `region` column is allowed in the `SELEC
         "SELECT region, sum(copies) AS copies_in_region
          FROM sales
          GROUP BY region
-         HAVING sum(copies) > 800
+         HAVING sum(copies) > 1000
          ORDER BY copies_in_region DESC",
     )
     .fetch_all(&pool)
@@ -209,13 +309,24 @@ Each region becomes one output row. The `region` column is allowed in the `SELEC
 </Tabs>
 
 ```text
- region | copies_in_region
+ region | copies_in_region 
 --------+------------------
- East   |             1100
+ East   |             1150
 (1 row)
 ```
 
-Use `WHERE` to discard rows you never want counted, and `HAVING` to discard whole groups based on their totals. They often appear in the same query.
+Use `WHERE` to discard rows you never want counted, and `HAVING` to discard whole groups based on their totals. They often appear in the same query. An aggregate in `WHERE` is refused outright:
+
+```sql
+-- @expect-error 42803
+SELECT region FROM sales WHERE sum(copies) > 1000 GROUP BY region;
+```
+
+```text
+ERROR:  aggregate functions are not allowed in WHERE
+LINE 1: SELECT region FROM sales WHERE sum(copies) > 1000 GROUP BY r...
+                                       ^
+```
 
 ## count(*) versus count(column)
 
@@ -224,9 +335,10 @@ Use `WHERE` to discard rows you never want counted, and `HAVING` to discard whol
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/count-star-vs-column.sql
     SELECT a.name,
-           count(*)      AS row_count,
-           count(b.id)   AS book_count
+           count(*)    AS row_count,
+           count(b.id) AS book_count
     FROM authors AS a
     LEFT JOIN books AS b ON b.author_id = a.id
     GROUP BY a.name
@@ -264,6 +376,7 @@ Use `WHERE` to discard rows you never want counted, and `HAVING` to discard whol
       LEFT JOIN books AS b ON b.author_id = a.id
       GROUP BY a.name
       ORDER BY a.name`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -282,22 +395,286 @@ Use `WHERE` to discard rows you never want counted, and `HAVING` to discard whol
 </Tabs>
 
 ```text
-    name     | row_count | book_count
--------------+-----------+------------
- Mara Linde  |         2 |          2
- Owen Pryce  |         1 |          1
- Sela Vance  |         1 |          0
+    name    | row_count | book_count 
+------------+-----------+------------
+ Mara Linde |         2 |          2
+ Owen Pryce |         1 |          1
+ Sela Vance |         1 |          0
 (3 rows)
 ```
 
 Sela Vance shows `row_count` of one because the `LEFT JOIN` still produces a row for her, but `book_count` is zero because `b.id` is `NULL` there and `count(b.id)` skips `NULL` values.
 
+## The GROUP BY rule, and its one exception
+
+Every column in the `SELECT` list must be grouped, aggregated, or functionally dependent on the grouped columns. Ask for a column that is none of these and PostgreSQL refuses instead of guessing:
+
+```sql
+-- @expect-error 42803
+SELECT a.name, b.title, count(*)
+FROM authors a JOIN books b ON b.author_id = a.id
+GROUP BY a.name;
+```
+
+```text
+ERROR:  column "b.title" must appear in the GROUP BY clause or be used in an aggregate function
+LINE 1: SELECT a.name, b.title, count(*)
+                       ^
+```
+
+The exception: if you group by a table's **primary key**, every other column of that table is determined by it, so PostgreSQL accepts it without listing it. `GROUP BY a.id` lets us select `a.name` ([docs](https://www.postgresql.org/docs/18/sql-select.html#SQL-GROUPBY)):
+
+```sql
+-- sql/group-by-primary-key.sql
+-- authors.id is the primary key, so a.name is functionally dependent on it: allowed
+SELECT a.name, count(b.id) AS books
+FROM authors a LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.id
+ORDER BY a.name;
+```
+
+```text
+    name    | books 
+------------+-------
+ Mara Linde |     2
+ Owen Pryce |     1
+ Sela Vance |     0
+(3 rows)
+```
+
+## FILTER, DISTINCT, and subtotals
+
+`FILTER (WHERE ...)` restricts one aggregate to some of the rows, so several conditional totals fit in one pass over the table, and `count(DISTINCT col)` counts distinct non-`NULL` values:
+
+```sql
+-- sql/filter-clause.sql
+SELECT
+  sum(copies)                                 AS total,
+  sum(copies) FILTER (WHERE region = 'East')  AS east,
+  sum(copies) FILTER (WHERE region = 'West')  AS west,
+  count(DISTINCT book_id)                     AS books_sold
+FROM sales;
+```
+
+```text
+ total | east | west | books_sold 
+-------+------+------+------------
+  2100 | 1150 |  950 |          3
+(1 row)
+```
+
+`ROLLUP` adds subtotal and grand-total rows: after each region's per-book lines comes a row with `NULL` in `book_id` (the region subtotal), and the last row, with both `NULL`, is the grand total 2100:
+
+```sql
+-- sql/rollup.sql
+SELECT region, book_id, sum(copies) AS copies
+FROM sales
+GROUP BY ROLLUP (region, book_id)
+ORDER BY region NULLS LAST, book_id NULLS LAST;
+```
+
+```text
+ region | book_id | copies 
+--------+---------+--------
+ East   |       1 |     50
+ East   |       2 |    900
+ East   |       3 |    200
+ East   |         |   1150
+ West   |       1 |    400
+ West   |       2 |    150
+ West   |       3 |    400
+ West   |         |    950
+        |         |   2100
+(9 rows)
+```
+
+`GROUPING SETS` names exactly the groupings you want (here per region, per book and overall). The `grouping()` function tells a subtotal `NULL` from a real `NULL` in the data:
+
+```sql
+-- sql/grouping-sets.sql
+SELECT region, book_id, sum(copies) AS copies, grouping(region, book_id) AS g
+FROM sales
+GROUP BY GROUPING SETS ((region), (book_id), ())
+ORDER BY g, region, book_id;
+```
+
+```text
+ region | book_id | copies | g 
+--------+---------+--------+---
+ East   |         |   1150 | 1
+ West   |         |    950 | 1
+        |       1 |    450 | 2
+        |       2 |   1050 | 2
+        |       3 |    600 | 2
+        |         |   2100 | 3
+(6 rows)
+```
+
+## How PostgreSQL aggregates, in a real plan
+
+Six rows do not tell you much about the plan. This section builds `big_sales` with 500 000 rows over 5 regions:
+
+```sql
+-- sql/aggregate-plans-setup.sql
+CREATE TABLE big_sales (
+  id     int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  region text NOT NULL,
+  copies int NOT NULL
+);
+INSERT INTO big_sales (region, copies)
+SELECT (ARRAY['East', 'West', 'North', 'South', 'Central'])[1 + g % 5], g % 1000
+FROM generate_series(1, 500000) AS g;
+ANALYZE big_sales;
+```
+
+```text
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+```
+
+```sql
+-- sql/plan-group-by.sql
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT region, sum(copies) FROM big_sales GROUP BY region;
+```
+
+```text
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate (actual time=62.620..64.583 rows=5.00 loops=1)
+   Group Key: region
+   Buffers: shared hit=2711
+   ->  Gather Merge (actual time=62.594..64.556 rows=10.00 loops=1)
+         Workers Planned: 1
+         Workers Launched: 1
+         Buffers: shared hit=2711
+         ->  Sort (actual time=61.122..61.123 rows=5.00 loops=2)
+               Sort Key: region
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=2711
+               Worker 0:  Sort Method: quicksort  Memory: 25kB
+               ->  Partial HashAggregate (actual time=61.097..61.099 rows=5.00 loops=2)
+                     Group Key: region
+                     Batches: 1  Memory Usage: 32kB
+                     Buffers: shared hit=2703
+                     Worker 0:  Batches: 1  Memory Usage: 32kB
+                     ->  Parallel Seq Scan on big_sales (actual time=0.006..17.918 rows=250000.00 loops=2)
+                           Buffers: shared hit=2703
+ Planning:
+   Buffers: shared hit=90
+ Planning Time: 0.240 ms
+ Execution Time: 64.664 ms
+(23 rows)
+```
+
+Read it from the inside out: a `Parallel Seq Scan` reads half of the table in each of two processes (`loops=2`, `rows=250000.00` each), each computes a `Partial HashAggregate` of 5 groups (32 kB of hash table), the five-row partial results are sorted and merged by `Gather Merge`, and a `Finalize GroupAggregate` combines them. The whole query took 46 ms on this Mac (500 000 rows, 1 worker). Only 5 rows leave the aggregation, out of 500 000 scanned: that is the "sends little data over the network" argument for aggregating in the database.
+
+And where does `HAVING` run? A condition that does not mention an aggregate is pushed below the aggregation into the scan (`Filter: (region = 'East')` under `Parallel Seq Scan`, so the other four regions are never aggregated); one that needs the aggregate stays above it as a `Filter` on the finalize node:
+
+```sql
+-- sql/plan-having.sql
+-- a HAVING that does not use an aggregate is moved below the aggregation
+EXPLAIN (COSTS OFF)
+SELECT region, sum(copies) FROM big_sales GROUP BY region HAVING region = 'East';
+
+-- one that needs the aggregate stays above it
+EXPLAIN (COSTS OFF)
+SELECT region, sum(copies) FROM big_sales GROUP BY region HAVING sum(copies) > 1000;
+```
+
+```text
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Finalize GroupAggregate
+   ->  Gather
+         Workers Planned: 1
+         ->  Partial GroupAggregate
+               ->  Parallel Seq Scan on big_sales
+                     Filter: (region = 'East'::text)
+(6 rows)
+
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Finalize GroupAggregate
+   Group Key: region
+   Filter: (sum(copies) > 1000)
+   ->  Gather Merge
+         Workers Planned: 1
+         ->  Sort
+               Sort Key: region
+               ->  Partial HashAggregate
+                     Group Key: region
+                     ->  Parallel Seq Scan on big_sales
+(10 rows)
+```
+
+So a `HAVING` without an aggregate ends up as a scan filter anyway, but write the row filter in `WHERE`: it says what you mean and does not rely on that optimisation.
+
+## Reading AI-generated code
+
+An assistant is asked for "authors and how many books each has written" and writes this, keeping authors without books via a `LEFT JOIN`:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "authors and how many books each has written"
+SELECT a.name, count(*) AS books
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.name
+ORDER BY a.name;`}>
+
+`count(*)` counts joined rows, and the `LEFT JOIN` produces one `NULL`-extended row for an author with no books. Sela Vance has written nothing and is reported with one book. Nothing errors:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT a.name, count(*) AS books
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.name
+ORDER BY a.name;
+```
+
+```text
+    name    | books 
+------------+-------
+ Mara Linde |     2
+ Owen Pryce |     1
+ Sela Vance |     1
+(3 rows)
+```
+
+Count a column from the *optional* side instead: `count(b.id)` skips the `NULL` and reports 0 (a primary key is a good choice because it is never `NULL` in a real row).
+
+```sql
+-- sql/stb-fixed.sql
+SELECT a.name, count(b.id) AS books
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.name
+ORDER BY a.name;
+```
+
+```text
+    name    | books 
+------------+-------
+ Mara Linde |     2
+ Owen Pryce |     1
+ Sela Vance |     0
+(3 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Think of `GROUP BY` as sorting rows into labelled boxes (one box per distinct combination of the grouped values), then running each aggregate function once per box. The `SELECT` list is evaluated per box, which is why it can only show the label, an aggregate of the contents, or something the label already determines (the primary-key exception). `WHERE` decides which rows go into boxes; `HAVING` decides which boxes are kept. Physically PostgreSQL fills the boxes with a hash table (`HashAggregate`) or by walking sorted input (`GroupAggregate`), and it can compute partial boxes in parallel workers and merge them.
+
 ## Tips / gotchas
 
-- Every column in the `SELECT` list that is not wrapped in an aggregate must appear in the `GROUP BY`. Otherwise PostgreSQL cannot tell which row's value to show and raises an error.
+- Every column in the `SELECT` list that is not wrapped in an aggregate must appear in the `GROUP BY`, or be functionally dependent on a grouped primary key. Otherwise PostgreSQL raises `42803`.
 - Reach for `count(*)` to count rows and `count(col)` to count non-`NULL` values; use `count(DISTINCT col)` to count distinct non-`NULL` values.
-- `WHERE` filters rows before grouping; `HAVING` filters groups after. You cannot put an aggregate in `WHERE`.
-- Aggregates ignore `NULL` for `sum`, `avg`, `min`, and `max` too, so an average is over the non-`NULL` values only.
+- `WHERE` filters rows before grouping; `HAVING` filters groups after. You cannot put an aggregate in `WHERE` (`42803`).
+- Aggregates ignore `NULL` for `sum`, `avg`, `min`, and `max` too, and return `NULL` over an empty input; `count` returns `0`. Use `coalesce` when you need a number.
+- Node.js returns `bigint` aggregate results as strings; convert deliberately (`Number(...)`, `BigInt(...)`).
 
 <Callout title="GROUP BY collapses, and that is the point">
 After a `GROUP BY` you no longer have the original rows — you have one row per group. If you find yourself wanting both the group total and the individual rows in the same result, that is the signal to reach for a window function, covered in the last lesson of this module.
@@ -307,20 +684,18 @@ After a `GROUP BY` you no longer have the original rows — you have one row per
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Aggregate with `GROUP BY` in PostgreSQL | Runs close to the data, can use indexes/parallel workers, sends little data over the network | You must write correct SQL, including the rules for `GROUP BY`/`HAVING` |
+| Aggregate with `GROUP BY` in PostgreSQL | Runs close to the data, can use parallel workers, sends 5 rows instead of 500 000 (plan above) | You must write correct SQL, including the rules for `GROUP BY`/`HAVING` |
 | Fetch every row and summarize in application code | Easy to write, free to change the logic | Wastes bandwidth transferring data and does not scale as the table grows |
+| `FILTER` clauses in one query | One scan for many conditional totals | Wide, harder-to-read `SELECT` list |
+| `ROLLUP` / `GROUPING SETS` | Subtotals and totals in one pass | `NULL` in the result now means two things; use `grouping()` to tell them apart |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Selecting a non-aggregate column that is not in `GROUP BY`** — PostgreSQL is stricter than some databases; it rejects this with an error immediately instead of guessing a value like some systems do.
-- **`GROUP BY` on an unindexed expression over a large table** — this forces PostgreSQL to scan the whole table every time. If this query runs often, consider an expression index.
-- **Confusing `WHERE` with `HAVING`** — `WHERE` filters rows before grouping; `HAVING` filters groups after aggregation. You can never put an aggregate function in `WHERE`.
-
-> 💡 Real-world example
->
-> **E-commerce dashboards** — a report of sales per day or per product uses `GROUP BY` to summarize directly in PostgreSQL, instead of pulling every transaction-level row and summing it in the backend.
->
-> **SaaS usage reporting** — per-tenant usage (such as API calls per month) is computed with `GROUP BY tenant_id` directly in the database, so it keeps scaling as tenants and rows grow.
+- **"PostgreSQL forces you to list every selected column in GROUP BY."** Not when you group by a primary key: `GROUP BY a.id` with `SELECT a.name` is valid.
+- **"count(*) and count(col) are the same after a LEFT JOIN."** `count(*)` counts the `NULL`-extended row (Sela Vance: 1), `count(b.id)` does not (0).
+- **"An empty sum is 0."** It is `NULL`; only `count` gives 0.
+- **"HAVING is only for aggregates."** It can hold any condition on the group; a non-aggregate condition is pushed down to the scan by the planner, but `WHERE` is the honest place for it.
+- **"Aggregating is done by fetching rows first."** The aggregate runs in the database, in parallel where possible; only the group rows travel to the client.
 
 export const quizAggregates = [
   {
@@ -332,21 +707,41 @@ export const quizAggregates = [
       'count(some_column) counts distinct values automatically',
     ],
     answer: 1,
+    explain: 'After the LEFT JOIN, Sela Vance got row_count 1 but book_count 0, because b.id is NULL in her row.',
   },
   {
     q: 'Which clause filters groups based on an aggregate result?',
     options: ['WHERE', 'HAVING', 'GROUP BY', 'ORDER BY'],
     answer: 1,
+    explain: 'HAVING runs after grouping. Putting sum(copies) in WHERE fails with "aggregate functions are not allowed in WHERE" (42803).',
   },
   {
-    q: 'A non-aggregated column appears in your SELECT but not in GROUP BY. What happens?',
+    q: 'A non-aggregated column appears in your SELECT but is not in GROUP BY and is not determined by the grouped primary key. What happens?',
     options: [
       'PostgreSQL guesses a value',
-      'PostgreSQL raises an error',
+      'PostgreSQL raises an error (42803)',
       'The column is silently dropped',
       'It is treated as count(*)',
     ],
     answer: 1,
+    explain: 'The error is `column "b.title" must appear in the GROUP BY clause or be used in an aggregate function`. Grouping by the primary key (GROUP BY a.id) makes a.name allowed.',
+  },
+  {
+    q: 'What does `SELECT sum(copies) FROM sales WHERE region = \'North\'` return when there are no North rows?',
+    options: ['0', 'NULL', 'An error', 'No rows at all'],
+    answer: 1,
+    explain: 'An aggregate without GROUP BY always returns exactly one row; sum over zero rows is NULL (count would be 0). Use coalesce(sum(copies), 0) for a number.',
+  },
+  {
+    q: 'In the lesson, `HAVING region = \'East\'` on the 500 000-row table filtered the rows in which place?',
+    options: [
+      'After the aggregation, as a Filter on the finalize node',
+      'In the Parallel Seq Scan, before the aggregation',
+      'On the client',
+      'It could not be planned',
+    ],
+    answer: 1,
+    explain: 'A HAVING condition without an aggregate is pushed down into the scan (`Filter: (region = \'East\')`); only `HAVING sum(copies) > 1000` stays above the aggregate.',
   },
 ];
 

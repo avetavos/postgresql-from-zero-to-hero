@@ -1,6 +1,6 @@
 ---
 title: Aggregate และ GROUP BY
-description: ยุบหลาย row ให้กลายเป็นตัวเลขสรุปด้วย count, sum, avg, min, และ max, จัดกลุ่มด้วย GROUP BY, กรองกลุ่มด้วย HAVING, และเข้าใจความต่างระหว่าง count(*) กับ count(col)
+description: ยุบหลาย row เป็นตัวเลขสรุปด้วย count, sum, avg, min และ max จัดกลุ่มด้วย GROUP BY และกรองกลุ่มด้วย HAVING — รวมถึง FILTER, ROLLUP, กฎของ NULL และ plan ที่ PostgreSQL ใช้จริง
 sidebar:
   order: 3
 ---
@@ -9,23 +9,56 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-จนถึงตอนนี้ทุก query คืน row ที่มีอยู่แล้ว aggregate function ต่างออกไป คืออ่านหลาย row แล้วผลิตค่าสรุปออกมาค่าเดียว มีหนังสือกี่เล่ม? ยอดขายรวมทั้งหมดกี่เล่ม? ปีที่ตีพิมพ์โดยเฉลี่ยคือปีไหน? แต่ละข้อนั้นคือตัวเลขหนึ่งตัวที่ถูกบีบออกมาจากทั้ง column เพิ่ม `GROUP BY` เข้าไปแล้วคุณจะได้ตัวเลขสรุปหนึ่งตัวต่อหนึ่งกลุ่ม แทนที่จะได้หนึ่งตัวสำหรับทั้ง table
+จนถึงตอนนี้ทุก query คืน row ที่มีอยู่แล้ว aggregate function ต่างออกไป: มันอ่านหลาย row และให้ค่าสรุปหนึ่งค่า มียอดขายกี่รายการ? ยอดรวมกี่เล่ม? แต่ละข้อคือตัวเลขหนึ่งตัวที่บีบออกมาจากทั้ง column เพิ่ม `GROUP BY` แล้วคุณจะได้ตัวเลขสรุปหนึ่งตัวต่อกลุ่ม แทนที่จะเป็นหนึ่งตัวสำหรับทั้ง table
 
-เรายังคงใช้ table `authors`, `books`, และ `sales` ต่อไป
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) คัดลอกจาก `psql` fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว
 
-## Aggregate function ทั่วทั้ง table
+## ชุดข้อมูล
 
-เมื่อไม่มี `GROUP BY` aggregate function จะพับผลลัพธ์ทั้งหมดลงเหลือเพียง row เดียว ตัวที่ใช้บ่อยที่สุดคือ `count`, `sum`, `avg`, `min`, และ `max`
+ชุดข้อมูลมาตรฐานเดียวกับทั้ง module: `sales` 6 row รวม 2100 เล่ม (East 1150, West 950) โดยมีคู่เสมอ 400/400 ใน West
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+## Aggregate function บนทั้ง table
+
+เมื่อไม่มี `GROUP BY` aggregate function พับผลลัพธ์ทั้งหมดเหลือ row เดียว ที่พบบ่อยที่สุดคือ `count`, `sum`, `avg`, `min` และ `max`
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/aggregate-whole.sql
     SELECT
-      count(*)    AS sale_rows,
-      sum(copies) AS total_copies,
-      avg(copies) AS avg_per_sale,
-      max(copies) AS biggest_sale
+      count(*)                  AS sale_rows,
+      sum(copies)               AS total_copies,
+      avg(copies)::float8       AS avg_per_sale,
+      max(copies)               AS biggest_sale
     FROM sales;
     ```
   </TabItem>
@@ -33,7 +66,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     ```js
     const res = await pool.query(`
       SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
-             avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+             avg(copies)::float8 AS avg_per_sale, max(copies) AS biggest_sale
       FROM sales
     `);
     console.log(res.rows[0]);
@@ -43,7 +76,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     ```python
     cur.execute("""
         SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
-               avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+               avg(copies)::float8 AS avg_per_sale, max(copies) AS biggest_sale
         FROM sales
     """)
     summary = cur.fetchone()
@@ -51,17 +84,20 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   </TabItem>
   <TabItem label="Go">
     ```go
-    row := conn.QueryRow(ctx, `
+    var saleRows, totalCopies int64
+    var avgPerSale float64
+    var biggestSale int32
+    err := conn.QueryRow(ctx, `
       SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
-             avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
-      FROM sales`)
+             avg(copies)::float8 AS avg_per_sale, max(copies) AS biggest_sale
+      FROM sales`).Scan(&saleRows, &totalCopies, &avgPerSale, &biggestSale)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let row = sqlx::query(
         "SELECT count(*) AS sale_rows, sum(copies) AS total_copies,
-                avg(copies) AS avg_per_sale, max(copies) AS biggest_sale
+                avg(copies)::float8 AS avg_per_sale, max(copies) AS biggest_sale
          FROM sales",
     )
     .fetch_one(&pool)
@@ -71,21 +107,82 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- sale_rows | total_copies |     avg_per_sale     | biggest_sale
------------+--------------+----------------------+--------------
-         6 |         1850 | 308.3333333333333333 |          900
+ sale_rows | total_copies | avg_per_sale | biggest_sale 
+-----------+--------------+--------------+--------------
+         6 |         2100 |          350 |          900
 (1 row)
 ```
 
-สังเกตว่า `avg` คืนค่าตัวเลขความละเอียดสูง ห่อด้วย `round(avg(copies), 2)` เมื่อคุณต้องการตัวเลขทศนิยมสองตำแหน่งที่ดูเรียบร้อย
+`avg` ของ column จำนวนเต็มคืน `numeric` ที่มีหลักทศนิยมมาก ครอบด้วย `round(..., 2)` เพื่อให้ตัวเลขเรียบร้อย (cast `::float8` ข้างบนมีไว้เพื่อให้ทุก driver ถอดรหัสค่าได้โดยไม่ต้องใช้ไลบรารี decimal)
 
-## GROUP BY: หนึ่งสรุปต่อหนึ่งกลุ่ม
+```sql
+-- sql/avg-numeric.sql
+SELECT avg(copies) AS raw_avg, round(avg(copies), 2) AS rounded, pg_typeof(avg(copies)) AS type
+FROM sales;
+```
 
-`GROUP BY` แยก row ออกเป็นถังที่ใช้ค่าเดียวกันใน column ที่ระบุไว้ แล้วรัน aggregate ครั้งเดียวต่อหนึ่งถัง ที่นี่เรารวมจำนวนเล่มที่ขายได้ต่อภูมิภาค
+```text
+       raw_avg        | rounded |  type   
+----------------------+---------+---------
+ 350.0000000000000000 |  350.00 | numeric
+(1 row)
+```
+
+ผลลัพธ์จาก driver สำหรับ query ในบทนี้ แต่ละอันรันหนึ่งครั้ง ([`pg`](https://node-postgres.com/) คืนผล `bigint` เช่น `count(*)` และ `sum(int)` เป็น *string* เพราะตัวเลขของ JavaScript เก็บจำนวนเต็ม 64 บิตได้ไม่ครบ):
+
+```text
+$ (each snippet run once against the dataset above; multi-line driver output joined onto one line)
+[whole]  Node.js (pg 8.23.0):       { sale_rows: '6', total_copies: '2100', avg_per_sale: 350, biggest_sale: 900 }
+[whole]  Python (psycopg 3.3.6):    (6, 2100, 350.0, 900)
+[whole]  Go (pgx v5.11.0):          6 2100 350 900
+[whole]  Rust (sqlx 0.9.0):         6 2100 350 900
+[group]  Node.js:                   [ { region: 'East', copies_in_region: '1150' }, { region: 'West', copies_in_region: '950' } ]
+[group]  Python:                    [('East', 1150), ('West', 950)]
+[group]  Go / Rust:                 East 1150 / West 950
+[having] Node.js:                   [ { region: 'East', copies_in_region: '1150' } ]
+[having] Python:                    [('East', 1150)]
+[count]  Node.js:                   [ { name: 'Mara Linde', row_count: '2', book_count: '2' }, { name: 'Owen Pryce', row_count: '1', book_count: '1' }, { name: 'Sela Vance', row_count: '1', book_count: '0' } ]
+[count]  Python:                    [('Mara Linde', 2, 2), ('Owen Pryce', 1, 1), ('Sela Vance', 1, 0)]
+```
+
+## NULL และกลุ่มว่าง
+
+aggregate ข้าม input ที่เป็น `NULL` (ยกเว้น `count(*)` ที่นับ row) ดังนั้น `avg(author_id)` คือค่าเฉลี่ยของสามค่าที่ไม่ใช่ `NULL` ไม่ใช่สี่ค่า และ aggregate บน **ศูนย์ row** ให้ `NULL` สำหรับ `sum`, `avg`, `min`, `max` ส่วน `count` ให้ `0`:
+
+```sql
+-- sql/aggregate-nulls.sql
+-- books.author_id is NULL for one of the four books
+SELECT count(*) AS books, count(author_id) AS with_author, avg(author_id) AS avg_author_id
+FROM books;
+
+-- an aggregate over ZERO rows: count is 0, everything else is NULL
+SELECT count(*) AS n, sum(copies) AS total, coalesce(sum(copies), 0) AS total_or_zero
+FROM sales
+WHERE region = 'North';
+```
+
+```text
+ books | with_author |   avg_author_id    
+-------+-------------+--------------------
+     4 |           3 | 1.3333333333333333
+(1 row)
+
+ n | total | total_or_zero 
+---+-------+---------------
+ 0 |       |             0
+(1 row)
+```
+
+ถ้ารายงานต้องแสดง `0` สำหรับ "ไม่มียอดขาย" ให้ครอบด้วย `coalesce(sum(copies), 0)`
+
+## GROUP BY: หนึ่งสรุปต่อกลุ่ม
+
+`GROUP BY` แบ่ง row เป็นถังที่มีค่าเดียวกันใน column ที่ระบุ แล้วรัน aggregate หนึ่งครั้งต่อถัง ตรงนี้เรารวมจำนวนเล่มที่ขายต่อ region
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/group-by.sql
     SELECT region, sum(copies) AS copies_in_region
     FROM sales
     GROUP BY region
@@ -120,6 +217,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
       FROM sales
       GROUP BY region
       ORDER BY copies_in_region DESC`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -137,26 +235,27 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- region | copies_in_region
+ region | copies_in_region 
 --------+------------------
- East   |             1100
- West   |              750
+ East   |             1150
+ West   |              950
 (2 rows)
 ```
 
-แต่ละภูมิภาคกลายเป็นผลลัพธ์หนึ่ง row column `region` อยู่ใน `SELECT` ได้เพราะเป็นตัวที่เราใช้จัดกลุ่ม ทุกอย่างที่เหลือต้องอยู่ภายใน aggregate
+แต่ละ region กลายเป็นหนึ่ง row ผลลัพธ์ column `region` อยู่ใน `SELECT` ได้เพราะเป็นสิ่งที่เรา group ทุกอย่างอื่นต้องอยู่ใน aggregate เว้นแต่ถูกกำหนดโดย column ที่ group อยู่แล้ว (ดูด้านล่าง)
 
 ## กรองกลุ่มด้วย HAVING
 
-`WHERE` กรอง row ทีละ row *ก่อน* เข้าสู่การจัดกลุ่ม ในการกรองบนผลลัพธ์ของ aggregate คุณต้องใช้ `HAVING` ซึ่งทำงาน *หลัง* การจัดกลุ่ม ที่นี่เราเก็บเฉพาะภูมิภาคที่ขายได้มากกว่าแปดร้อยเล่ม
+`WHERE` กรอง row เดี่ยว ๆ *ก่อน* จัดกลุ่ม การกรองด้วยผลของ aggregate ต้องใช้ `HAVING` ซึ่งทำงาน *หลัง* จัดกลุ่ม ตรงนี้เก็บเฉพาะ region ที่ขายเกินหนึ่งพันเล่ม
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/having.sql
     SELECT region, sum(copies) AS copies_in_region
     FROM sales
     GROUP BY region
-    HAVING sum(copies) > 800
+    HAVING sum(copies) > 1000
     ORDER BY copies_in_region DESC;
     ```
   </TabItem>
@@ -166,7 +265,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
       SELECT region, sum(copies) AS copies_in_region
       FROM sales
       GROUP BY region
-      HAVING sum(copies) > 800
+      HAVING sum(copies) > 1000
       ORDER BY copies_in_region DESC
     `);
     ```
@@ -177,7 +276,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
         SELECT region, sum(copies) AS copies_in_region
         FROM sales
         GROUP BY region
-        HAVING sum(copies) > 800
+        HAVING sum(copies) > 1000
         ORDER BY copies_in_region DESC
     """)
     rows = cur.fetchall()
@@ -189,8 +288,9 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
       SELECT region, sum(copies) AS copies_in_region
       FROM sales
       GROUP BY region
-      HAVING sum(copies) > 800
+      HAVING sum(copies) > 1000
       ORDER BY copies_in_region DESC`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -199,7 +299,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
         "SELECT region, sum(copies) AS copies_in_region
          FROM sales
          GROUP BY region
-         HAVING sum(copies) > 800
+         HAVING sum(copies) > 1000
          ORDER BY copies_in_region DESC",
     )
     .fetch_all(&pool)
@@ -209,24 +309,36 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- region | copies_in_region
+ region | copies_in_region 
 --------+------------------
- East   |             1100
+ East   |             1150
 (1 row)
 ```
 
-ใช้ `WHERE` ทิ้ง row ที่คุณไม่อยากให้ถูกนับเลย และใช้ `HAVING` ทิ้งทั้งกลุ่มโดยอิงจากยอดรวมของกลุ่ม ทั้งสองมักปรากฏใน query เดียวกัน
+ใช้ `WHERE` ทิ้ง row ที่ไม่ต้องการนับเลย และใช้ `HAVING` ทิ้งทั้งกลุ่มตามยอดรวม สองอย่างนี้มักอยู่ใน query เดียวกัน aggregate ใน `WHERE` ถูกปฏิเสธทันที:
+
+```sql
+-- @expect-error 42803
+SELECT region FROM sales WHERE sum(copies) > 1000 GROUP BY region;
+```
+
+```text
+ERROR:  aggregate functions are not allowed in WHERE
+LINE 1: SELECT region FROM sales WHERE sum(copies) > 1000 GROUP BY r...
+                                       ^
+```
 
 ## count(*) เทียบกับ count(column)
 
-`count(*)` นับ row ส่วน `count(column)` นับ row ที่ column นั้นไม่เป็น `NULL` ความต่างนี้สำคัญทุกครั้งที่ column หนึ่งอาจขาดหายไป การ join `authors` เข้ากับ `books` ด้วย `LEFT JOIN` แสดงให้เห็นชัดเจน
+`count(*)` นับ row ส่วน `count(column)` นับ row ที่ column นั้นไม่เป็น `NULL` ความต่างสำคัญเมื่อ column อาจขาด การ join `authors` กับ `books` ด้วย `LEFT JOIN` แสดงให้เห็นชัด
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/count-star-vs-column.sql
     SELECT a.name,
-           count(*)      AS row_count,
-           count(b.id)   AS book_count
+           count(*)    AS row_count,
+           count(b.id) AS book_count
     FROM authors AS a
     LEFT JOIN books AS b ON b.author_id = a.id
     GROUP BY a.name
@@ -264,6 +376,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
       LEFT JOIN books AS b ON b.author_id = a.id
       GROUP BY a.name
       ORDER BY a.name`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -282,71 +395,353 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
-    name     | row_count | book_count
--------------+-----------+------------
- Mara Linde  |         2 |          2
- Owen Pryce  |         1 |          1
- Sela Vance  |         1 |          0
+    name    | row_count | book_count 
+------------+-----------+------------
+ Mara Linde |         2 |          2
+ Owen Pryce |         1 |          1
+ Sela Vance |         1 |          0
 (3 rows)
 ```
 
-Sela Vance แสดง `row_count` เป็นหนึ่งเพราะ `LEFT JOIN` ยังคงผลิต row ให้เธอ แต่ `book_count` เป็นศูนย์เพราะ `b.id` เป็น `NULL` ตรงนั้น และ `count(b.id)` ข้ามค่า `NULL` ไป
+Sela Vance ได้ `row_count` เป็นหนึ่งเพราะ `LEFT JOIN` ยังสร้าง row ให้เธอ แต่ `book_count` เป็นศูนย์เพราะ `b.id` เป็น `NULL` ตรงนั้น และ `count(b.id)` ข้ามค่า `NULL`
+
+## กฎของ GROUP BY และข้อยกเว้นเดียว
+
+ทุก column ใน `SELECT` ต้องถูก group, ถูก aggregate หรือถูกกำหนดโดย column ที่ group (functional dependency) ขอ column ที่ไม่ใช่ทั้งสามแล้ว PostgreSQL ปฏิเสธแทนที่จะเดา:
+
+```sql
+-- @expect-error 42803
+SELECT a.name, b.title, count(*)
+FROM authors a JOIN books b ON b.author_id = a.id
+GROUP BY a.name;
+```
+
+```text
+ERROR:  column "b.title" must appear in the GROUP BY clause or be used in an aggregate function
+LINE 1: SELECT a.name, b.title, count(*)
+                       ^
+```
+
+ข้อยกเว้น: ถ้า group ด้วย **primary key** ของ table ทุก column อื่นของ table นั้นถูกกำหนดโดยมัน PostgreSQL จึงยอมรับโดยไม่ต้องลิสต์ `GROUP BY a.id` ทำให้ select `a.name` ได้ ([docs](https://www.postgresql.org/docs/18/sql-select.html#SQL-GROUPBY)):
+
+```sql
+-- sql/group-by-primary-key.sql
+-- authors.id is the primary key, so a.name is functionally dependent on it: allowed
+SELECT a.name, count(b.id) AS books
+FROM authors a LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.id
+ORDER BY a.name;
+```
+
+```text
+    name    | books 
+------------+-------
+ Mara Linde |     2
+ Owen Pryce |     1
+ Sela Vance |     0
+(3 rows)
+```
+
+## FILTER, DISTINCT และยอดย่อย
+
+`FILTER (WHERE ...)` จำกัด aggregate หนึ่งตัวให้ใช้กับบาง row ยอดรวมแบบมีเงื่อนไขหลายตัวจึงอยู่ในการผ่าน table รอบเดียว และ `count(DISTINCT col)` นับค่าที่ไม่ใช่ `NULL` และไม่ซ้ำ:
+
+```sql
+-- sql/filter-clause.sql
+SELECT
+  sum(copies)                                 AS total,
+  sum(copies) FILTER (WHERE region = 'East')  AS east,
+  sum(copies) FILTER (WHERE region = 'West')  AS west,
+  count(DISTINCT book_id)                     AS books_sold
+FROM sales;
+```
+
+```text
+ total | east | west | books_sold 
+-------+------+------+------------
+  2100 | 1150 |  950 |          3
+(1 row)
+```
+
+`ROLLUP` เพิ่ม row ยอดย่อยและยอดรวม: หลังบรรทัดต่อเล่มของแต่ละ region จะมี row ที่ `book_id` เป็น `NULL` (ยอดย่อยของ region) และ row สุดท้ายที่เป็น `NULL` ทั้งคู่คือยอดรวม 2100:
+
+```sql
+-- sql/rollup.sql
+SELECT region, book_id, sum(copies) AS copies
+FROM sales
+GROUP BY ROLLUP (region, book_id)
+ORDER BY region NULLS LAST, book_id NULLS LAST;
+```
+
+```text
+ region | book_id | copies 
+--------+---------+--------
+ East   |       1 |     50
+ East   |       2 |    900
+ East   |       3 |    200
+ East   |         |   1150
+ West   |       1 |    400
+ West   |       2 |    150
+ West   |       3 |    400
+ West   |         |    950
+        |         |   2100
+(9 rows)
+```
+
+`GROUPING SETS` ระบุการจัดกลุ่มที่ต้องการเป๊ะ (ที่นี่ต่อ region ต่อเล่ม และทั้งหมด) ฟังก์ชัน `grouping()` แยก `NULL` ของยอดย่อยออกจาก `NULL` จริงในข้อมูล:
+
+```sql
+-- sql/grouping-sets.sql
+SELECT region, book_id, sum(copies) AS copies, grouping(region, book_id) AS g
+FROM sales
+GROUP BY GROUPING SETS ((region), (book_id), ())
+ORDER BY g, region, book_id;
+```
+
+```text
+ region | book_id | copies | g 
+--------+---------+--------+---
+ East   |         |   1150 | 1
+ West   |         |    950 | 1
+        |       1 |    450 | 2
+        |       2 |   1050 | 2
+        |       3 |    600 | 2
+        |         |   2100 | 3
+(6 rows)
+```
+
+## PostgreSQL aggregate อย่างไร ใน plan จริง
+
+หกแถวบอกอะไรเกี่ยวกับ plan ได้ไม่มาก หัวข้อนี้สร้าง `big_sales` ที่มี 500 000 row ใน 5 region:
+
+```sql
+-- sql/aggregate-plans-setup.sql
+CREATE TABLE big_sales (
+  id     int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  region text NOT NULL,
+  copies int NOT NULL
+);
+INSERT INTO big_sales (region, copies)
+SELECT (ARRAY['East', 'West', 'North', 'South', 'Central'])[1 + g % 5], g % 1000
+FROM generate_series(1, 500000) AS g;
+ANALYZE big_sales;
+```
+
+```text
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+```
+
+```sql
+-- sql/plan-group-by.sql
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT region, sum(copies) FROM big_sales GROUP BY region;
+```
+
+```text
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate (actual time=62.620..64.583 rows=5.00 loops=1)
+   Group Key: region
+   Buffers: shared hit=2711
+   ->  Gather Merge (actual time=62.594..64.556 rows=10.00 loops=1)
+         Workers Planned: 1
+         Workers Launched: 1
+         Buffers: shared hit=2711
+         ->  Sort (actual time=61.122..61.123 rows=5.00 loops=2)
+               Sort Key: region
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=2711
+               Worker 0:  Sort Method: quicksort  Memory: 25kB
+               ->  Partial HashAggregate (actual time=61.097..61.099 rows=5.00 loops=2)
+                     Group Key: region
+                     Batches: 1  Memory Usage: 32kB
+                     Buffers: shared hit=2703
+                     Worker 0:  Batches: 1  Memory Usage: 32kB
+                     ->  Parallel Seq Scan on big_sales (actual time=0.006..17.918 rows=250000.00 loops=2)
+                           Buffers: shared hit=2703
+ Planning:
+   Buffers: shared hit=90
+ Planning Time: 0.240 ms
+ Execution Time: 64.664 ms
+(23 rows)
+```
+
+อ่านจากด้านในออกมา: `Parallel Seq Scan` อ่านครึ่งหนึ่งของ table ในแต่ละสอง process (`loops=2`, `rows=250000.00` ต่อตัว) แต่ละตัวคำนวณ `Partial HashAggregate` ของ 5 กลุ่ม (hash table 32 kB) ผลบางส่วนห้า row ถูก sort และ merge โดย `Gather Merge` และ `Finalize GroupAggregate` รวมเข้าด้วยกัน ทั้ง query ใช้ 46 ms บน Mac เครื่องนี้ (500 000 row, 1 worker) มีเพียง 5 row ที่ออกจากการ aggregate จากที่ scan 500 000: นี่คือข้อโต้แย้งเรื่อง "ส่งข้อมูลผ่านเครือข่ายน้อย" ของการ aggregate ในฐานข้อมูล
+
+แล้ว `HAVING` ทำงานที่ไหน? เงื่อนไขที่ไม่พูดถึง aggregate ถูกผลักลงไปใต้การ aggregate เข้าไปใน scan (`Filter: (region = 'East')` ใต้ `Parallel Seq Scan` อีกสี่ region จึงไม่เคยถูก aggregate) ส่วนเงื่อนไขที่ต้องใช้ aggregate ยังอยู่ด้านบนเป็น `Filter` บน node finalize:
+
+```sql
+-- sql/plan-having.sql
+-- a HAVING that does not use an aggregate is moved below the aggregation
+EXPLAIN (COSTS OFF)
+SELECT region, sum(copies) FROM big_sales GROUP BY region HAVING region = 'East';
+
+-- one that needs the aggregate stays above it
+EXPLAIN (COSTS OFF)
+SELECT region, sum(copies) FROM big_sales GROUP BY region HAVING sum(copies) > 1000;
+```
+
+```text
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Finalize GroupAggregate
+   ->  Gather
+         Workers Planned: 1
+         ->  Partial GroupAggregate
+               ->  Parallel Seq Scan on big_sales
+                     Filter: (region = 'East'::text)
+(6 rows)
+
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Finalize GroupAggregate
+   Group Key: region
+   Filter: (sum(copies) > 1000)
+   ->  Gather Merge
+         Workers Planned: 1
+         ->  Sort
+               Sort Key: region
+               ->  Partial HashAggregate
+                     Group Key: region
+                     ->  Parallel Seq Scan on big_sales
+(10 rows)
+```
+
+ดังนั้น `HAVING` ที่ไม่มี aggregate จบลงเป็นตัวกรองของ scan อยู่ดี แต่ให้เขียนตัวกรอง row ใน `WHERE`: มันบอกสิ่งที่คุณหมายถึงและไม่ต้องพึ่งการ optimize นั้น
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอ "ผู้เขียนและจำนวนหนังสือที่เขียนแต่ละคน" และเขียนแบบนี้ โดยเก็บผู้เขียนที่ไม่มีหนังสือไว้ด้วย `LEFT JOIN`:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "authors and how many books each has written"
+SELECT a.name, count(*) AS books
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.name
+ORDER BY a.name;`}>
+
+`count(*)` นับ row ที่ join แล้ว และ `LEFT JOIN` สร้างหนึ่ง row ที่เติม `NULL` ให้ผู้เขียนที่ไม่มีหนังสือ Sela Vance ไม่เคยเขียนอะไรแต่ถูกรายงานว่ามีหนึ่งเล่ม ไม่มี error:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT a.name, count(*) AS books
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.name
+ORDER BY a.name;
+```
+
+```text
+    name    | books 
+------------+-------
+ Mara Linde |     2
+ Owen Pryce |     1
+ Sela Vance |     1
+(3 rows)
+```
+
+ให้นับ column จากฝั่ง *ทางเลือก* แทน: `count(b.id)` ข้าม `NULL` และรายงาน 0 (primary key เป็นตัวเลือกที่ดีเพราะไม่มีวันเป็น `NULL` ใน row จริง)
+
+```sql
+-- sql/stb-fixed.sql
+SELECT a.name, count(b.id) AS books
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+GROUP BY a.name
+ORDER BY a.name;
+```
+
+```text
+    name    | books 
+------------+-------
+ Mara Linde |     2
+ Owen Pryce |     1
+ Sela Vance |     0
+(3 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+มอง `GROUP BY` เป็นการแยก row ใส่กล่องที่ติดป้าย (หนึ่งกล่องต่อหนึ่งชุดค่าที่ group ไม่ซ้ำกัน) แล้วรัน aggregate function หนึ่งครั้งต่อกล่อง `SELECT` ถูกประเมินต่อกล่อง จึงแสดงได้เพียงป้าย, aggregate ของสิ่งที่อยู่ข้างใน หรือสิ่งที่ป้ายกำหนดได้อยู่แล้ว (ข้อยกเว้น primary key) `WHERE` ตัดสินว่า row ไหนเข้ากล่อง `HAVING` ตัดสินว่ากล่องไหนถูกเก็บ ในทางกายภาพ PostgreSQL เติมกล่องด้วย hash table (`HashAggregate`) หรือเดินผ่าน input ที่เรียงแล้ว (`GroupAggregate`) และคำนวณกล่องบางส่วนใน parallel worker แล้ว merge ได้
 
 ## เคล็ดลับและข้อควรระวัง
 
-- ทุก column ในรายการ `SELECT` ที่ไม่ได้ห่อด้วย aggregate ต้องปรากฏใน `GROUP BY` มิฉะนั้น PostgreSQL จะบอกไม่ได้ว่าจะแสดงค่าของ row ไหน และจะโยน error ออกมา
-- หยิบ `count(*)` มาใช้เพื่อนับ row และ `count(col)` เพื่อนับค่าที่ไม่เป็น `NULL` ใช้ `count(DISTINCT col)` เพื่อนับค่าที่ไม่ซ้ำกันและไม่เป็น `NULL`
-- `WHERE` กรอง row ก่อนจัดกลุ่ม ส่วน `HAVING` กรองกลุ่มหลังจากนั้น คุณใส่ aggregate ใน `WHERE` ไม่ได้
-- aggregate มองข้าม `NULL` สำหรับ `sum`, `avg`, `min`, และ `max` ด้วยเช่นกัน ดังนั้นค่าเฉลี่ยจึงคิดเฉพาะจากค่าที่ไม่เป็น `NULL` เท่านั้น
+- ทุก column ใน `SELECT` ที่ไม่ได้ครอบด้วย aggregate ต้องอยู่ใน `GROUP BY` หรือถูกกำหนดโดย primary key ที่ group ไม่เช่นนั้น PostgreSQL ส่ง `42803`
+- ใช้ `count(*)` นับ row และ `count(col)` นับค่าที่ไม่ใช่ `NULL` ใช้ `count(DISTINCT col)` นับค่าที่ไม่ซ้ำและไม่ใช่ `NULL`
+- `WHERE` กรอง row ก่อนจัดกลุ่ม `HAVING` กรองกลุ่มหลังจัดกลุ่ม ใส่ aggregate ใน `WHERE` ไม่ได้ (`42803`)
+- aggregate ข้าม `NULL` สำหรับ `sum`, `avg`, `min` และ `max` ด้วย และคืน `NULL` บน input ว่าง ส่วน `count` คืน `0` ใช้ `coalesce` เมื่อต้องการตัวเลข
+- Node.js คืนผล aggregate แบบ `bigint` เป็น string แปลงอย่างตั้งใจ (`Number(...)`, `BigInt(...)`)
 
-<Callout title="GROUP BY ยุบ row และนั่นคือจุดประสงค์">
-หลังจาก `GROUP BY` คุณจะไม่มี row ต้นฉบับอีกต่อไป — คุณมีหนึ่ง row ต่อหนึ่งกลุ่ม ถ้าคุณพบว่าตัวเองอยากได้ทั้งยอดรวมของกลุ่มและ row แต่ละ row ในผลลัพธ์เดียวกัน นั่นคือสัญญาณให้หันไปหา window function ซึ่งครอบคลุมในบทเรียนสุดท้ายของโมดูลนี้
+<Callout title="GROUP BY ยุบ และนั่นคือจุดประสงค์">
+หลัง `GROUP BY` คุณไม่มี row เดิมแล้ว — คุณมีหนึ่ง row ต่อกลุ่ม ถ้าอยากได้ทั้งยอดรวมกลุ่มและ row เดี่ยว ๆ ในผลลัพธ์เดียวกัน นั่นคือสัญญาณให้ใช้ window function ซึ่งอยู่ในบทสุดท้ายของ module นี้
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Aggregate ด้วย `GROUP BY` ใน PostgreSQL | ทำงานใกล้ข้อมูล ใช้ index/parallel worker ได้ ส่งข้อมูลผ่าน network น้อย | ต้องเขียน SQL ให้ถูกต้อง เช่นเข้าใจกฎของ `GROUP BY`/`HAVING` |
-| ดึงทุก row มาสรุปในโค้ด application | เขียนโค้ดง่าย ปรับ logic ได้อิสระ | โอนข้อมูลเปลืองแบนด์วิดท์ ไม่ scale เมื่อ table โต |
+| aggregate ด้วย `GROUP BY` ใน PostgreSQL | รันใกล้ข้อมูล ใช้ parallel worker ได้ ส่ง 5 row แทน 500 000 (plan ข้างบน) | ต้องเขียน SQL ให้ถูก รวมถึงกฎของ `GROUP BY`/`HAVING` |
+| ดึงทุก row มาสรุปในโค้ดแอป | เขียนง่าย เปลี่ยนตรรกะได้อิสระ | เปลืองแบนด์วิดท์ในการโอนข้อมูล และไม่ scale เมื่อ table โต |
+| `FILTER` หลายตัวใน query เดียว | scan รอบเดียวได้หลายยอดรวมแบบมีเงื่อนไข | รายการ `SELECT` กว้างและอ่านยากขึ้น |
+| `ROLLUP` / `GROUPING SETS` | ยอดย่อยและยอดรวมในรอบเดียว | `NULL` ในผลลัพธ์แปลได้สองอย่าง ใช้ `grouping()` แยก |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **เลือก column ที่ไม่ใช่ aggregate และไม่อยู่ใน `GROUP BY`** — PostgreSQL เข้มงวดกว่าฐานข้อมูลบางตัว จะปฏิเสธและโยน error ทันที ไม่เดาค่าให้เหมือนบางระบบ
-- **`GROUP BY` บน expression ที่ไม่มี index บน table ขนาดใหญ่** — ทำให้ PostgreSQL ต้อง scan ทั้ง table ทุกครั้ง ถ้า query แบบนี้รันบ่อย ควรพิจารณาสร้าง expression index
-- **สับสนระหว่าง `WHERE` กับ `HAVING`** — `WHERE` กรอง row ก่อนจัดกลุ่ม ส่วน `HAVING` กรองกลุ่มหลัง aggregate เอา aggregate function ใส่ใน `WHERE` ไม่ได้เด็ดขาด
-
-> 💡 ตัวอย่างจากของจริง
->
-> **E-commerce dashboard** — รายงานยอดขายต่อวันหรือต่อสินค้าใช้ `GROUP BY` สรุปยอดตรงใน PostgreSQL แทนที่จะดึง row ระดับ transaction ทุก row มาบวกเองใน backend
->
-> **SaaS usage reporting** — รายงาน usage ต่อ tenant (เช่นจำนวน API call ต่อเดือน) คำนวณด้วย `GROUP BY tenant_id` ในฐานข้อมูลโดยตรง ทำให้ scale ได้แม้ tenant และ row จะเพิ่มขึ้นเรื่อย ๆ
+- **"PostgreSQL บังคับให้ลิสต์ทุก column ที่ select ใน GROUP BY"** ไม่จริงเมื่อ group ด้วย primary key: `GROUP BY a.id` กับ `SELECT a.name` ใช้ได้
+- **"count(*) กับ count(col) เหมือนกันหลัง LEFT JOIN"** `count(*)` นับ row ที่เติม `NULL` (Sela Vance: 1) ส่วน `count(b.id)` ไม่นับ (0)
+- **"sum ของเซตว่างคือ 0"** มันคือ `NULL` มีแต่ `count` ที่ให้ 0
+- **"HAVING ใช้กับ aggregate เท่านั้น"** ใส่เงื่อนไขใดก็ได้ของกลุ่ม เงื่อนไขที่ไม่ใช่ aggregate ถูก planner ผลักลงไปที่ scan แต่ `WHERE` คือที่ที่ตรงไปตรงมา
+- **"การ aggregate ทำโดยดึง row มาก่อน"** aggregate รันในฐานข้อมูล แบบขนานเมื่อเป็นไปได้ มีเพียง row ของกลุ่มที่เดินทางไปถึง client
 
 export const quizAggregates = [
   {
-    q: 'ความต่างระหว่าง count(*) กับ count(some_column) คืออะไร?',
+    q: 'count(*) กับ count(some_column) ต่างกันอย่างไร?',
     options: [
       'เหมือนกันทุกประการ',
-      'count(*) นับทุก row ส่วน count(some_column) นับเฉพาะ row ที่ column นั้นไม่เป็น NULL',
-      'count(*) เร็วกว่าแต่แม่นยำน้อยกว่า',
-      'count(some_column) นับค่าที่ไม่ซ้ำกันโดยอัตโนมัติ',
+      'count(*) นับทุก row; count(some_column) นับเฉพาะ row ที่ column นั้นไม่เป็น NULL',
+      'count(*) เร็วกว่าแต่แม่นน้อยกว่า',
+      'count(some_column) นับค่าไม่ซ้ำโดยอัตโนมัติ',
     ],
     answer: 1,
+    explain: 'หลัง LEFT JOIN Sela Vance ได้ row_count 1 แต่ book_count 0 เพราะ b.id เป็น NULL ใน row ของเธอ',
   },
   {
-    q: 'clause ใดกรองกลุ่มโดยอิงจากผลลัพธ์ของ aggregate?',
+    q: 'clause ไหนกรองกลุ่มตามผลของ aggregate?',
     options: ['WHERE', 'HAVING', 'GROUP BY', 'ORDER BY'],
     answer: 1,
+    explain: 'HAVING ทำงานหลังจัดกลุ่ม การใส่ sum(copies) ใน WHERE ล้มด้วย "aggregate functions are not allowed in WHERE" (42803)',
   },
   {
-    q: 'column ที่ไม่ผ่าน aggregate ปรากฏใน SELECT ของคุณแต่ไม่อยู่ใน GROUP BY จะเกิดอะไรขึ้น?',
+    q: 'column ที่ไม่ใช่ aggregate อยู่ใน SELECT แต่ไม่อยู่ใน GROUP BY และไม่ถูกกำหนดโดย primary key ที่ group จะเกิดอะไรขึ้น?',
     options: [
-      'PostgreSQL เดาค่าให้',
-      'PostgreSQL โยน error ออกมา',
-      'column นั้นถูกทิ้งไปอย่างเงียบ ๆ',
-      'ถูกนับเหมือนเป็น count(*)',
+      'PostgreSQL เดาค่า',
+      'PostgreSQL ส่ง error (42803)',
+      'column ถูกทิ้งเงียบ ๆ',
+      'ถูกมองเป็น count(*)',
     ],
     answer: 1,
+    explain: 'error คือ `column "b.title" must appear in the GROUP BY clause or be used in an aggregate function` การ group ด้วย primary key (GROUP BY a.id) ทำให้ a.name ใช้ได้',
+  },
+  {
+    q: '`SELECT sum(copies) FROM sales WHERE region = \'North\'` คืนอะไรเมื่อไม่มี row ของ North?',
+    options: ['0', 'NULL', 'error', 'ไม่มี row เลย'],
+    answer: 1,
+    explain: 'aggregate ที่ไม่มี GROUP BY คืนหนึ่ง row เสมอ sum ของศูนย์ row คือ NULL (count จะเป็น 0) ใช้ coalesce(sum(copies), 0) เพื่อให้ได้ตัวเลข',
+  },
+  {
+    q: 'ในบทเรียน `HAVING region = \'East\'` บน table 500 000 row กรอง row ที่ไหน?',
+    options: [
+      'หลัง aggregate เป็น Filter บน node finalize',
+      'ใน Parallel Seq Scan ก่อน aggregate',
+      'ที่ client',
+      'วาง plan ไม่ได้',
+    ],
+    answer: 1,
+    explain: 'เงื่อนไข HAVING ที่ไม่มี aggregate ถูกผลักลงไปใน scan (`Filter: (region = \'East\')`) มีเพียง `HAVING sum(copies) > 1000` ที่อยู่เหนือ aggregate',
   },
 ];
 
