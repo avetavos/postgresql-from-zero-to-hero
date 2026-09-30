@@ -1,22 +1,25 @@
 ---
-title: ชนิดข้อมูล
-description: ทัวร์ชนิดข้อมูลหลักของ PostgreSQL — ตัวเลข, text, boolean, วันที่และเวลา, UUID, JSON, array และ enum — และเรียนรู้ว่าควรเลือกแบบใดสำหรับ column ทั่วไป
+title: Data type
+description: ทัวร์ data type หลักของ PostgreSQL — ตัวเลข, ข้อความ, boolean, วันที่และเวลา, UUID, jsonb, array และ enum — และวิธีเลือกให้ถูก
 sidebar:
   order: 3
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-data type คือการตัดสินใจที่สำคัญที่สุดเพียงอย่างเดียวที่คุณทำเกี่ยวกับ column ชนิดข้อมูลควบคุมว่าค่าแบบไหนเข้าได้ ใช้พื้นที่เท่าไร เรียงลำดับและเปรียบเทียบกันอย่างไร และ operator ตัวไหนใช้ได้บ้าง PostgreSQL มาพร้อมชุดชนิดข้อมูลในตัวที่หลากหลาย และยังให้คุณนิยามชนิดของตัวเองได้ด้วย บทเรียนนี้จะพาทัวร์ชนิดที่คุณจะหยิบมาใช้บ่อยที่สุด พร้อมตัวอย่างสั้น ๆ ที่คุณรันได้
+data type คือการตัดสินใจที่สำคัญที่สุดข้อเดียวที่คุณทำกับ column มันควบคุมว่าค่าอะไรใส่ได้ ใช้พื้นที่เท่าไร เรียงและเปรียบเทียบอย่างไร และ operator ตัวไหนใช้ได้ PostgreSQL มี type ในตัวหลากหลายและยังให้คุณนิยามเองได้ บทเรียนนี้ทัวร์ type ที่คุณจะหยิบใช้บ่อยที่สุด และพิสูจน์ข้ออ้างที่มักถูกพูดซ้ำโดยไม่มีหลักฐาน
+
+> ทุก output มาจากการรัน fence จริงบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) ในฐานข้อมูลเปล่าหนึ่งตัว จากบนลงล่าง ตัวเลขเวลามาจาก Mac เครื่องนี้และจะต่างกันในเครื่องของคุณ
 
 ## ตัวเลข
 
-สำหรับจำนวนเต็ม `integer` (สี่ไบต์ ได้ถึงราว ๆ สองพันล้าน) ครอบคลุมตัวนับและ id ส่วนใหญ่ ขณะที่ `bigint` (แปดไบต์) จัดการกับช่วงที่ใหญ่กว่าได้ สำหรับค่าที่ความแม่นยำสำคัญ — เงินเป็นอันดับแรก — ให้ใช้ `numeric` ซึ่งเก็บทศนิยมได้อย่างแม่นยำ ชนิดทศนิยมแบบ floating-point อย่าง `real` นั้นเร็วแต่เป็นค่าโดยประมาณ ดังนั้นเก็บไว้ใช้กับข้อมูลทางวิทยาศาสตร์หรือการวัดที่ยอมรับการปัดเศษเล็กน้อยได้
+สำหรับจำนวนเต็ม `integer` (สี่ไบต์ ถึงประมาณสองพันล้าน) ครอบคลุม counter และ id ส่วนใหญ่ ขณะที่ `bigint` (แปดไบต์) รองรับช่วงที่ใหญ่กว่า สำหรับค่าที่ต้องการความแม่นยำ — โดยเฉพาะเงิน — ใช้ `numeric` ซึ่งเก็บทศนิยมอย่างแม่นยำ type floating-point `real` และ `double precision` เร็วแต่เป็นค่าประมาณ จึงเก็บไว้ใช้กับข้อมูลวิทยาศาสตร์หรือการวัดที่ยอมรับการปัดเศษเล็กน้อยได้
 
 ```sql
+-- sql/numbers.sql
 CREATE TABLE measurements (
   count_int  integer,
   count_big  bigint,
@@ -29,122 +32,376 @@ SELECT * FROM measurements;
 ```
 
 ```text
- count_int | count_big  | price | reading
+CREATE TABLE
+INSERT 0 1
+ count_int | count_big  | price | reading 
 -----------+------------+-------+---------
         42 | 9000000000 | 19.99 |    3.14
 (1 row)
 ```
 
-## Text
-
-PostgreSQL มีชนิด string ที่ใช้ในชีวิตประจำวันสองแบบ `text` เก็บ string ความยาวเท่าใดก็ได้ และ `varchar(n)` เก็บ string ได้ถึง `n` ตัวอักษร ไม่มีบทลงโทษด้านประสิทธิภาพสำหรับ `text` ขีดจำกัดความยาวบน `varchar` คือความแตกต่างที่แท้จริงเพียงอย่างเดียว และคุณสามารถบังคับความยาวด้วย constraint แบบ `CHECK` แทนได้เสมอ
+"ค่าประมาณ" ไม่ใช่นามธรรม นี่คือตัวอย่างคลาสสิก รันบนเซิร์ฟเวอร์: binary floating point แทน 0.1 และ 0.2 ได้ไม่พอดี ผลรวมจึงไม่ใช่ 0.3 ขณะที่ `numeric` แม่นยำ:
 
 ```sql
+-- sql/float-vs-numeric.sql
+SELECT 0.1::float8 + 0.2::float8            AS float_sum,
+       0.1::float8 + 0.2::float8 = 0.3::float8 AS float_equals,
+       0.1::numeric + 0.2::numeric          AS numeric_sum,
+       0.1::numeric + 0.2::numeric = 0.3::numeric AS numeric_equals;
+```
+
+```text
+      float_sum      | float_equals | numeric_sum | numeric_equals 
+---------------------+--------------+-------------+----------------
+ 0.30000000000000004 | f            |         0.3 | t
+(1 row)
+```
+
+จำนวนเต็มไม่ wrap around แต่ปฏิเสธ ขีดจำกัดของ `integer` คือ 2,147,483,647 และ column `numeric(10, 2)` เก็บค่าที่น้อยกว่า 10^8:
+
+```sql
+-- @expect-error 22003
+SELECT 2147483647::integer + 1;
+```
+
+```text
+ERROR:  integer out of range
+```
+
+```sql
+-- @expect-error 22003
+INSERT INTO measurements (price) VALUES (100000000.00);
+```
+
+```text
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 10, scale 2 must round to an absolute value less than 10^8.
+```
+
+`numeric(p, s)` ปัดตาม scale แทนที่จะล้มเหลวเมื่อขนาดค่าไม่เกิน และ `bigint` ให้ช่วง 64 บิต (ประมาณ 9.2 x 10^18):
+
+```sql
+-- sql/numeric-rounding.sql
+SELECT 19.999::numeric(10, 2) AS rounded, 9000000000::bigint * 1000000000 AS still_fits_bigint;
+```
+
+```text
+ rounded |  still_fits_bigint  
+---------+---------------------
+   20.00 | 9000000000000000000
+(1 row)
+```
+
+### type `money`
+
+PostgreSQL ยังมี type `money` เป็น fixed-point ที่ scale และสัญลักษณ์สกุลเงินมาจากการตั้งค่า locale `lc_monetary` ค่าเดียวกันจึงพิมพ์ต่างกันภายใต้การตั้งค่าอื่น และคู่มือเตือนว่าข้อมูล money อาจโหลดเข้าฐานข้อมูลที่ `lc_monetary` ต่างกันไม่ได้ ([docs](https://www.postgresql.org/docs/18/datatype-money.html)) มันยังเก็บเฉพาะหลักทศนิยมของ locale (สองหลักที่นี่) ความแม่นยำจึงหายไปตั้งแต่ตอนใส่:
+
+```sql
+-- sql/money.sql
+SHOW lc_monetary;
+SELECT 1234.567::numeric::money AS rounded_to_two_places, 1234.567::numeric AS numeric_keeps_it;
+```
+
+```text
+ lc_monetary 
+-------------
+ en_US.utf8
+(1 row)
+
+ rounded_to_two_places | numeric_keeps_it 
+-----------------------+------------------
+             $1,234.57 |         1234.567
+(1 row)
+```
+
+ใช้ `numeric(12, 2)` (หรือจำนวนเต็มของเซ็นต์) สำหรับจำนวนเงินแทน
+
+### Generated column
+
+generated column คำนวณค่าจาก column อื่นใน row เดียวกัน ใน PostgreSQL 18 แบบเริ่มต้นคือ **virtual** คำนวณตอนอ่าน เติม `STORED` เพื่อคำนวณตอนเขียนและเก็บลงดิสก์ ([release notes](https://www.postgresql.org/docs/18/release-18.html), [docs](https://www.postgresql.org/docs/18/ddl-generated-columns.html)) ทั้งสองแบบดูเหมือนกันสำหรับ `SELECT` `\d` แยกความต่างด้วยคำ `stored` ท้ายบรรทัดเท่านั้น:
+
+```sql
+-- sql/generated-columns.sql
+CREATE TABLE line_items (
+  qty          int NOT NULL,
+  unit_price   numeric(10, 2) NOT NULL,
+  total        numeric(12, 2) GENERATED ALWAYS AS (qty * unit_price),
+  total_stored numeric(12, 2) GENERATED ALWAYS AS (qty * unit_price) STORED
+);
+INSERT INTO line_items (qty, unit_price) VALUES (3, 19.99);
+SELECT * FROM line_items;
+\d line_items
+```
+
+```text
+CREATE TABLE
+INSERT 0 1
+ qty | unit_price | total | total_stored 
+-----+------------+-------+--------------
+   3 |      19.99 | 59.97 |        59.97
+(1 row)
+
+                                           Table "public.line_items"
+    Column    |     Type      | Collation | Nullable |                         Default                          
+--------------+---------------+-----------+----------+----------------------------------------------------------
+ qty          | integer       |           | not null | 
+ unit_price   | numeric(10,2) |           | not null | 
+ total        | numeric(12,2) |           |          | generated always as ((qty::numeric * unit_price))
+ total_stored | numeric(12,2) |           |          | generated always as ((qty::numeric * unit_price)) stored
+```
+
+ความต่างเชิงปฏิบัติคือ virtual column ไม่กินพื้นที่และเวลาเขียน แต่สร้าง index ไม่ได้:
+
+```sql
+-- @expect-error 0A000
+CREATE INDEX line_items_total_idx ON line_items (total);
+```
+
+```text
+ERROR:  indexes on virtual generated columns are not supported
+```
+
+## ข้อความ
+
+PostgreSQL มี type สตริงในชีวิตประจำวันสองตัว `text` เก็บสตริงความยาวเท่าใดก็ได้ และ `varchar(n)` เก็บสตริงไม่เกิน `n` ตัวอักษร คู่มือระบุว่าไม่มีความต่างด้านประสิทธิภาพระหว่าง type ตัวอักษร นอกจากพื้นที่เพิ่มของ `char(n)` ที่เติมช่องว่าง ([docs](https://www.postgresql.org/docs/18/datatype-character.html)) สตริง 5 ตัวอักษรเดียวกันใช้ 9 ไบต์เท่ากันในทั้งสอง type ที่นี่ ขณะที่ `char(5)` เก็บ `hi` ใน 5 ไบต์ ขีดจำกัดความยาวคือกฎ และมีการบังคับใช้:
+
+```sql
+-- sql/text-types.sql
 CREATE TABLE notes (
-  title  varchar(120),
+  title  varchar(12),
   body   text
 );
 
 INSERT INTO notes VALUES ('Release plan', 'Ship the new dashboard on Friday.');
 SELECT title, body FROM notes;
+SELECT pg_column_size('hello'::text)        AS text_bytes,
+       pg_column_size('hello'::varchar(50)) AS varchar_bytes,
+       octet_length('hi'::char(5))          AS char5_bytes;
 ```
 
 ```text
-    title     |               body
+CREATE TABLE
+INSERT 0 1
+    title     |               body                
 --------------+-----------------------------------
  Release plan | Ship the new dashboard on Friday.
 (1 row)
+
+ text_bytes | varchar_bytes | char5_bytes 
+------------+---------------+-------------
+          9 |             9 |           5
+(1 row)
 ```
 
-## Boolean
-
-column แบบ `boolean` เก็บ true, false หรือ null PostgreSQL ยอมรับการเขียนได้หลายแบบตอน input — `true`, `'t'`, `'yes'`, `'1'` และค่า false ที่เทียบเท่ากัน (ตัวเลข `1` เปล่า ๆ จะถูกปฏิเสธใน `INSERT`) — แต่จะแสดงค่าเป็น `t` หรือ `f` เสมอ
-
 ```sql
-SELECT true AS yes, false AS no, null::boolean AS unknown;
+-- @expect-error 22001
+INSERT INTO notes (title) VALUES ('Release plan v2');
 ```
 
 ```text
- yes | no | unknown
+ERROR:  value too long for type character varying(12)
+```
+
+ใช้ `varchar(n)` เมื่อขีดจำกัดเป็นกฎทางธุรกิจจริงเท่านั้น ไม่เช่นนั้นใช้ `text` (คุณเพิ่ม `CHECK (length(...) <= n)` ทีหลังได้เสมอ ซึ่งเปลี่ยนง่ายกว่าเปลี่ยน type ของ column)
+
+## Boolean
+
+column `boolean` เก็บ true, false หรือ null PostgreSQL รับหลายรูปแบบตอน input — `true`, `'t'`, `'yes'`, `'1'`, `'off'` — แต่แสดงเป็น `t` หรือ `f` เสมอ อย่างไรก็ตามมันเข้มงวดเรื่อง *type*: จำนวนเต็ม `1` เปล่า ๆ ถูกปฏิเสธใน `INSERT` แม้การ cast แบบชัดเจนจะใช้ได้
+
+```sql
+-- sql/booleans.sql
+SELECT true AS yes, false AS no, null::boolean AS unknown;
+SELECT 't'::boolean AS t, 'yes'::boolean AS yes, '1'::boolean AS one, 'off'::boolean AS off, 1::boolean AS int_cast;
+CREATE TABLE flags (f boolean);
+```
+
+```text
+ yes | no | unknown 
 -----+----+---------
- t   | f  |
+ t   | f  | 
 (1 row)
+
+ t | yes | one | off | int_cast 
+---+-----+-----+-----+----------
+ t | t   | t   | f   | t
+(1 row)
+
+CREATE TABLE
+```
+
+```sql
+-- @expect-error 42804
+INSERT INTO flags VALUES (1);
+```
+
+```text
+ERROR:  column "f" is of type boolean but expression is of type integer
+LINE 1: INSERT INTO flags VALUES (1);
+                                  ^
+HINT:  You will need to rewrite or cast the expression.
 ```
 
 ## วันที่และเวลา
 
-สำหรับวันตามปฏิทินที่ไม่มีเวลา ให้ใช้ `date` สำหรับช่วงเวลาขณะหนึ่ง ให้ใช้ `timestamptz` — ย่อมาจาก timestamp with time zone — ซึ่งเก็บช่วงเวลานั้นเป็น UTC และแปลงไปและกลับจาก time zone ของ session ของคุณโดยอัตโนมัติ ชนิด `timestamp` ธรรมดาที่ไม่มี zone นั้นดูคล้ายกันแต่สูญเสียบริบทนั้นไป และเป็นแหล่งของบั๊กที่พบได้บ่อย
+สำหรับวันตามปฏิทินโดยไม่มีเวลา ใช้ `date` สำหรับช่วงเวลาหนึ่ง ใช้ `timestamptz` — ย่อจาก timestamp with time zone มันไม่ได้เก็บ zone: มันเก็บ instant (เป็น UTC) และแปลงเข้าออกตามการตั้งค่า `TimeZone` ของ session type `timestamp` ธรรมดาเก็บข้อความ wall-clock ตามที่คุณให้ ซึ่งดูคล้ายแต่สูญเสียบริบทนั้นและเป็นแหล่ง bug ทั่วไป
 
 ```sql
-SELECT
-  current_date                   AS today,
-  now()                          AS moment,
-  date '2026-01-31'              AS a_day;
+-- sql/dates.sql
+SELECT current_date AS today, now() AS moment, date '2026-01-31' AS a_day;
 ```
 
 ```text
-   today    |             moment              |   a_day
+   today    |            moment             |   a_day    
 ------------+-------------------------------+------------
- 2026-06-25 | 2026-06-25 09:14:22.51+00      | 2026-01-31
+ 2026-09-30 | 2026-09-30 06:03:17.651923+00 | 2026-01-31
 (1 row)
+```
+
+row เดียวกัน สอง column อ่านจาก session ที่ตั้งเวลา Bangkok column `timestamptz` แสดง instant เดียวกันเป็น `19:00+07` ส่วน `timestamp` ธรรมดายังคงเป็น `12:00` และเมินค่า offset ที่คุณเขียนใส่ลงไปแบบเงียบ ๆ:
+
+```sql
+-- sql/timestamptz-vs-timestamp.sql
+CREATE TABLE stamps (with_tz timestamptz, without_tz timestamp);
+SET TIME ZONE 'UTC';
+INSERT INTO stamps VALUES ('2026-01-31 12:00:00+00', '2026-01-31 12:00:00');
+SET TIME ZONE 'Asia/Bangkok';
+SELECT with_tz, without_tz FROM stamps;
+SELECT '2026-01-31 12:00:00+07'::timestamp AS offset_silently_dropped;
+RESET TIME ZONE;
+```
+
+```text
+CREATE TABLE
+SET
+INSERT 0 1
+SET
+        with_tz         |     without_tz      
+------------------------+---------------------
+ 2026-01-31 19:00:00+07 | 2026-01-31 12:00:00
+(1 row)
+
+ offset_silently_dropped 
+-------------------------
+ 2026-01-31 12:00:00
+(1 row)
+
+RESET
 ```
 
 ## UUID
 
-`uuid` เก็บตัวระบุที่ไม่ซ้ำกันในระดับสากลขนาด 128 บิต UUID เป็น primary key ที่ดีเมื่อ client ต้องเป็นคนสร้าง id เอง หรือเมื่อ id ต้องคาดเดาไม่ได้ เพราะไม่เปิดเผยจำนวน row อย่างที่ sequence ทำ
+`uuid` เก็บ identifier ที่ไม่ซ้ำทั่วโลกขนาด 128 บิต UUID เหมาะเป็น primary key เมื่อ id ต้องถูกสร้างโดย client หรือต้องเดาไม่ได้ เพราะไม่เปิดเผยจำนวน row แบบ sequence
+
+PostgreSQL 18 เพิ่ม `uuidv7()` และ alias `uuidv4()` สำหรับ `gen_random_uuid()` ([release notes](https://www.postgresql.org/docs/18/release-18.html), [functions](https://www.postgresql.org/docs/18/functions-uuid.html)) เวอร์ชัน 7 ใส่ timestamp ระดับมิลลิวินาทีไว้ในบิตสูง ค่าจึงเรียงตามเวลาสร้าง:
 
 ```sql
-SELECT gen_random_uuid() AS id;
+-- sql/uuid.sql
+SELECT gen_random_uuid() AS v4_a_random, uuidv4() AS v4_same_function, uuidv7() AS v7_time_ordered;
+SELECT uuid_extract_version(uuidv7()) AS v7_version,
+       uuid_extract_timestamp(uuidv7()) IS NOT NULL AS has_timestamp;
 ```
 
 ```text
-                  id
---------------------------------------
- 6f3a1b2c-9d4e-4f70-8a1b-2c3d4e5f6a7b
+             v4_a_random              |           v4_same_function           |           v7_time_ordered            
+--------------------------------------+--------------------------------------+--------------------------------------
+ 76528519-cbe7-480b-9606-687ec4f3277f | 5f5476e0-b3c4-4088-b9ac-f5f8cac259b4 | 01a0f0e9-03df-7fa4-af78-f7fe110171b6
+(1 row)
+
+ v7_version | has_timestamp 
+------------+---------------
+          7 | t
 (1 row)
 ```
 
-PostgreSQL 18 เพิ่ม `uuidv7()` ที่ใส่ timestamp ไว้ในบิตสูง ค่าที่สร้างออกมาจึงเรียงตามลำดับเวลาที่สร้างโดยประมาณ ลำดับนี้สำคัญมากกับ primary key เพราะ v4 ที่สุ่มล้วนจะกระจาย insert ไปทั่ว B-tree ขณะที่ v7 จะลงใกล้ขอบขวาเสมอ index จึงกระชับและเป็นมิตรกับ cache ใช้ `uuidv7()` กับตารางใหม่ และเก็บ `gen_random_uuid()` ซึ่งตอนนี้เขียนเป็น `uuidv4()` ได้ด้วย ไว้ใช้เมื่อ id ต้องไม่เปิดเผยเวลาที่สร้าง row
-
 ```sql
-SELECT uuidv7() AS id;
+-- sql/uuid-ordering.sql
+WITH s AS (SELECT n, uuidv7() AS u FROM generate_series(1, 1000) n)
+SELECT array_agg(u ORDER BY n) = array_agg(u ORDER BY u) AS v7_sorted_in_creation_order FROM s;
 ```
 
 ```text
-                  id
---------------------------------------
- 0199c4f2-8d3a-7b21-9e4c-5f6a7b8c9d0e
+ v7_sorted_in_creation_order 
+-----------------------------
+ t
 (1 row)
 ```
+
+ข้ออ้างที่พบบ่อยคือการเรียงลำดับนี้ทำให้ B-tree ของ primary key กะทัดรัดและเป็นมิตรกับ cache เพราะการ insert ลงที่ขอบขวา ขณะที่ v4 แบบสุ่มกระจายทั่วต้นไม้ มันปรากฏจริงไหม? หนึ่งล้าน row ต่อ table วัดบน Mac เครื่องนี้ (รันครั้งเดียว เวลา insert แปรผันระหว่างรอบ ขนาดและ correlation คงที่):
+
+```sql
+-- sql/uuid-index-experiment.sql
+CREATE TABLE ids_v4 (id uuid PRIMARY KEY DEFAULT uuidv4(), n int);
+CREATE TABLE ids_v7 (id uuid PRIMARY KEY DEFAULT uuidv7(), n int);
+\timing on
+INSERT INTO ids_v4 (n) SELECT g FROM generate_series(1, 1000000) g;
+INSERT INTO ids_v7 (n) SELECT g FROM generate_series(1, 1000000) g;
+\timing off
+ANALYZE ids_v4, ids_v7;
+SELECT s.tablename AS kind,
+       pg_size_pretty(pg_relation_size(s.tablename || '_pkey')) AS pkey_size,
+       pg_size_pretty(pg_relation_size(s.tablename::regclass)) AS heap_size,
+       round(s.correlation::numeric, 3) AS key_vs_heap_correlation
+FROM pg_stats s
+WHERE s.tablename IN ('ids_v4', 'ids_v7') AND s.attname = 'id'
+ORDER BY 1;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+Timing is on.
+INSERT 0 1000000
+Time: 2949.380 ms (00:02.949)
+INSERT 0 1000000
+Time: 1789.588 ms (00:01.790)
+Timing is off.
+ANALYZE
+  kind  | pkey_size | heap_size | key_vs_heap_correlation 
+--------+-----------+-----------+-------------------------
+ ids_v4 | 37 MB     | 50 MB     |                   0.007
+ ids_v7 | 30 MB     | 50 MB     |                   1.000
+(2 rows)
+```
+
+index ของ primary key แบบ v4 ใหญ่กว่า (37 MB เทียบกับ 30 MB ในรอบที่แสดง) และการโหลดช้ากว่า เพราะ key สุ่มลงทั่วต้นไม้และทำให้เกิด page split `key_vs_heap_correlation` คือมุมมองด้านสถิติของเรื่องเดียวกัน: key แบบ v7 เรียงตามลำดับทางกายภาพ (1.0) ส่วน key แบบ v4 ไม่เกี่ยวข้องกับมัน (ประมาณ 0) ทั้งสอง table มี heap 50 MB เท่ากัน ความต่างจึงอยู่ที่ index ทั้งหมด คุณจะรู้สึกหรือไม่ขึ้นกับว่า index ใส่ในหน่วยความจำได้หรือไม่ หยิบ `uuidv7()` สำหรับ table ใหม่เมื่อ id เป็น primary key เก็บ `gen_random_uuid()` ไว้เมื่อ id ต้องไม่เปิดเผยว่า row ถูกสร้างเมื่อใด เพราะ timestamp ของ v7 อ่านได้ (`uuid_extract_timestamp`)
 
 ## JSON ด้วย jsonb
 
-ชนิด `jsonb` เก็บ JSON ในรูปแบบ binary ที่ถูกแยกองค์ประกอบไว้แล้ว ซึ่ง query และทำ index ได้เร็ว เลือกใช้แทนชนิด `json` ธรรมดาที่เก็บข้อความดิบและ re-parse ทุกครั้งที่เข้าถึง คุณสามารถดึงค่าออกมาได้ด้วย arrow operator
+type `jsonb` เก็บ JSON ในรูปแบบ binary แยกส่วนที่ query และทำ index ได้เร็ว ควรใช้แทน type `json` ธรรมดาที่เก็บข้อความดิบและ parse ใหม่ทุกครั้งที่เข้าถึง ความต่างเห็นได้ตอน input: `json` เก็บข้อความตามที่เขียน (key ซ้ำและอื่น ๆ) ส่วน `jsonb` ทำให้เป็นรูปแบบมาตรฐาน คงไว้เฉพาะ key ซ้ำตัวสุดท้ายและเรียง key
 
 ```sql
+-- sql/jsonb.sql
 CREATE TABLE events (
   id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   payload jsonb
 );
 
-INSERT INTO events (payload)
-VALUES ('{"kind": "signup", "plan": "pro"}');
+INSERT INTO events (payload) VALUES ('{"kind": "signup", "plan": "pro"}');
 
 SELECT payload ->> 'plan' AS plan FROM events;
+SELECT '{"b":1,"a":2,"a":3}'::json AS json_keeps_text, '{"b":1,"a":2,"a":3}'::jsonb AS jsonb_normalises;
 ```
 
 ```text
- plan
+CREATE TABLE
+INSERT 0 1
+ plan 
 ------
  pro
+(1 row)
+
+   json_keeps_text   | jsonb_normalises 
+---------------------+------------------
+ {"b":1,"a":2,"a":3} | {"a": 3, "b": 1}
 (1 row)
 ```
 
 ## Array
 
-ชนิดใดก็ตามสามารถกลายเป็น array ได้ด้วยการเติมวงเล็บเหลี่ยม ดังนั้น `int[]` จึงเป็น column ของ array ของจำนวนเต็ม array เหมาะกับ list ขนาดเล็กที่มีลำดับและเป็นของ row เดียว เช่น tag ค่าคงที่ของ array เขียนด้วยปีกกาภายใน string ที่อยู่ในเครื่องหมายคำพูด
+type ใดก็เป็น array ได้โดยเติมวงเล็บเหลี่ยม `text[]` จึงเป็น column ของ array ข้อความ array เหมาะกับรายการเล็ก ๆ ที่เรียงลำดับซึ่งเป็นของ row เดียว เช่น tag array literal เขียนด้วยวงเล็บปีกกาในสตริงที่มี quote และ subscript เริ่มที่ 1
 
 ```sql
+-- sql/arrays.sql
 CREATE TABLE articles (
   id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   tags text[]
@@ -155,17 +412,20 @@ SELECT tags, tags[1] AS first_tag FROM articles;
 ```
 
 ```text
-          tags          | first_tag
-------------------------+-----------
- {sql,postgres,intro}   | sql
+CREATE TABLE
+INSERT 0 1
+         tags         | first_tag 
+----------------------+-----------
+ {sql,postgres,intro} | sql
 (1 row)
 ```
 
-## ชนิดแบบ enumerated
+## Enumerated type
 
-เมื่อ column อาจเก็บได้เฉพาะชุดป้ายชื่อที่ตายตัว `enum` จะทำให้ค่าที่อนุญาตเป็นส่วนหนึ่งของชนิด คุณนิยามครั้งเดียวด้วย `CREATE TYPE` แล้วใช้เหมือนชนิดในตัวทั่วไป ค่าต่าง ๆ จะเรียงลำดับตามที่คุณไล่รายการไว้
+เมื่อ column เก็บได้เฉพาะชุด label ที่คงที่ `enum` ทำให้ค่าที่อนุญาตเป็นส่วนของ type คุณนิยามครั้งเดียวด้วย `CREATE TYPE` แล้วใช้เหมือน type ในตัว ค่าเรียงตามลำดับที่คุณลิสต์ ไม่ใช่ตามตัวอักษร (`pending, paid, cancelled` ด้านล่างคือลำดับที่ประกาศ):
 
 ```sql
+-- sql/enum.sql
 CREATE TYPE order_status AS ENUM ('pending', 'paid', 'shipped', 'cancelled');
 
 CREATE TABLE orders (
@@ -173,72 +433,260 @@ CREATE TABLE orders (
   status order_status NOT NULL DEFAULT 'pending'
 );
 
-INSERT INTO orders (status) VALUES ('paid');
-SELECT id, status FROM orders;
+INSERT INTO orders (status) VALUES ('paid'), ('pending'), ('cancelled');
+SELECT id, status FROM orders ORDER BY status;
 ```
 
 ```text
- id | status
-----+--------
+CREATE TYPE
+CREATE TABLE
+INSERT 0 3
+ id |  status   
+----+-----------
+  2 | pending
   1 | paid
+  3 | cancelled
+(3 rows)
+```
+
+enum ยืดหยุ่นน้อยกว่าที่เห็น คุณเพิ่มค่าในตำแหน่งที่เลือกและเปลี่ยนชื่อได้ แต่เรียงค่าที่มีอยู่ใหม่ไม่ได้และ drop ค่าไม่ได้:
+
+```sql
+-- sql/enum-alter.sql
+ALTER TYPE order_status ADD VALUE 'refunded' AFTER 'shipped';
+ALTER TYPE order_status RENAME VALUE 'cancelled' TO 'canceled';
+SELECT unnest(enum_range(NULL::order_status)) AS labels_in_order;
+```
+
+```text
+ALTER TYPE
+ALTER TYPE
+ labels_in_order 
+-----------------
+ pending
+ paid
+ shipped
+ refunded
+ canceled
+(5 rows)
+```
+
+```sql
+-- @expect-error 0A000
+ALTER TYPE order_status DROP VALUE 'pending';
+```
+
+```text
+ERROR:  dropping an enum value is not implemented
+LINE 1: ALTER TYPE order_status DROP VALUE 'pending';
+                                ^
+```
+
+ค่าที่เพิ่งเพิ่มก็ใช้ใน transaction ที่เพิ่มมันไม่ได้:
+
+```sql
+-- @expect-error 55P04
+BEGIN;
+ALTER TYPE order_status ADD VALUE 'archived';
+SELECT 'archived'::order_status;
+```
+
+```text
+BEGIN
+ALTER TYPE
+ERROR:  unsafe use of new value "archived" of enum type order_status
+LINE 1: SELECT 'archived'::order_status;
+               ^
+HINT:  New enum values must be committed before they can be used.
+```
+
+ถ้าชุดค่าเปลี่ยนบ่อย table lookup เล็ก ๆ ที่มี foreign key ยืดหยุ่นกว่า:
+
+```sql
+-- sql/enum-lookup.sql
+CREATE TABLE order_statuses (code text PRIMARY KEY, sort_order int NOT NULL);
+INSERT INTO order_statuses VALUES ('pending', 1), ('paid', 2), ('shipped', 3);
+```
+
+**ใน pgAdmin:** type ที่สร้างด้วย `CREATE TYPE` ปรากฏใต้ Schemas แล้ว public แล้ว Types ใน browser tree ข้างโหนด Tables คุณตรวจ label ที่อนุญาตของ enum ได้ที่นั่นโดยไม่ต้องเขียน query
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ที่ได้รับคำสั่งว่า "ราคาก็แค่ตัวเลข ขอให้เร็ว" เขียน schema นี้พร้อมคอมเมนต์ที่ดูช่วยเหลือ อ่านในฐานะ reviewer:
+
+<SpotTheBug lang="sql" code={`-- schema.sql   (AI comment: "double precision is fast and precise enough for prices")
+CREATE TABLE invoices (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  amount    double precision NOT NULL,
+  issued_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE payments (
+  invoice_id bigint NOT NULL REFERENCES invoices (id),
+  amount     double precision NOT NULL
+);
+
+-- find fully paid invoices
+SELECT i.id
+FROM invoices i
+JOIN payments p ON p.invoice_id = i.id
+GROUP BY i.id, i.amount
+HAVING sum(p.amount) = i.amount;`}>
+
+มันสร้างและรันได้โดยไม่มี error แม้แต่ครั้งเดียว และไม่เคยหา invoice ที่จ่ายแล้วเจอ invoice 0.30 ที่จ่ายเป็นสองงวด 0.10 กับ 0.20 ไม่ "เท่ากัน" ใน floating point (พิสูจน์ไว้ก่อนหน้าในบทเรียนนี้) การทดสอบ `HAVING sum(p.amount) = i.amount` จึงล้มเหลวเงียบ ๆ:
+
+```sql
+-- sql/invoices-float.sql
+CREATE TABLE invoices (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  amount    double precision NOT NULL,
+  issued_at timestamp NOT NULL DEFAULT now()
+);
+CREATE TABLE payments (
+  invoice_id bigint NOT NULL REFERENCES invoices (id),
+  amount     double precision NOT NULL
+);
+INSERT INTO invoices (amount) VALUES (0.3);
+INSERT INTO payments VALUES (1, 0.1), (1, 0.2);
+SELECT i.id AS fully_paid_invoice
+FROM invoices i
+JOIN payments p ON p.invoice_id = i.id
+GROUP BY i.id, i.amount
+HAVING sum(p.amount) = i.amount;
+SELECT sum(amount) AS paid, sum(amount) = 0.3 AS equals_amount FROM payments;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 1
+INSERT 0 2
+ fully_paid_invoice 
+--------------------
+(0 rows)
+
+        paid         | equals_amount 
+---------------------+---------------
+ 0.30000000000000004 | f
 (1 row)
 ```
 
-**ใน pgAdmin:** ชนิดที่กำหนดเองซึ่งสร้างด้วย `CREATE TYPE` จะปรากฏใต้ Schemas แล้ว public แล้ว Types ในแผนผัง browser ข้าง ๆ โหนด Tables คุณสามารถตรวจดูป้ายชื่อที่อนุญาตของ enum ที่นั่นได้โดยไม่ต้องเขียน query
+query ไม่คืน row เลย และ `sum(amount) = 0.3` เป็น `f` column `timestamp` เป็น bug ที่รอวันอีกตัว (ไม่มี zone พิสูจน์ข้างบน) วิธีแก้คือ `numeric` สำหรับเงินและ `timestamptz` สำหรับเวลา:
+
+```sql
+-- sql/invoices-numeric.sql
+CREATE TABLE invoices_fixed (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  amount    numeric(12, 2) NOT NULL,
+  issued_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE payments_fixed (
+  invoice_id bigint NOT NULL REFERENCES invoices_fixed (id),
+  amount     numeric(12, 2) NOT NULL
+);
+INSERT INTO invoices_fixed (amount) VALUES (0.30);
+INSERT INTO payments_fixed VALUES (1, 0.10), (1, 0.20);
+SELECT i.id AS fully_paid_invoice
+FROM invoices_fixed i
+JOIN payments_fixed p ON p.invoice_id = i.id
+GROUP BY i.id, i.amount
+HAVING sum(p.amount) = i.amount;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 1
+INSERT 0 2
+ fully_paid_invoice 
+--------------------
+                  1
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+type คือเซตของค่าที่อนุญาตพร้อมกฎการเก็บ เปรียบเทียบ และดำเนินการกับค่านั้น ทุกข้ออ้างว่า "type ไหนดีกว่า" แท้จริงเป็นคำถามเรื่องหนึ่งในสามอย่าง: type แทนค่าได้พอดีหรือไม่ (numeric กับ float, timestamptz กับ timestamp) มันจำกัดสิ่งที่อาจมีอยู่หรือไม่ (varchar(n), enum, boolean) และการแทนค่านั้นมีต้นทุนใน index เท่าไร (uuid v4 กับ v7) ข้อที่สามให้วัด อย่าสมมติ
 
 ## เคล็ดลับและข้อควรระวัง
 
-- ใช้ `timestamptz` ไม่ใช่ `timestamp` สำหรับช่วงเวลาขณะหนึ่งใด ๆ การเก็บเป็น UTC และแปลงตาม session ช่วยหลีกเลี่ยงบั๊กเรื่อง time-zone ได้ทั้งหมวดหมู่ หยิบ `timestamp` ธรรมดามาใช้เฉพาะเมื่อค่าหนึ่งไม่มี zone จริง ๆ เท่านั้น เช่น นาฬิกาปลุก local ที่เกิดซ้ำ ๆ
-- ใช้ `text` เป็นค่าเริ่มต้น และใช้ `varchar(n)` เฉพาะเมื่อความยาวสูงสุดที่แท้จริงเป็นส่วนหนึ่งของกฎ ไม่มีความแตกต่างด้านความเร็ว และ constraint แบบ `CHECK` สามารถบังคับขีดจำกัดบน `text` ได้หากคุณต้องการ
-- เก็บเงินใน `numeric` ไม่ใช่ใน `real` หรือ `double precision` floating point แบบ binary ไม่สามารถแทนค่าอย่าง 0.10 ได้อย่างแม่นยำ ซึ่งนำไปสู่ข้อผิดพลาดในการปัดเศษที่สะสมขึ้น
-- เลือก `jsonb` มากกว่า `json` รูปแบบ binary นั้น query ได้เร็วกว่าและทำ index ได้ ชนิด `json` แบบข้อความมีประโยชน์เป็นหลักเมื่อคุณต้องรักษารูปแบบของ input เดิมไว้ทุกประการ
-- `enum` เยี่ยมมากสำหรับชุดป้ายชื่อที่ตายตัวจริง ๆ แต่การเพิ่มหรือจัดลำดับค่าใหม่ในภายหลังต้องใช้ `ALTER TYPE` หากชุดนั้นเปลี่ยนบ่อย table lookup เล็ก ๆ ที่มี foreign key จะยืดหยุ่นกว่า
+- ใช้ `timestamptz` ไม่ใช่ `timestamp` กับทุกช่วงเวลา การเก็บ instant แล้วแปลงตาม session หลีกเลี่ยง bug เรื่อง time zone ทั้งกลุ่ม ใช้ `timestamp` ธรรมดาเมื่อค่านั้นไม่มี zone จริง ๆ เช่นนาฬิกาปลุกท้องถิ่นที่เกิดซ้ำ
+- ใช้ `text` เป็นค่าเริ่มต้นและใช้ `varchar(n)` เมื่อความยาวสูงสุดจริงเป็นส่วนของกฎเท่านั้น ไม่มีความต่างด้านความเร็ว และ `CHECK` constraint บังคับขีดจำกัดบน `text` ได้ถ้าจำเป็น
+- เก็บเงินใน `numeric` ไม่ใช่ `real` หรือ `double precision` binary floating point แทนค่าอย่าง 0.10 ได้ไม่พอดี ทำให้เกิดข้อผิดพลาดจากการปัดเศษที่สะสม
+- ใช้ `jsonb` แทน `json` รูปแบบ binary query ได้เร็วกว่าและทำ index ได้ type `json` แบบข้อความมีประโยชน์เมื่อคุณต้องรักษารูปแบบ input ตามเดิมเท่านั้น
+- `enum` เหมาะกับชุด label ที่คงที่จริง ๆ การเพิ่มค่าถูก (`ADD VALUE ... AFTER`) แต่ใช้ใน transaction เดียวกันไม่ได้ ค่า drop หรือเรียงใหม่ไม่ได้ ถ้าชุดค่าเปลี่ยนบ่อยให้ใช้ table lookup
+- virtual generated column (ค่าเริ่มต้นของ PostgreSQL 18) สร้าง index ไม่ได้ ใช้ `STORED` เมื่อต้องการ index
 
-<Callout title="เลือกชนิดที่แคบที่สุดที่ใช้ได้">
-ชนิดที่ถูกต้องทำหน้าที่สองอย่างพร้อมกัน คือเก็บข้อมูลได้อย่างมีประสิทธิภาพ และปฏิเสธค่าที่ไม่ควรมีอยู่ column ที่กำหนดชนิดเป็น `numeric` สำหรับเงิน, `timestamptz` สำหรับเวลา และ `enum` สำหรับฟิลด์สถานะ เปลี่ยนบั๊กสามจำพวกให้กลายเป็นสถานะที่เป็นไปไม่ได้ การเลือกได้ดีตอนสร้างนั้นถูกกว่าการแก้ข้อมูลในภายหลัง
+<Callout title="เลือก type ที่แคบที่สุดที่พอดี">
+type ที่ถูกต้องทำงานสองอย่าง: เก็บข้อมูลของคุณอย่างมีประสิทธิภาพ และปฏิเสธค่าที่ไม่ควรมีอยู่ column ที่เป็น `numeric` สำหรับเงิน `timestamptz` สำหรับเวลา และ `enum` สำหรับ field สถานะ เปลี่ยน bug สามประเภทให้กลายเป็นสถานะที่เป็นไปไม่ได้ การเลือกให้ดีตอนสร้างถูกกว่าการแก้ข้อมูลทีหลัง
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| column ชนิดตายตัว (เช่น `integer`, `text`, `timestamptz`) | บังคับความถูกต้องของข้อมูล ใช้พื้นที่น้อยกว่า เปรียบเทียบและทำ index ได้เร็ว | ต้องรู้โครงสร้างข้อมูลล่วงหน้า เปลี่ยนชนิดทีหลังมีต้นทุน |
-| `jsonb` สำหรับข้อมูลรูปร่างไม่แน่นอน | ยืดหยุ่นสูง ไม่ต้อง migrate schema ทุกครั้งที่โครงสร้างเปลี่ยน | validate และทำ index ยากกว่า ค้นหาลึก ๆ ช้ากว่า column ปกติ |
-| `numeric` สำหรับเงิน | แม่นยำแบบ exact ไม่มีปัญหาปัดเศษสะสม | ช้ากว่า floating point เล็กน้อยเมื่อคำนวณจำนวนมาก |
-| `float`/`double precision` | คำนวณเร็ว เหมาะกับงานวิทยาศาสตร์ | เป็นค่าประมาณ ไม่เหมาะกับเงินเพราะปัดเศษผิดพลาดสะสมได้ |
+| type ของ column แบบตายตัว (`integer`, `text`, `timestamptz`) | บังคับความถูกต้องของข้อมูล ใช้พื้นที่น้อย เปรียบเทียบและทำ index ได้เร็ว | ต้องรู้รูปร่างข้อมูลล่วงหน้า การเปลี่ยน type ภายหลังมีต้นทุน |
+| `jsonb` สำหรับรูปร่างที่คาดเดาไม่ได้ | ยืดหยุ่นมาก ไม่ต้อง migration ทุกครั้งที่รูปร่างเปลี่ยน | validate และทำ index ยากกว่า การค้นลึกช้ากว่า column ธรรมดา |
+| `numeric` สำหรับเงิน | แม่นยำ ไม่มีข้อผิดพลาดจากการปัดเศษสะสม | ช้ากว่า floating point เล็กน้อยสำหรับการคำนวณหนัก |
+| `float`/`double precision` | คำนวณเร็ว เหมาะกับงานวิทยาศาสตร์ | เป็นค่าประมาณ — ไม่เหมาะกับเงินเพราะข้อผิดพลาดจากการปัดเศษสะสม |
+| primary key แบบ `uuidv7()` | เรียงตามเวลา ทำให้ index กะทัดรัด (วัดข้างบน) | เผยเวลาที่สร้าง |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ชนิด `money`** — มีปัญหาเรื่อง locale และความแม่นยำที่ควบคุมยาก ทีมส่วนใหญ่จึงเลี่ยงใน schema ใหม่ แล้วใช้ `numeric` แทน
-- **เก็บเวลาโดยไม่มี time zone (`timestamp` แทน `timestamptz`)** — ทำให้ค่าเวลาสูญเสียบริบทว่าเป็น time zone ไหน กลายเป็นบั๊กที่ปรากฏเฉพาะตอนระบบมีผู้ใช้ข้าม time zone
-- **ใช้ `float`/`double precision` กับจำนวนเงิน** — floating point แบบ binary แทนค่าอย่าง 0.10 ไม่ได้อย่างแม่นยำ ต้องใช้ `numeric` หรือเก็บเป็นจำนวนเต็มหน่วย cent แทน
-
-> 💡 ตัวอย่างจากของจริง
->
-> **ระบบธนาคารและ ledger ทางการเงิน** — ใช้ `numeric` หรือเก็บจำนวนเงินเป็น integer หน่วยเล็กสุด (เช่น cent) แทบทุกที่ ไม่มีทีมไหนเก็บยอดเงินเป็น `float` เพราะ error สะสมจากการปัดเศษยอมรับไม่ได้ในงานบัญชี
->
-> **แพลตฟอร์มที่มีเนื้อหายืดหยุ่นสูง** — ใช้ JSONB สำหรับส่วนของ schema ที่โครงสร้างยืดหยุ่นจริง ๆ (เช่นเนื้อหา block) แต่ยังคง column แบบ typed สำหรับ metadata ที่ต้อง query และบังคับ constraint บ่อย ๆ เป็นตัวอย่างของการผสมสองแนวทางในระบบเดียว
+- **"`varchar(n)` ประหยัดพื้นที่กว่า `text`"** ไบต์เท่ากัน (9 กับ 9 ข้างบน) ความต่างมีแค่การตรวจความยาว
+- **"`timestamptz` เก็บ time zone"** มันเก็บ instant; zone เป็นการตั้งค่าการแสดงผลของ session
+- **"`money` คือ type ที่ถูกต้องสำหรับเงิน"** มันผูกกับ locale และปัดเป็นสองหลักตอน input ใช้ `numeric`
+- **"ค่า enum เป็นแค่ label ที่แก้ได้อิสระ"** เพิ่มและเปลี่ยนชื่อได้ แต่เรียงใหม่หรือ drop ไม่ได้ และ label ใหม่ใช้ไม่ได้จนกว่าจะ commit
+- **"primary key แบบ UUID ช้ากว่าเสมอ"** key v4 แบบสุ่มเสียขนาด index และเวลา insert ในการวัดข้างบน v7 ที่เรียงตามเวลาลบส่วนใหญ่ออกไป
+- **"`double precision` ก็โอเค ความคลาดเคลื่อนนิดเดียว"** ความคลาดเคลื่อนนิดเดียวก็ทำให้ `=` เป็นเท็จ (พิสูจน์ข้างบน) ซึ่งพอที่จะทำให้การจับคู่ invoice พัง
 
 export const quizDataTypes = [
   {
-    q: 'คุณควรใช้ชนิดใดเพื่อเก็บจำนวนเงินอย่างแม่นยำ?',
+    q: 'ควรใช้ type ใดเก็บจำนวนเงินอย่างแม่นยำ?',
     options: ['real', 'double precision', 'numeric', 'float'],
     answer: 2,
+    explain: '`numeric` คือเลขคณิตทศนิยมที่แม่นยำ: `0.1 + 0.2 = 0.3` เป็นจริง ส่วน `real`/`double precision` เป็น binary floating point ที่การทดสอบเดียวกันเป็นเท็จ',
   },
   {
-    q: 'เหตุใด timestamptz จึงเป็นที่นิยมกว่า timestamp ธรรมดาสำหรับช่วงเวลาขณะหนึ่ง?',
+    q: 'ทำไม timestamptz จึงเหมาะกว่า timestamp ธรรมดาสำหรับช่วงเวลาหนึ่ง?',
     options: [
-      'ใช้พื้นที่จัดเก็บน้อยกว่า',
-      'เก็บช่วงเวลานั้นเป็น UTC แล้วแปลงตาม time zone ของ session',
-      'เรียงลำดับได้เร็วกว่า',
-      'ยอมให้มีค่า null ได้',
+      'ใช้พื้นที่น้อยกว่า',
+      'เก็บ instant เป็น UTC และแปลงตาม time zone ของ session',
+      'เรียงเร็วกว่า',
+      'รับค่า null ได้',
     ],
     answer: 1,
+    explain: 'ภายใต้ `SET TIME ZONE \'Asia/Bangkok\'` instant เดียวกันแสดงเป็น 19:00+07 ขณะที่ column `timestamp` ธรรมดายังเป็น 12:00 และเมิน offset แบบเงียบ ๆ',
   },
   {
-    q: 'ชนิด JSON ใดที่เก็บข้อมูลในรูปแบบ binary ที่ทำ index และ query ได้อย่างมีประสิทธิภาพ?',
+    q: 'type JSON ใดเก็บข้อมูลแบบ binary ที่ทำ index และ query ได้อย่างมีประสิทธิภาพ?',
     options: ['json', 'jsonb', 'text', 'jsonarray'],
     answer: 1,
+    explain: '`jsonb` ถูก parse และเก็บแบบ binary แยกส่วน (และทำ key ซ้ำให้เป็นมาตรฐาน) ส่วน `json` เก็บข้อความดิบและ parse ใหม่ทุกครั้งที่เข้าถึง',
+  },
+  {
+    q: '`INSERT INTO flags VALUES (1)` เมื่อ `f` เป็น column boolean จะเกิดอะไรขึ้น?',
+    options: [
+      'insert ค่า true',
+      'ล้มเหลว: column "f" is of type boolean but expression is of type integer',
+      'insert 1 เป็นข้อความ',
+      'insert NULL',
+    ],
+    answer: 1,
+    explain: 'สตริง `\'1\'` รับเป็น input ของ boolean ได้ และ `1::boolean` ใช้ได้เป็น cast แบบชัดเจน แต่นิพจน์จำนวนเต็มที่ไม่มี type ไม่ถูกแปลงโดยปริยาย (SQLSTATE 42804)',
+  },
+  {
+    q: 'ข้อใดเกี่ยวกับค่า enum เป็นจริง?',
+    options: [
+      'เรียงลำดับใหม่ด้วย ALTER TYPE ได้',
+      'drop ค่าด้วย ALTER TYPE ... DROP VALUE ได้',
+      'เพิ่มค่าได้ แต่ใช้ไม่ได้จนกว่า transaction ที่เพิ่มจะ commit',
+      'enum เรียงตามตัวอักษร',
+    ],
+    answer: 2,
+    explain: '`DROP VALUE` ล้มเหลวด้วย "dropping an enum value is not implemented" การเรียงใหม่เป็นไปไม่ได้ การเรียงลำดับตามลำดับที่ประกาศ และการใช้ค่าที่เพิ่มใน transaction เดียวกันเกิด "unsafe use of new value"',
   },
 ];
 

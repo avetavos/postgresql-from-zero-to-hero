@@ -1,22 +1,25 @@
 ---
 title: Data types
-description: Tour PostgreSQL's core data types — numbers, text, booleans, dates and times, UUIDs, JSON, arrays, and enums — and learn which to pick for common columns.
+description: A tour of PostgreSQL's core data types — numbers, text, booleans, dates and times, UUIDs, jsonb, arrays, and enums — and how to pick the right one.
 sidebar:
   order: 3
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-A data type is the single most important decision you make about a column. It controls what values fit, how much space they take, how they sort and compare, and which operators work on them. PostgreSQL ships with a rich set of built-in types and even lets you define your own. This lesson tours the ones you will reach for most often, with short examples you can run.
+A data type is the single most important decision you make about a column. It controls what values fit, how much space they take, how they sort and compare, and which operators work on them. PostgreSQL ships with a rich set of built-in types and even lets you define your own. This lesson tours the ones you will reach for most often, and proves the claims that usually get repeated without evidence.
+
+> All outputs were produced by running the fences on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026), in one empty database, top to bottom. Timings are from this Mac and will differ on your machine.
 
 ## Numbers
 
-For whole numbers, `integer` (four bytes, up to about two billion) covers most counters and ids, while `bigint` (eight bytes) handles larger ranges. For values where exactness matters — money above all — use `numeric`, which stores decimals precisely. The floating-point type `real` is fast but approximate, so keep it for scientific or measurement data where tiny rounding is acceptable.
+For whole numbers, `integer` (four bytes, up to about two billion) covers most counters and ids, while `bigint` (eight bytes) handles larger ranges. For values where exactness matters — money above all — use `numeric`, which stores decimals precisely. The floating-point types `real` and `double precision` are fast but approximate, so keep them for scientific or measurement data where tiny rounding is acceptable.
 
 ```sql
+-- sql/numbers.sql
 CREATE TABLE measurements (
   count_int  integer,
   count_big  bigint,
@@ -29,122 +32,376 @@ SELECT * FROM measurements;
 ```
 
 ```text
- count_int | count_big  | price | reading
+CREATE TABLE
+INSERT 0 1
+ count_int | count_big  | price | reading 
 -----------+------------+-------+---------
         42 | 9000000000 | 19.99 |    3.14
 (1 row)
 ```
 
-## Text
-
-PostgreSQL has two everyday string types. `text` holds a string of any length, and `varchar(n)` holds a string up to `n` characters. There is no performance penalty for `text`; the length limit on `varchar` is the only real difference, and you can always enforce a length with a `CHECK` constraint instead.
+"Approximate" is not an abstraction. Here is the classic, run on the server: binary floating point cannot represent 0.1 and 0.2 exactly, so their sum is not 0.3, while `numeric` is exact:
 
 ```sql
+-- sql/float-vs-numeric.sql
+SELECT 0.1::float8 + 0.2::float8            AS float_sum,
+       0.1::float8 + 0.2::float8 = 0.3::float8 AS float_equals,
+       0.1::numeric + 0.2::numeric          AS numeric_sum,
+       0.1::numeric + 0.2::numeric = 0.3::numeric AS numeric_equals;
+```
+
+```text
+      float_sum      | float_equals | numeric_sum | numeric_equals 
+---------------------+--------------+-------------+----------------
+ 0.30000000000000004 | f            |         0.3 | t
+(1 row)
+```
+
+Integers do not wrap around; they refuse. The limit for `integer` is 2,147,483,647, and a `numeric(10, 2)` column holds less than 10^8:
+
+```sql
+-- @expect-error 22003
+SELECT 2147483647::integer + 1;
+```
+
+```text
+ERROR:  integer out of range
+```
+
+```sql
+-- @expect-error 22003
+INSERT INTO measurements (price) VALUES (100000000.00);
+```
+
+```text
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 10, scale 2 must round to an absolute value less than 10^8.
+```
+
+`numeric(p, s)` rounds to its scale rather than failing when the magnitude is fine, and `bigint` gives a 64-bit range (about 9.2 x 10^18):
+
+```sql
+-- sql/numeric-rounding.sql
+SELECT 19.999::numeric(10, 2) AS rounded, 9000000000::bigint * 1000000000 AS still_fits_bigint;
+```
+
+```text
+ rounded |  still_fits_bigint  
+---------+---------------------
+   20.00 | 9000000000000000000
+(1 row)
+```
+
+### The `money` type
+
+PostgreSQL also has a `money` type. It is a fixed-point type whose scale and currency symbol come from the `lc_monetary` locale setting, so the same value prints differently under a different setting, and the manual warns that money data may be impossible to load into a database with a different `lc_monetary` ([docs](https://www.postgresql.org/docs/18/datatype-money.html)). It also stores only the locale's fractional digits (two here), so precision is lost on the way in:
+
+```sql
+-- sql/money.sql
+SHOW lc_monetary;
+SELECT 1234.567::numeric::money AS rounded_to_two_places, 1234.567::numeric AS numeric_keeps_it;
+```
+
+```text
+ lc_monetary 
+-------------
+ en_US.utf8
+(1 row)
+
+ rounded_to_two_places | numeric_keeps_it 
+-----------------------+------------------
+             $1,234.57 |         1234.567
+(1 row)
+```
+
+Prefer `numeric(12, 2)` (or an integer count of cents) for amounts.
+
+### Generated columns
+
+A generated column computes its value from other columns of the same row. In PostgreSQL 18 the default kind is **virtual**, computed when you read it; add `STORED` to compute it on write and keep it on disk ([release notes](https://www.postgresql.org/docs/18/release-18.html), [docs](https://www.postgresql.org/docs/18/ddl-generated-columns.html)). Both look the same to `SELECT`; `\d` shows the difference only by the trailing `stored`:
+
+```sql
+-- sql/generated-columns.sql
+CREATE TABLE line_items (
+  qty          int NOT NULL,
+  unit_price   numeric(10, 2) NOT NULL,
+  total        numeric(12, 2) GENERATED ALWAYS AS (qty * unit_price),
+  total_stored numeric(12, 2) GENERATED ALWAYS AS (qty * unit_price) STORED
+);
+INSERT INTO line_items (qty, unit_price) VALUES (3, 19.99);
+SELECT * FROM line_items;
+\d line_items
+```
+
+```text
+CREATE TABLE
+INSERT 0 1
+ qty | unit_price | total | total_stored 
+-----+------------+-------+--------------
+   3 |      19.99 | 59.97 |        59.97
+(1 row)
+
+                                           Table "public.line_items"
+    Column    |     Type      | Collation | Nullable |                         Default                          
+--------------+---------------+-----------+----------+----------------------------------------------------------
+ qty          | integer       |           | not null | 
+ unit_price   | numeric(10,2) |           | not null | 
+ total        | numeric(12,2) |           |          | generated always as ((qty::numeric * unit_price))
+ total_stored | numeric(12,2) |           |          | generated always as ((qty::numeric * unit_price)) stored
+```
+
+The practical difference is that a virtual column costs no storage and no write time but cannot be indexed:
+
+```sql
+-- @expect-error 0A000
+CREATE INDEX line_items_total_idx ON line_items (total);
+```
+
+```text
+ERROR:  indexes on virtual generated columns are not supported
+```
+
+## Text
+
+PostgreSQL has two everyday string types. `text` holds a string of any length, and `varchar(n)` holds a string up to `n` characters. The manual says there is no performance difference among the character types, apart from the extra storage of the blank-padded `char(n)` ([docs](https://www.postgresql.org/docs/18/datatype-character.html)). The same 5-character string takes the same 9 bytes in either type here, while `char(5)` stores `hi` in 5. The length limit is a rule, and it is enforced:
+
+```sql
+-- sql/text-types.sql
 CREATE TABLE notes (
-  title  varchar(120),
+  title  varchar(12),
   body   text
 );
 
 INSERT INTO notes VALUES ('Release plan', 'Ship the new dashboard on Friday.');
 SELECT title, body FROM notes;
+SELECT pg_column_size('hello'::text)        AS text_bytes,
+       pg_column_size('hello'::varchar(50)) AS varchar_bytes,
+       octet_length('hi'::char(5))          AS char5_bytes;
 ```
 
 ```text
-    title     |               body
+CREATE TABLE
+INSERT 0 1
+    title     |               body                
 --------------+-----------------------------------
  Release plan | Ship the new dashboard on Friday.
 (1 row)
+
+ text_bytes | varchar_bytes | char5_bytes 
+------------+---------------+-------------
+          9 |             9 |           5
+(1 row)
 ```
 
-## Booleans
-
-A `boolean` column holds true, false, or null. PostgreSQL accepts several spellings on input — `true`, `'t'`, `'yes'`, `'1'` and their false equivalents (a bare integer `1` is rejected in an `INSERT`) — but always displays the value as `t` or `f`.
-
 ```sql
-SELECT true AS yes, false AS no, null::boolean AS unknown;
+-- @expect-error 22001
+INSERT INTO notes (title) VALUES ('Release plan v2');
 ```
 
 ```text
- yes | no | unknown
+ERROR:  value too long for type character varying(12)
+```
+
+Use `varchar(n)` only when the limit is a real business rule; otherwise use `text` (you can always add a `CHECK (length(...) <= n)` later, which is cheaper to change than a column type).
+
+## Booleans
+
+A `boolean` column holds true, false, or null. PostgreSQL accepts several spellings on input — `true`, `'t'`, `'yes'`, `'1'`, `'off'` — but always displays the value as `t` or `f`. It is strict about *types* though: a bare integer `1` is rejected in an `INSERT`, although an explicit cast works.
+
+```sql
+-- sql/booleans.sql
+SELECT true AS yes, false AS no, null::boolean AS unknown;
+SELECT 't'::boolean AS t, 'yes'::boolean AS yes, '1'::boolean AS one, 'off'::boolean AS off, 1::boolean AS int_cast;
+CREATE TABLE flags (f boolean);
+```
+
+```text
+ yes | no | unknown 
 -----+----+---------
- t   | f  |
+ t   | f  | 
 (1 row)
+
+ t | yes | one | off | int_cast 
+---+-----+-----+-----+----------
+ t | t   | t   | f   | t
+(1 row)
+
+CREATE TABLE
+```
+
+```sql
+-- @expect-error 42804
+INSERT INTO flags VALUES (1);
+```
+
+```text
+ERROR:  column "f" is of type boolean but expression is of type integer
+LINE 1: INSERT INTO flags VALUES (1);
+                                  ^
+HINT:  You will need to rewrite or cast the expression.
 ```
 
 ## Dates and times
 
-For a calendar day with no time, use `date`. For a moment in time, use `timestamptz` — short for timestamp with time zone — which stores the instant in UTC and converts to and from your session's time zone automatically. The plain `timestamp` type, without the zone, looks similar but loses that context and is a common source of bugs.
+For a calendar day with no time, use `date`. For a moment in time, use `timestamptz` — short for timestamp with time zone. It does not store a zone: it stores the instant (in UTC) and converts to and from your session's `TimeZone` setting on the way in and out. The plain `timestamp` type keeps whatever wall-clock text you gave it, which looks similar but loses that context and is a common source of bugs.
 
 ```sql
-SELECT
-  current_date                   AS today,
-  now()                          AS moment,
-  date '2026-01-31'              AS a_day;
+-- sql/dates.sql
+SELECT current_date AS today, now() AS moment, date '2026-01-31' AS a_day;
 ```
 
 ```text
-   today    |             moment              |   a_day
+   today    |            moment             |   a_day    
 ------------+-------------------------------+------------
- 2026-06-25 | 2026-06-25 09:14:22.51+00      | 2026-01-31
+ 2026-09-30 | 2026-09-30 06:03:17.651923+00 | 2026-01-31
 (1 row)
+```
+
+Same row, two columns, read from a session set to Bangkok time. The `timestamptz` column shows the same instant as `19:00+07`; the plain `timestamp` still says `12:00`, and it silently ignores an offset you write into it:
+
+```sql
+-- sql/timestamptz-vs-timestamp.sql
+CREATE TABLE stamps (with_tz timestamptz, without_tz timestamp);
+SET TIME ZONE 'UTC';
+INSERT INTO stamps VALUES ('2026-01-31 12:00:00+00', '2026-01-31 12:00:00');
+SET TIME ZONE 'Asia/Bangkok';
+SELECT with_tz, without_tz FROM stamps;
+SELECT '2026-01-31 12:00:00+07'::timestamp AS offset_silently_dropped;
+RESET TIME ZONE;
+```
+
+```text
+CREATE TABLE
+SET
+INSERT 0 1
+SET
+        with_tz         |     without_tz      
+------------------------+---------------------
+ 2026-01-31 19:00:00+07 | 2026-01-31 12:00:00
+(1 row)
+
+ offset_silently_dropped 
+-------------------------
+ 2026-01-31 12:00:00
+(1 row)
+
+RESET
 ```
 
 ## UUIDs
 
 A `uuid` stores a 128-bit universally unique identifier. UUIDs make good primary keys when ids must be generated by clients or stay unguessable, since they do not reveal row counts the way a sequence does.
 
+PostgreSQL 18 adds `uuidv7()` and the alias `uuidv4()` for `gen_random_uuid()` ([release notes](https://www.postgresql.org/docs/18/release-18.html), [functions](https://www.postgresql.org/docs/18/functions-uuid.html)). Version 7 puts a millisecond timestamp in the high bits, so values sort by creation time:
+
 ```sql
-SELECT gen_random_uuid() AS id;
+-- sql/uuid.sql
+SELECT gen_random_uuid() AS v4_a_random, uuidv4() AS v4_same_function, uuidv7() AS v7_time_ordered;
+SELECT uuid_extract_version(uuidv7()) AS v7_version,
+       uuid_extract_timestamp(uuidv7()) IS NOT NULL AS has_timestamp;
 ```
 
 ```text
-                  id
---------------------------------------
- 6f3a1b2c-9d4e-4f70-8a1b-2c3d4e5f6a7b
+             v4_a_random              |           v4_same_function           |           v7_time_ordered            
+--------------------------------------+--------------------------------------+--------------------------------------
+ 76528519-cbe7-480b-9606-687ec4f3277f | 5f5476e0-b3c4-4088-b9ac-f5f8cac259b4 | 01a0f0e9-03df-7fa4-af78-f7fe110171b6
+(1 row)
+
+ v7_version | has_timestamp 
+------------+---------------
+          7 | t
 (1 row)
 ```
 
-PostgreSQL 18 adds `uuidv7()`, which puts a timestamp in the high bits so the values it generates sort roughly in creation order. That ordering matters for a primary key: random v4 ids scatter inserts across the whole B-tree, while v7 ids land near the right edge, so the index stays compact and cache-friendly. Reach for `uuidv7()` on new tables, and keep `gen_random_uuid()` — now also spelled `uuidv4()` — when an id must not leak when the row was created.
-
 ```sql
-SELECT uuidv7() AS id;
+-- sql/uuid-ordering.sql
+WITH s AS (SELECT n, uuidv7() AS u FROM generate_series(1, 1000) n)
+SELECT array_agg(u ORDER BY n) = array_agg(u ORDER BY u) AS v7_sorted_in_creation_order FROM s;
 ```
 
 ```text
-                  id
---------------------------------------
- 0199c4f2-8d3a-7b21-9e4c-5f6a7b8c9d0e
+ v7_sorted_in_creation_order 
+-----------------------------
+ t
 (1 row)
 ```
+
+The usual claim is that this ordering keeps a primary-key B-tree compact and cache-friendly because inserts land at the right edge, while random v4 values scatter across the whole tree. Does it show up? One million rows into each table, measured on this Mac (one run; insert timings vary between runs, sizes and correlation are stable):
+
+```sql
+-- sql/uuid-index-experiment.sql
+CREATE TABLE ids_v4 (id uuid PRIMARY KEY DEFAULT uuidv4(), n int);
+CREATE TABLE ids_v7 (id uuid PRIMARY KEY DEFAULT uuidv7(), n int);
+\timing on
+INSERT INTO ids_v4 (n) SELECT g FROM generate_series(1, 1000000) g;
+INSERT INTO ids_v7 (n) SELECT g FROM generate_series(1, 1000000) g;
+\timing off
+ANALYZE ids_v4, ids_v7;
+SELECT s.tablename AS kind,
+       pg_size_pretty(pg_relation_size(s.tablename || '_pkey')) AS pkey_size,
+       pg_size_pretty(pg_relation_size(s.tablename::regclass)) AS heap_size,
+       round(s.correlation::numeric, 3) AS key_vs_heap_correlation
+FROM pg_stats s
+WHERE s.tablename IN ('ids_v4', 'ids_v7') AND s.attname = 'id'
+ORDER BY 1;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+Timing is on.
+INSERT 0 1000000
+Time: 2949.380 ms (00:02.949)
+INSERT 0 1000000
+Time: 1789.588 ms (00:01.790)
+Timing is off.
+ANALYZE
+  kind  | pkey_size | heap_size | key_vs_heap_correlation 
+--------+-----------+-----------+-------------------------
+ ids_v4 | 37 MB     | 50 MB     |                   0.007
+ ids_v7 | 30 MB     | 50 MB     |                   1.000
+(2 rows)
+```
+
+The v4 primary key index is larger (37 MB versus 30 MB in the run shown) and the load was slower, because random keys land all over the tree and cause page splits. `key_vs_heap_correlation` is the statistics view of the same thing: v7 keys are in physical order (1.0), v4 keys are unrelated to it (about 0). Both tables have the same 50 MB heap, so the difference is entirely the index. Whether you notice depends on whether the index fits in memory. Reach for `uuidv7()` on new tables when the id is a primary key; keep `gen_random_uuid()` when an id must not leak when the row was created, since the v7 timestamp is readable (`uuid_extract_timestamp`).
 
 ## JSON with jsonb
 
-The `jsonb` type stores JSON in a decomposed binary form that is fast to query and index. Prefer it over the plain `json` type, which keeps the raw text and re-parses on every access. You can pull values out with the arrow operators.
+The `jsonb` type stores JSON in a decomposed binary form that is fast to query and index. Prefer it over the plain `json` type, which keeps the raw text and re-parses on every access. The difference is visible on input: `json` keeps your text as written (duplicate keys and all), `jsonb` normalises it, keeping the last duplicate and sorting keys.
 
 ```sql
+-- sql/jsonb.sql
 CREATE TABLE events (
   id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   payload jsonb
 );
 
-INSERT INTO events (payload)
-VALUES ('{"kind": "signup", "plan": "pro"}');
+INSERT INTO events (payload) VALUES ('{"kind": "signup", "plan": "pro"}');
 
 SELECT payload ->> 'plan' AS plan FROM events;
+SELECT '{"b":1,"a":2,"a":3}'::json AS json_keeps_text, '{"b":1,"a":2,"a":3}'::jsonb AS jsonb_normalises;
 ```
 
 ```text
- plan
+CREATE TABLE
+INSERT 0 1
+ plan 
 ------
  pro
+(1 row)
+
+   json_keeps_text   | jsonb_normalises 
+---------------------+------------------
+ {"b":1,"a":2,"a":3} | {"a": 3, "b": 1}
 (1 row)
 ```
 
 ## Arrays
 
-Any type can become an array by adding square brackets, so `int[]` is a column of integer arrays. Arrays suit small, ordered lists that belong to a single row, such as tags. Array literals are written with curly braces inside a quoted string.
+Any type can become an array by adding square brackets, so `text[]` is a column of text arrays. Arrays suit small, ordered lists that belong to a single row, such as tags. Array literals are written with curly braces inside a quoted string, and subscripts start at 1.
 
 ```sql
+-- sql/arrays.sql
 CREATE TABLE articles (
   id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   tags text[]
@@ -155,17 +412,20 @@ SELECT tags, tags[1] AS first_tag FROM articles;
 ```
 
 ```text
-          tags          | first_tag
-------------------------+-----------
- {sql,postgres,intro}   | sql
+CREATE TABLE
+INSERT 0 1
+         tags         | first_tag 
+----------------------+-----------
+ {sql,postgres,intro} | sql
 (1 row)
 ```
 
 ## Enumerated types
 
-When a column may hold only a fixed set of labels, an `enum` makes the allowed values part of the type. You define it once with `CREATE TYPE`, then use it like any built-in type. Values sort in the order you list them.
+When a column may hold only a fixed set of labels, an `enum` makes the allowed values part of the type. You define it once with `CREATE TYPE`, then use it like any built-in type. Values sort in the order you list them, not alphabetically (`pending, paid, cancelled` below is declaration order):
 
 ```sql
+-- sql/enum.sql
 CREATE TYPE order_status AS ENUM ('pending', 'paid', 'shipped', 'cancelled');
 
 CREATE TABLE orders (
@@ -173,26 +433,191 @@ CREATE TABLE orders (
   status order_status NOT NULL DEFAULT 'pending'
 );
 
-INSERT INTO orders (status) VALUES ('paid');
-SELECT id, status FROM orders;
+INSERT INTO orders (status) VALUES ('paid'), ('pending'), ('cancelled');
+SELECT id, status FROM orders ORDER BY status;
 ```
 
 ```text
- id | status
-----+--------
+CREATE TYPE
+CREATE TABLE
+INSERT 0 3
+ id |  status   
+----+-----------
+  2 | pending
   1 | paid
-(1 row)
+  3 | cancelled
+(3 rows)
+```
+
+Enums are less flexible than they look. You can add a value in a chosen position and rename one, but you cannot reorder existing values and you cannot drop one:
+
+```sql
+-- sql/enum-alter.sql
+ALTER TYPE order_status ADD VALUE 'refunded' AFTER 'shipped';
+ALTER TYPE order_status RENAME VALUE 'cancelled' TO 'canceled';
+SELECT unnest(enum_range(NULL::order_status)) AS labels_in_order;
+```
+
+```text
+ALTER TYPE
+ALTER TYPE
+ labels_in_order 
+-----------------
+ pending
+ paid
+ shipped
+ refunded
+ canceled
+(5 rows)
+```
+
+```sql
+-- @expect-error 0A000
+ALTER TYPE order_status DROP VALUE 'pending';
+```
+
+```text
+ERROR:  dropping an enum value is not implemented
+LINE 1: ALTER TYPE order_status DROP VALUE 'pending';
+                                ^
+```
+
+A newly added value also cannot be used in the transaction that added it:
+
+```sql
+-- @expect-error 55P04
+BEGIN;
+ALTER TYPE order_status ADD VALUE 'archived';
+SELECT 'archived'::order_status;
+```
+
+```text
+BEGIN
+ALTER TYPE
+ERROR:  unsafe use of new value "archived" of enum type order_status
+LINE 1: SELECT 'archived'::order_status;
+               ^
+HINT:  New enum values must be committed before they can be used.
+```
+
+If the set changes often, a small lookup table with a foreign key is more flexible:
+
+```sql
+-- sql/enum-lookup.sql
+CREATE TABLE order_statuses (code text PRIMARY KEY, sort_order int NOT NULL);
+INSERT INTO order_statuses VALUES ('pending', 1), ('paid', 2), ('shipped', 3);
 ```
 
 **In pgAdmin:** custom types created with `CREATE TYPE` appear under Schemas then public then Types in the browser tree, alongside the Tables node. You can review an enum's allowed labels there without writing a query.
 
+## Reading AI-generated code
+
+An assistant that was told "prices are just numbers, keep it fast" writes this schema, with a helpful comment. Read it as a reviewer:
+
+<SpotTheBug lang="sql" code={`-- schema.sql   (AI comment: "double precision is fast and precise enough for prices")
+CREATE TABLE invoices (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  amount    double precision NOT NULL,
+  issued_at timestamp NOT NULL DEFAULT now()
+);
+
+CREATE TABLE payments (
+  invoice_id bigint NOT NULL REFERENCES invoices (id),
+  amount     double precision NOT NULL
+);
+
+-- find fully paid invoices
+SELECT i.id
+FROM invoices i
+JOIN payments p ON p.invoice_id = i.id
+GROUP BY i.id, i.amount
+HAVING sum(p.amount) = i.amount;`}>
+
+It creates and runs without a single error, and it never finds a paid invoice. An invoice of 0.30 paid in two instalments of 0.10 and 0.20 is not "equal" in floating point (proved earlier in this lesson), so the `HAVING sum(p.amount) = i.amount` test fails silently:
+
+```sql
+-- sql/invoices-float.sql
+CREATE TABLE invoices (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  amount    double precision NOT NULL,
+  issued_at timestamp NOT NULL DEFAULT now()
+);
+CREATE TABLE payments (
+  invoice_id bigint NOT NULL REFERENCES invoices (id),
+  amount     double precision NOT NULL
+);
+INSERT INTO invoices (amount) VALUES (0.3);
+INSERT INTO payments VALUES (1, 0.1), (1, 0.2);
+SELECT i.id AS fully_paid_invoice
+FROM invoices i
+JOIN payments p ON p.invoice_id = i.id
+GROUP BY i.id, i.amount
+HAVING sum(p.amount) = i.amount;
+SELECT sum(amount) AS paid, sum(amount) = 0.3 AS equals_amount FROM payments;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 1
+INSERT 0 2
+ fully_paid_invoice 
+--------------------
+(0 rows)
+
+        paid         | equals_amount 
+---------------------+---------------
+ 0.30000000000000004 | f
+(1 row)
+```
+
+The query returns no rows, and `sum(amount) = 0.3` is `f`. The `timestamp` column is a second bug in waiting (no zone, proved above). The fix is `numeric` for money and `timestamptz` for time:
+
+```sql
+-- sql/invoices-numeric.sql
+CREATE TABLE invoices_fixed (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  amount    numeric(12, 2) NOT NULL,
+  issued_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE payments_fixed (
+  invoice_id bigint NOT NULL REFERENCES invoices_fixed (id),
+  amount     numeric(12, 2) NOT NULL
+);
+INSERT INTO invoices_fixed (amount) VALUES (0.30);
+INSERT INTO payments_fixed VALUES (1, 0.10), (1, 0.20);
+SELECT i.id AS fully_paid_invoice
+FROM invoices_fixed i
+JOIN payments_fixed p ON p.invoice_id = i.id
+GROUP BY i.id, i.amount
+HAVING sum(p.amount) = i.amount;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 1
+INSERT 0 2
+ fully_paid_invoice 
+--------------------
+                  1
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A type is a set of allowed values plus the rules for storing, comparing, and operating on them. Every claim about "which type is better" is really a question about one of three things: does the type represent the value exactly (numeric vs float, timestamptz vs timestamp), does it constrain what may exist (varchar(n), enum, boolean), and what does the representation cost in the index (uuid v4 vs v7). Measure the third one; do not assume it.
+
 ## Tips / gotchas
 
-- Use `timestamptz`, not `timestamp`, for any moment in time. Storing in UTC and converting per session avoids whole categories of time-zone bugs; reach for plain `timestamp` only when a value genuinely has no zone, like a recurring local alarm.
+- Use `timestamptz`, not `timestamp`, for any moment in time. Storing the instant and converting per session avoids whole categories of time-zone bugs; reach for plain `timestamp` only when a value genuinely has no zone, like a recurring local alarm.
 - Reach for `text` by default and use `varchar(n)` only when a real maximum length is part of the rule. There is no speed difference, and a `CHECK` constraint can enforce a limit on `text` if you ever need one.
 - Store money in `numeric`, never in `real` or `double precision`. Binary floating point cannot represent values like 0.10 exactly, which leads to rounding errors that accumulate.
 - Prefer `jsonb` over `json`. The binary form is faster to query and can be indexed; the text `json` type is mainly useful when you must preserve the exact input formatting.
-- An `enum` is great for a truly fixed set of labels, but adding or reordering values later needs an `ALTER TYPE`. If the set changes often, a small lookup table with a foreign key is more flexible.
+- An `enum` is great for a truly fixed set of labels. New values are cheap to add (`ADD VALUE ... AFTER`), but they cannot be used in the same transaction, values cannot be dropped or reordered, so if the set changes often use a lookup table.
+- Virtual generated columns (the PostgreSQL 18 default) cannot be indexed; use `STORED` when you need an index.
 
 <Callout title="Pick the narrowest type that fits">
 The right type does double duty: it stores your data efficiently and it rejects values that should never exist. A column typed `numeric` for money, `timestamptz` for time, and an `enum` for a status field turns three classes of bug into impossible states. Choosing well at creation time is cheaper than fixing data later.
@@ -206,24 +631,23 @@ The right type does double duty: it stores your data efficiently and it rejects 
 | `jsonb` for unpredictable shapes | Very flexible, no migration needed every time the shape changes | Harder to validate and index; deep lookups are slower than a plain column |
 | `numeric` for money | Exact precision, no accumulated rounding error | Slightly slower than floating point for heavy computation |
 | `float`/`double precision` | Fast to compute, well suited to scientific work | An approximation — unsuitable for money because rounding error accumulates |
+| `uuidv7()` primary key | Time-ordered, keeps the index compact (measured above) | Leaks creation time |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Using the `money` type** — it has locale and precision pitfalls that are hard to control, so most teams avoid it in new schemas and use `numeric` instead.
-- **Storing time without a time zone (`timestamp` instead of `timestamptz`)** — the value loses the context of which time zone it belongs to, which becomes a bug that only shows up once users span multiple time zones.
-- **Using `float`/`double precision` for money** — binary floating point cannot represent a value like 0.10 exactly. Use `numeric`, or store an integer count of the smallest unit (cents) instead.
-
-> 💡 Real-world example
->
-> **Banking and financial ledger systems** — use `numeric`, or store amounts as an integer in the smallest unit (like cents), almost everywhere. No team stores money as `float`, because the accumulated rounding error is unacceptable in accounting.
->
-> **Flexible content platforms** — use `jsonb` for the part of the schema that is genuinely variable (like block content), while keeping typed columns for metadata that needs frequent querying and constraints — an example of mixing both approaches in one system.
+- **"`varchar(n)` saves space over `text`."** Same bytes (9 vs 9 above); the only difference is the length check.
+- **"`timestamptz` stores the time zone."** It stores the instant; the zone is a display setting of the session.
+- **"`money` is the right type for money."** It is locale-bound and rounds to two places on input; use `numeric`.
+- **"Enum values are just labels I can edit freely."** You can add and rename, not reorder or drop, and new labels are not usable until committed.
+- **"A UUID primary key is always slower."** Random v4 keys cost index size and insert time in the measurement above; time-ordered v7 keys remove most of that.
+- **"`double precision` is fine, the errors are tiny."** A tiny error still makes `=` false (proved above), which is enough to break an invoice match.
 
 export const quizDataTypes = [
   {
     q: 'Which type should you use to store a monetary amount exactly?',
     options: ['real', 'double precision', 'numeric', 'float'],
     answer: 2,
+    explain: '`numeric` is exact decimal arithmetic: `0.1 + 0.2 = 0.3` is true. `real`/`double precision` are binary floating point where the same test is false.',
   },
   {
     q: 'Why is timestamptz preferred over plain timestamp for a moment in time?',
@@ -234,11 +658,35 @@ export const quizDataTypes = [
       'It allows null values',
     ],
     answer: 1,
+    explain: 'Under `SET TIME ZONE \'Asia/Bangkok\'` the same instant printed as 19:00+07, while the plain `timestamp` column stayed 12:00 and silently dropped an offset.',
   },
   {
     q: 'Which JSON type stores data in a binary form that can be indexed and queried efficiently?',
     options: ['json', 'jsonb', 'text', 'jsonarray'],
     answer: 1,
+    explain: '`jsonb` is parsed and stored in a decomposed binary form (and normalises duplicate keys); `json` keeps the raw text and re-parses it on every access.',
+  },
+  {
+    q: 'What happens with `INSERT INTO flags VALUES (1)` when `f` is a boolean column?',
+    options: [
+      'It inserts true',
+      'It fails: column "f" is of type boolean but expression is of type integer',
+      'It inserts 1 as text',
+      'It inserts NULL',
+    ],
+    answer: 1,
+    explain: 'The string `\'1\'` is accepted as boolean input and `1::boolean` works as an explicit cast, but an untyped integer expression is not implicitly converted (SQLSTATE 42804).',
+  },
+  {
+    q: 'Which statement about enum values is true?',
+    options: [
+      'You can reorder them with ALTER TYPE',
+      'You can drop a value with ALTER TYPE ... DROP VALUE',
+      'You can add a value but cannot use it until the adding transaction commits',
+      'Enums sort alphabetically',
+    ],
+    answer: 2,
+    explain: '`DROP VALUE` fails with "dropping an enum value is not implemented", reordering is impossible, ordering follows declaration order, and using a value added in the same transaction raises "unsafe use of new value".',
   },
 ];
 
