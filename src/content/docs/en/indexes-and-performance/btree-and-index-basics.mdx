@@ -1,6 +1,6 @@
 ---
-title: B-tree and index basics
-description: Create indexes with CREATE INDEX, understand the default B-tree, which queries it helps, composite indexes and the left-prefix rule, and unique indexes.
+title: B-tree and Index Basics
+description: Create an index, see the plan change from Seq Scan to Index Scan on 200,000 rows, learn what a B-tree can and cannot do (LIKE prefixes, composite indexes and PostgreSQL 18 skip scan), and count what an index costs on writes.
 sidebar:
   order: 2
 ---
@@ -9,233 +9,676 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-The previous lesson showed *why* an index helps. This one shows *how* to create one and which kind you almost always want. PostgreSQL supports several index types, but one of them is the default and the right answer for the vast majority of cases: the **B-tree**.
+An index is a separate data structure that lets PostgreSQL find rows without reading the whole table. PostgreSQL supports several index types, but one is the default and the right answer for the vast majority of cases: the **B-tree**. This lesson creates one, shows the plan change, and is honest about the cost.
 
-We continue with the `books` table from the CRUD module.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The `sql` fences run top to bottom in one empty database, the plans are pasted from `psql`, and every timing is from this Mac (single runs, so treat small differences as noise).
+
+## The dataset
+
+This lesson needs a table big enough for an index to matter, so it generates its own: 200 000 books, each with a unique `isbn`, a `title`, one of 20 authors, a publication year between 1950 and 2024, and a sales count.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  isbn        text NOT NULL,
+  title       text NOT NULL,
+  author_id   int  NOT NULL,
+  published   int  NOT NULL,
+  copies_sold int  NOT NULL DEFAULT 0
+);
+INSERT INTO books (isbn, title, author_id, published, copies_sold)
+SELECT md5(g::text),
+       'The ' || substr(md5((g * 3)::text), 1, 12),
+       1 + g % 20,
+       1950 + ('x' || substr(md5((g * 5)::text), 1, 6))::bit(24)::int % 75,
+       (g * 7919) % 5000
+FROM generate_series(1, 200000) AS g;
+ANALYZE books;
+SELECT count(*) AS books, count(DISTINCT author_id) AS authors, pg_size_pretty(pg_table_size('books')) AS table_size
+FROM books;
+```
 
 ## Creating an index
 
-The basic form names the table and the column or columns to index. PostgreSQL picks a name for you, or you can supply your own.
+The basic form names the table and the column or columns to index. First, the query with no index. `md5('12345')` is a constant, so PostgreSQL folds it before planning:
+
+```sql
+-- sql/before-index.sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE isbn = md5('12345');
+```
+
+```text
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Seq Scan on books  (cost=0.00..4970.00 rows=1 width=70) (actual time=0.597..9.082 rows=1.00 loops=1)
+   Filter: (isbn = '827ccb0eea8a706c4c34a16891f84e7b'::text)
+   Rows Removed by Filter: 199999
+   Buffers: shared hit=2470
+ Planning:
+   Buffers: shared hit=106
+ Planning Time: 0.435 ms
+ Execution Time: 9.100 ms
+(8 rows)
+```
+
+`Seq Scan`: it read all 2 470 pages (`Buffers: shared hit=2470`) and threw away 199 999 rows (`Rows Removed by Filter`). 9.1 ms for one row. Now create a unique index on `isbn`. PostgreSQL would pick a name for you if you omit it (`CREATE INDEX ON books (title)`), but naming it yourself makes it easier to find in plans and to drop later.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    -- let PostgreSQL name it
-    CREATE INDEX ON books (title);
-
-    -- or name it yourself
-    CREATE INDEX books_title_idx ON books (title);
+    -- sql/create-index.sql
+    CREATE UNIQUE INDEX books_isbn_key ON books (isbn);
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await pool.query('CREATE INDEX books_title_idx ON books (title)');
+    await pool.query('CREATE UNIQUE INDEX books_isbn_key ON books (isbn)');
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    cur.execute("CREATE INDEX books_title_idx ON books (title)")
+    cur.execute("CREATE UNIQUE INDEX books_isbn_key ON books (isbn)")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    _, err := conn.Exec(ctx, "CREATE INDEX books_title_idx ON books (title)")
+    _, err := conn.Exec(ctx, "CREATE UNIQUE INDEX books_isbn_key ON books (isbn)")
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    sqlx::query("CREATE INDEX books_title_idx ON books (title)")
+    sqlx::query("CREATE UNIQUE INDEX books_isbn_key ON books (isbn)")
         .execute(&pool)
         .await?;
     ```
   </TabItem>
 </Tabs>
 
-Because no index type is specified, PostgreSQL builds a B-tree. Writing `CREATE INDEX ... USING btree (title)` is exactly equivalent — the `USING btree` is the silent default.
+```text
+CREATE INDEX
+```
 
-**In pgAdmin:** expand the table in the browser tree, right-click Indexes, and choose Create. The dialog lets you pick columns and the access method, and shows the generated SQL on the SQL tab.
+All four drivers ran that statement once against a fresh copy of the dataset and then listed the indexes on `books`:
+
+```text
+$ (each driver runs the CREATE UNIQUE INDEX once, then lists the indexes on books)
+Node.js (pg 8.23.0):    books_isbn_key, books_pkey
+Python (psycopg 3.3.6): books_isbn_key, books_pkey
+Go (pgx v5.11.0):       books_isbn_key books_pkey
+Rust (sqlx 0.9.0):      books_isbn_key, books_pkey
+```
+
+The same query again:
+
+```sql
+-- sql/after-index.sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE isbn = md5('12345');
+```
+
+```text
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
+ Index Scan using books_isbn_key on books  (cost=0.42..8.44 rows=1 width=70) (actual time=0.037..0.040 rows=1.00 loops=1)
+   Index Cond: (isbn = '827ccb0eea8a706c4c34a16891f84e7b'::text)
+   Index Searches: 1
+   Buffers: shared hit=1 read=3
+ Planning:
+   Buffers: shared hit=127 read=1
+ Planning Time: 0.497 ms
+ Execution Time: 0.057 ms
+(8 rows)
+```
+
+`Index Scan using books_isbn_key`: 0.06 ms in total, 4 buffers instead of 2 470, and the new PG 18 line `Index Searches: 1` (how many times the index was descended). That is more than a hundred times faster on 200 000 rows, and the gap widens as the table grows, because the index lookup is logarithmic while the scan is linear.
+
+What did it cost? Space:
+
+```sql
+-- sql/index-sizes.sql
+SELECT relname, pg_size_pretty(pg_relation_size(oid)) AS size
+FROM pg_class
+WHERE relname IN ('books', 'books_pkey', 'books_isbn_key')
+ORDER BY pg_relation_size(oid) DESC;
+```
+
+```text
+    relname     |  size   
+----------------+---------
+ books          | 19 MB
+ books_isbn_key | 11 MB
+ books_pkey     | 4408 kB
+(3 rows)
+```
+
+The `isbn` index is 11 MB: over half the size of the 19 MB table. Its keys are 32-character strings, so it is not small. An index is a copy of the indexed columns plus pointers, kept in sorted order, and it must be maintained on every write (measured below).
 
 ## What a B-tree can do
 
-A B-tree keeps its entries in sorted order, which is what makes it so versatile. Because the values are ordered, the index can answer any query that depends on that ordering:
+A B-tree keeps keys in sorted order in a balanced tree, so it serves anything that follows that order: equality, ranges (`<`, `<=`, `>`, `>=`, `BETWEEN`), `IN`, `IS NULL`, and, importantly, `ORDER BY` and `LIMIT`, because the rows come out already sorted. Add an index on `title` and ask for the five first titles:
 
-| Query pattern                          | Example                                  | B-tree helps? |
-|----------------------------------------|------------------------------------------|---------------|
-| Equality                               | `WHERE title = 'Quiet Harbors'`          | Yes           |
-| Range                                  | `WHERE published > 2000`                 | Yes           |
-| Between                                | `WHERE published BETWEEN 1990 AND 2000`  | Yes           |
-| Sorting                                | `ORDER BY published`                     | Yes           |
-| Prefix match                           | `WHERE title LIKE 'The %'`               | Only with `text_pattern_ops` or the `C` collation |
-| Leading wildcard                       | `WHERE title LIKE '%orchard'`            | No            |
+```sql
+-- sql/title-index.sql
+CREATE INDEX books_title_idx ON books (title);
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books ORDER BY title LIMIT 5;
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE title BETWEEN 'The 3f9' AND 'The 3fa';
+```
 
-The last two rows are the key insight: a B-tree can satisfy `LIKE 'The %'` only when it is built with `text_pattern_ops` (or the column uses the `C` collation; under the default `en_US.utf8` collation the planner falls back to a Seq Scan), because the search anchors to the start of the value, but it cannot help `LIKE '%orchard'` because a leading wildcard means the matching values are scattered throughout the sorted order rather than grouped together.
+```text
+CREATE INDEX
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.42..0.84 rows=5 width=70) (actual time=0.034..0.044 rows=5.00 loops=1)
+   Buffers: shared hit=5 read=3
+   ->  Index Scan using books_title_idx on books  (cost=0.42..16860.37 rows=200000 width=70) (actual time=0.033..0.040 rows=5.00 loops=1)
+         Index Searches: 1
+         Buffers: shared hit=5 read=3
+ Planning:
+   Buffers: shared hit=119 read=1
+ Planning Time: 0.330 ms
+ Execution Time: 0.063 ms
+(9 rows)
+
+                                                         QUERY PLAN                                                         
+----------------------------------------------------------------------------------------------------------------------------
+ Index Scan using books_title_idx on books  (cost=0.42..8.44 rows=1 width=70) (actual time=0.036..0.109 rows=50.00 loops=1)
+   Index Cond: ((title >= 'The 3f9'::text) AND (title <= 'The 3fa'::text))
+   Index Searches: 1
+   Buffers: shared hit=51 read=2
+ Planning:
+   Buffers: shared hit=6
+ Planning Time: 0.057 ms
+ Execution Time: 0.115 ms
+(8 rows)
+```
+
+The `ORDER BY title LIMIT 5` plan has no `Sort` node: it reads the first five entries of the index and stops (0.06 ms; without the index PostgreSQL would have to read and sort all 200 000 rows). The range query (`BETWEEN 'The 3f9' AND 'The 3fa'`) is an `Index Scan` too: it descends to the first match, walks the sorted entries, and returns 50 rows in 0.1 ms.
+
+| Operation | Served by a B-tree? |
+|---|---|
+| `=`, `IN`, `IS NULL` | Yes |
+| `<`, `<=`, `>`, `>=`, `BETWEEN` | Yes |
+| `ORDER BY` / `LIMIT` on the indexed column | Yes, no separate sort |
+| `LIKE 'The 3f%'` (prefix) | Only with the right operator class or the `C` collation, see the *Reading AI-generated code* section below |
+| `LIKE '%3f'` (suffix / contains), `ILIKE` | No: use a trigram (`pg_trgm`) GIN index, see the next lesson |
+| `lower(title) = ...` | Not with an index on plain `title`; needs an expression index |
+
+The prefix case depends on the database's collation. Ours is:
+
+```sql
+-- sql/collation.sql
+SELECT datcollate FROM pg_database WHERE datname = current_database();
+```
+
+```text
+ datcollate 
+------------
+ en_US.utf8
+(1 row)
+```
 
 ## Composite indexes and the left-prefix rule
 
-An index can cover more than one column. Such a **composite** (or *multicolumn*) index sorts by the first column, then by the second within each first-column value, and so on.
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    CREATE INDEX books_author_published_idx
-      ON books (author_id, published);
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await pool.query(
-      'CREATE INDEX books_author_published_idx ON books (author_id, published)',
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute(
-        "CREATE INDEX books_author_published_idx ON books (author_id, published)"
-    )
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := conn.Exec(ctx,
-        "CREATE INDEX books_author_published_idx ON books (author_id, published)")
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    sqlx::query(
-        "CREATE INDEX books_author_published_idx ON books (author_id, published)",
-    )
-    .execute(&pool)
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-The order of the columns matters because of the **left-prefix rule**: a composite index can be used for queries that filter on a *leading prefix* of its columns. The index on `(author_id, published)` helps these queries:
+An index can cover several columns, ordered. `(author_id, published)` is sorted by `author_id` first, and by `published` within each author. That is ideal for a query on both. First the baseline for a query on `published` alone (2 762 of the 200 000 rows), then the index:
 
 ```sql
--- uses the index: filters on the leading column
-SELECT * FROM books WHERE author_id = 4;
-
--- uses the index: filters on both columns
-SELECT * FROM books WHERE author_id = 4 AND published > 2000;
+-- sql/composite-baseline.sql
+SELECT count(DISTINCT author_id) AS distinct_authors, count(DISTINCT published) AS distinct_years FROM books;
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE published = 2000;
 ```
 
-but it does **not** efficiently help this one, because `published` is not the leading column:
+```text
+ distinct_authors | distinct_years 
+------------------+----------------
+               20 |             75
+(1 row)
+
+                                                 QUERY PLAN                                                 
+------------------------------------------------------------------------------------------------------------
+ Seq Scan on books  (cost=0.00..4970.00 rows=2647 width=70) (actual time=0.018..8.079 rows=2762.00 loops=1)
+   Filter: (published = 2000)
+   Rows Removed by Filter: 197238
+   Buffers: shared hit=2470
+ Planning:
+   Buffers: shared hit=43
+ Planning Time: 0.282 ms
+ Execution Time: 8.181 ms
+(8 rows)
+```
 
 ```sql
--- the index cannot be used as a simple lookup here
-SELECT * FROM books WHERE published > 2000;
+-- sql/composite-index.sql
+CREATE INDEX books_author_published_idx ON books (author_id, published);
+-- both columns: the ideal case
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE author_id = 6 AND published = 2000;
+-- only the second column: PostgreSQL 18 skip scan
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE published = 2000;
 ```
 
-Think of it like a phone book sorted by last name, then first name. You can find everyone with a given last name, or a specific full name, but you cannot quickly find everyone with a given first name regardless of last name. Put the column you filter on most often first.
+```text
+CREATE INDEX
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on books  (cost=5.69..447.14 rows=136 width=70) (actual time=0.049..0.299 rows=143.00 loops=1)
+   Recheck Cond: ((author_id = 6) AND (published = 2000))
+   Heap Blocks: exact=140
+   Buffers: shared hit=140 read=2
+   ->  Bitmap Index Scan on books_author_published_idx  (cost=0.00..5.66 rows=136 width=0) (actual time=0.029..0.029 rows=143.00 loops=1)
+         Index Cond: ((author_id = 6) AND (published = 2000))
+         Index Searches: 1
+         Buffers: shared read=2
+ Planning:
+   Buffers: shared hit=122 read=1
+ Planning Time: 0.419 ms
+ Execution Time: 0.351 ms
+(12 rows)
+
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on books  (cost=106.70..2714.84 rows=2647 width=70) (actual time=0.553..2.396 rows=2762.00 loops=1)
+   Recheck Cond: (published = 2000)
+   Heap Blocks: exact=1673
+   Buffers: shared hit=1702 read=23
+   ->  Bitmap Index Scan on books_author_published_idx  (cost=0.00..106.04 rows=2647 width=0) (actual time=0.382..0.382 rows=2762.00 loops=1)
+         Index Cond: (published = 2000)
+         Index Searches: 22
+         Buffers: shared hit=29 read=23
+ Planning Time: 0.022 ms
+ Execution Time: 2.482 ms
+(10 rows)
+```
+
+The first plan is the textbook case: both columns are equalities on the index, so it descends once (`Index Searches: 1`) and fetches 143 rows in 0.3 ms.
+
+The second query filters only on the **second** column. The old rule of thumb said such a query cannot use the index; that changed in PostgreSQL 18. It now uses a **skip scan**: with only 20 distinct values of `author_id`, the executor searches the index once per author for `published = 2000` (`Index Searches: 22` for 20 distinct authors) and combines the results. 2.5 ms against the 8 ms `Seq Scan` above ([docs](https://www.postgresql.org/docs/18/indexes-multicolumn.html), [release notes](https://www.postgresql.org/docs/18/release-18.html)).
+
+Skip scan pays off only when the leading column has **few distinct values**. Make the leading column `isbn`, with 200 000 distinct values, and the planner is back to the sequential scan:
+
+```sql
+-- sql/composite-high-cardinality.sql
+-- same idea, but the leading column now has 200 000 distinct values
+DROP INDEX books_author_published_idx;
+CREATE INDEX books_isbn_published_idx ON books (isbn, published);
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE published = 2000;
+DROP INDEX books_isbn_published_idx;
+```
+
+```text
+DROP INDEX
+CREATE INDEX
+                                                 QUERY PLAN                                                 
+------------------------------------------------------------------------------------------------------------
+ Seq Scan on books  (cost=0.00..4970.00 rows=2647 width=70) (actual time=0.013..8.087 rows=2762.00 loops=1)
+   Filter: (published = 2000)
+   Rows Removed by Filter: 197238
+   Buffers: shared hit=2470
+ Planning:
+   Buffers: shared hit=118 read=1
+ Planning Time: 0.363 ms
+ Execution Time: 8.211 ms
+(8 rows)
+
+DROP INDEX
+```
+
+So the practical rule for PostgreSQL 18: put the columns you always filter with `=` first, and treat "second column only" queries as fast only when the first column has a small number of distinct values (a status, a type, a region). Before 18 they were always slow.
 
 ## Unique indexes
 
-Adding `UNIQUE` makes the index also enforce that no two rows share the same value. This is both a performance structure and a data-integrity rule.
+A unique index also enforces a rule. Inserting a second row with the same `isbn` fails:
 
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    CREATE UNIQUE INDEX books_isbn_idx ON books (isbn);
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await pool.query('CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)');
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute("CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := conn.Exec(ctx, "CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    sqlx::query("CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
-        .execute(&pool)
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-After this, an `INSERT` or `UPDATE` that would create a duplicate `isbn` fails with a unique-violation error. Defining a column as `PRIMARY KEY` or `UNIQUE` in the table definition creates exactly this kind of index automatically, which is why primary-key lookups are already fast without you doing anything.
-
-You can confirm any of these indexes exist with `\d books` in psql, which lists the table's columns followed by its indexes.
+```sql
+-- @expect-error 23505
+INSERT INTO books (isbn, title, author_id, published) VALUES (md5('12345'), 'A Duplicate Isbn', 1, 2000);
+```
 
 ```text
-Indexes:
-    "books_pkey" PRIMARY KEY, btree (id)
-    "books_author_published_idx" btree (author_id, published)
-    "books_isbn_idx" UNIQUE, btree (isbn)
-    "books_title_idx" btree (title)
+ERROR:  duplicate key value violates unique constraint "books_isbn_key"
+DETAIL:  Key (isbn)=(827ccb0eea8a706c4c34a16891f84e7b) already exists.
 ```
+
+Multiple `NULL`s are allowed in a unique column by default, because `NULL` is not equal to `NULL`; `UNIQUE NULLS NOT DISTINCT` (PostgreSQL 15+) changes that:
+
+```sql
+-- sql/unique-nulls.sql
+CREATE TABLE codes (code text UNIQUE);
+INSERT INTO codes VALUES (NULL), (NULL);
+SELECT count(*) AS null_rows FROM codes WHERE code IS NULL;
+CREATE TABLE codes_strict (code text UNIQUE NULLS NOT DISTINCT);
+INSERT INTO codes_strict VALUES (NULL);
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+ null_rows 
+-----------
+         2
+(1 row)
+
+CREATE TABLE
+INSERT 0 1
+```
+
+```sql
+-- @expect-error 23505
+INSERT INTO codes_strict VALUES (NULL);
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "codes_strict_code_key"
+DETAIL:  Key (code)=(null) already exists.
+```
+
+A `UNIQUE` or `PRIMARY KEY` constraint creates a unique index for you: that is what `books_pkey` in the size listing is.
+
+## Building an index on a live table
+
+A plain `CREATE INDEX` takes a lock that blocks writes to the table (reads still work) until the build finishes. On a big table that can be minutes. Here it is with two sessions: session A builds an index, session B tries an `UPDATE` 0.1 s later, and waits for the build to end:
+
+```text
+-- session A: script
+\timing on
+CREATE INDEX books_expr_plain ON books (md5(title || isbn || title));
+-- session A: psql output
+Timing is on.
+CREATE INDEX
+Time: 247.257 ms
+
+-- session B (starts 0.1 s later): script
+\o /dev/null
+SELECT pg_sleep(0.1);
+\o
+\timing on
+UPDATE books SET copies_sold = copies_sold + 1 WHERE id = 1;
+-- session B: psql output
+Timing is on.
+UPDATE 1
+Time: 145.352 ms
+```
+
+`CREATE INDEX CONCURRENTLY` does the build without blocking writes, at the price of more work and two table scans. The same `UPDATE`, run during a concurrent build, finishes in 2 ms ([docs](https://www.postgresql.org/docs/18/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY)):
+
+```text
+-- session A: script
+\timing on
+CREATE INDEX CONCURRENTLY books_expr_conc ON books (md5(title || isbn || title));
+-- session A: psql output
+Timing is on.
+CREATE INDEX
+Time: 272.840 ms
+
+-- session B (same script as above): psql output
+Timing is on.
+UPDATE 1
+Time: 1.990 ms
+```
+
+The catch: if a concurrent build fails, it leaves an **invalid** index behind. Here we add a row that duplicates an existing title, then try to build a unique index over `title`:
+
+```sql
+-- @expect-error 23505
+INSERT INTO books (isbn, title, author_id, published) VALUES ('dup-title-isbn', (SELECT title FROM books WHERE id = 1), 1, 2000);
+CREATE UNIQUE INDEX CONCURRENTLY books_title_uniq ON books (title);
+```
+
+```text
+INSERT 0 1
+ERROR:  could not create unique index "books_title_uniq"
+DETAIL:  Key (title)=(The eccbc87e4b5c) is duplicated.
+```
+
+```sql
+-- sql/invalid-index.sql
+SELECT indexrelid::regclass AS index, indisvalid, indisready
+FROM pg_index
+WHERE indrelid = 'books'::regclass
+ORDER BY 1;
+DROP INDEX books_title_uniq;
+DELETE FROM books WHERE isbn = 'dup-title-isbn';
+```
+
+```text
+      index       | indisvalid | indisready 
+------------------+------------+------------
+ books_pkey       | t          | t
+ books_isbn_key   | t          | t
+ books_title_idx  | t          | t
+ books_title_uniq | f          | f
+(4 rows)
+
+DROP INDEX
+DELETE 1
+```
+
+`books_title_uniq` is there (it still costs write overhead!) but `indisvalid` is `f`, so queries never use it. Drop it and retry; `pg_index.indisvalid = false` is the query to remember after any failed `CONCURRENTLY`.
+
+## What an index costs on writes
+
+Every `INSERT` must add an entry to every index. The same 200 000 rows, inserted into three tables of the same shape with 0, 1 and 5 single-column indexes:
+
+```sql
+-- sql/write-cost.sql
+CREATE TABLE w0 (a int, b int, c int, d text, e text);
+CREATE TABLE w1 (a int, b int, c int, d text, e text);
+CREATE TABLE w5 (a int, b int, c int, d text, e text);
+CREATE INDEX ON w1 (a);
+CREATE INDEX ON w5 (a);
+CREATE INDEX ON w5 (b);
+CREATE INDEX ON w5 (c);
+CREATE INDEX ON w5 (d);
+CREATE INDEX ON w5 (e);
+\timing on
+INSERT INTO w0 SELECT g, g % 1000, g % 77, md5(g::text), md5((g + 1)::text) FROM generate_series(1, 200000) g;
+INSERT INTO w1 SELECT g, g % 1000, g % 77, md5(g::text), md5((g + 1)::text) FROM generate_series(1, 200000) g;
+INSERT INTO w5 SELECT g, g % 1000, g % 77, md5(g::text), md5((g + 1)::text) FROM generate_series(1, 200000) g;
+\timing off
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+Timing is on.
+INSERT 0 200000
+Time: 383.832 ms
+INSERT 0 200000
+Time: 507.583 ms
+INSERT 0 200000
+Time: 1994.141 ms (00:01.994)
+Timing is off.
+```
+
+384 ms with no index, 508 ms with one, **1 994 ms with five**: about 5.2 times slower for the same rows. Reads got faster; writes paid for it. Indexes that no query uses are pure cost, and PostgreSQL tells you which ones they are:
+
+```sql
+-- sql/index-usage.sql
+CREATE INDEX books_copies_idx ON books (copies_sold);  -- nothing will ever use this one
+SELECT pg_stat_force_next_flush();
+SELECT indexrelname, idx_scan, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_stat_user_indexes
+WHERE relname = 'books'
+ORDER BY idx_scan, indexrelname;
+```
+
+```text
+CREATE INDEX
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+   indexrelname   | idx_scan |  size   
+------------------+----------+---------
+ books_copies_idx |        0 | 1400 kB
+ books_pkey       |        1 | 4408 kB
+ books_isbn_key   |        2 | 11 MB
+ books_title_idx  |        2 | 7960 kB
+(4 rows)
+```
+
+`idx_scan` counts how many times each index was used since statistics were last reset. `books_copies_idx` (never queried) has 0 scans and 1.4 MB of dead weight on every write. Before dropping anything, check a full business cycle of traffic and that the index does not back a constraint (`books_pkey` and `books_isbn_key` do).
+
+## Reading AI-generated code
+
+An assistant is asked for a title search endpoint that matches a prefix. It creates an index on `title` and writes a comment saying the index serves the search:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "title search endpoint: prefix match, served by the index on title"
+CREATE INDEX books_title_idx ON books (title);
+
+SELECT id, title FROM books WHERE title LIKE 'The 3f9a%';`}>
+
+The index exists and the query is correct, but the plan says otherwise. This database uses the `en_US.utf8` collation, and a plain B-tree on `text` is sorted by that collation's rules, which do not line up with the character-by-character range that `LIKE 'The 3f9a%'` needs. So the planner cannot use it:
+
+```sql
+-- sql/stb-wrong.sql
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, title FROM books WHERE title LIKE 'The 3f9a%';
+```
+
+```text
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Seq Scan on books (actual time=6.720..10.741 rows=2.00 loops=1)
+   Filter: (title ~~ 'The 3f9a%'::text)
+   Rows Removed by Filter: 199998
+   Buffers: shared hit=2470
+ Planning:
+   Buffers: shared hit=105 read=5
+ Planning Time: 0.394 ms
+ Execution Time: 10.781 ms
+(8 rows)
+```
+
+`Seq Scan`, 10.8 ms, 199 998 rows removed to return 2. The fix is an index with the `text_pattern_ops` operator class, which sorts strictly by character; now `LIKE 'prefix%'` becomes a range (`Index Cond: ((title ~>=~ 'The 3f9a') AND (title ~<~ 'The 3f9b'))`) ([docs](https://www.postgresql.org/docs/18/indexes-opclass.html)):
+
+```sql
+-- sql/stb-fixed.sql
+CREATE INDEX books_title_pattern_idx ON books (title text_pattern_ops);
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, title FROM books WHERE title LIKE 'The 3f9a%';
+```
+
+```text
+CREATE INDEX
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Index Scan using books_title_pattern_idx on books (actual time=0.045..0.052 rows=2.00 loops=1)
+   Index Cond: ((title ~>=~ 'The 3f9a'::text) AND (title ~<~ 'The 3f9b'::text))
+   Filter: (title ~~ 'The 3f9a%'::text)
+   Index Searches: 1
+   Buffers: shared hit=2 read=3
+ Planning:
+   Buffers: shared hit=133 read=4
+ Planning Time: 0.647 ms
+ Execution Time: 0.084 ms
+(9 rows)
+```
+
+The alternative is to declare the column (or index) with `COLLATE "C"`. Neither helps `ILIKE` or `%contains%`; those need a trigram index.
+
+</SpotTheBug>
+
+## Mental Model
+
+An index is a sorted, second copy of some columns, each entry pointing at a table row. Anything that can be answered by "find this position in the sorted order, then walk along it" is fast: equality, ranges, prefixes (when the ordering matches), `ORDER BY`, `MIN`/`MAX`. Everything else falls back to reading the table. Every write must update every index, so an index is a trade: cheaper reads for slower writes and more disk.
 
 ## Tips / gotchas
 
-- B-tree is the default and the right choice for almost everything: equality, ranges, sorting, and prefix matches. Reach for other types only when B-tree genuinely cannot do the job.
-- Every index slows down writes and uses disk space, because each `INSERT`, `UPDATE`, and `DELETE` must maintain it. Do not create an index for every column.
-- For composite indexes, put the most selective and most frequently filtered column first, and remember the left-prefix rule when deciding column order.
-- A single well-chosen composite index can replace several single-column ones, but it is not a substitute when your queries filter on the trailing columns alone.
-- Building an index on a large, busy table locks it against writes; use `CREATE INDEX CONCURRENTLY` in production to avoid blocking, at the cost of a slower build.
+- Index the columns you filter, join, and sort on, in that order of importance; primary keys and unique constraints are indexed already.
+- Foreign-key columns are **not** indexed automatically: index them if you join on them or delete from the parent table ([docs](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK)).
+- For a composite index, put the columns you always compare with `=` first. Since PostgreSQL 18, a query that skips the leading column can still use the index through a skip scan, but only when that column has few distinct values.
+- Check `EXPLAIN` before and after; the planner ignores an index when a scan is cheaper (small tables, or a query that returns a large fraction of the rows).
+- Build on live tables with `CREATE INDEX CONCURRENTLY`, and check `indisvalid` afterwards.
+- Watch `pg_stat_user_indexes.idx_scan` for indexes that are never used; each one slows every write.
 
-<Callout title="Index for the queries you actually run">
-Do not index speculatively. Look at the `WHERE`, `JOIN`, and `ORDER BY` clauses your application really uses, then add the B-tree indexes that serve them. An unused index is pure overhead: it costs you on every write and gives you nothing on reads.
+<Callout title="Indexes are not free">
+An index speeds up reads on that column and slows down every write to it, and it takes disk space (here the `isbn` index is over half the size of its table; five indexes made bulk inserts about 5.2 times slower). Add indexes for queries you actually run, and remove the ones nothing uses.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Add a new index | Much faster `SELECT`/`WHERE`/`JOIN` on that column | Every `INSERT`, `UPDATE`, `DELETE` must also update the index — slower writes and more disk space |
-| No index (rely on a seq scan) | Fast writes, nothing to maintain | Slower reads as the table grows, especially for selective queries |
-| Plain `CREATE INDEX` | Builds faster | Locks the table against writes while it builds |
-| `CREATE INDEX CONCURRENTLY` | Does not lock writes while building | Builds slower and uses more resources; can fail and leave an invalid index behind |
+| Add a B-tree index | 9.1 ms to 0.06 ms for the lookup; no sort for `ORDER BY ... LIMIT` | 11 MB for the `isbn` index; slower writes (5 indexes: 384 ms to 1 994 ms for 200 000 inserts) |
+| Composite `(a, b)` instead of two indexes | One index serves `a`, `a AND b`, and (PG 18, few distinct `a`) `b` | Bigger index; useless for `b` alone when `a` has many distinct values |
+| `text_pattern_ops` | Makes `LIKE 'prefix%'` indexable | A second index if you also need normal ordering/range on the same column |
+| `CREATE INDEX CONCURRENTLY` | Does not block writes | Slower, two table scans, can leave an invalid index on failure |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Indexing every column "just in case"** — every index that is never actually used still costs something on every write. Look at the `WHERE`, `JOIN`, and `ORDER BY` clauses your application really runs before adding one.
-- **Never dropping unused indexes** — an old index that no query relies on keeps consuming space and slowing writes indefinitely. Check `pg_stat_user_indexes` periodically and consider dropping the ones with no scans.
-- **Building an index on a large, live table without `CONCURRENTLY`** — a plain `CREATE INDEX` holds a lock that blocks writes for the whole build. On a large table that can mean a long outage; always use `CREATE INDEX CONCURRENTLY` in production.
-
-> 💡 Real-world example
->
-> **[GitLab's database review process](https://docs.gitlab.com/development/database_review/)** — requires a formal database review, including query plans, before a change touching the schema or an index merges into production, because an unused index quietly costs write throughput and storage that nobody notices otherwise.
->
-> **[pganalyze](https://pganalyze.com/)** — a PostgreSQL monitoring tool built specifically to surface index usage and query performance over time, making it obvious which indexes are pulling weight and which are candidates to drop.
+- **"A B-tree always serves `LIKE 'prefix%'`."** Not under `en_US.utf8`: plain index gave a `Seq Scan`, `text_pattern_ops` gave an `Index Scan`.
+- **"A composite index cannot help a query on the second column."** True before PostgreSQL 18. With few distinct leading values, skip scan makes it work (`Index Searches: 22`), and with many it does not.
+- **"More indexes are always better."** Five indexes made the same insert 5.2 times slower.
+- **"A failed CREATE INDEX CONCURRENTLY leaves nothing behind."** It leaves an invalid index that still costs writes.
+- **"Primary keys need an extra index."** `PRIMARY KEY` and `UNIQUE` create one.
 
 export const quizBtree = [
   {
-    q: 'Which index type does CREATE INDEX build when you do not specify one?',
+    q: 'Which is the default index type in PostgreSQL?',
     options: ['Hash', 'GIN', 'B-tree', 'BRIN'],
     answer: 2,
+    explain: 'CREATE INDEX without USING builds a B-tree, which handles equality, ranges, sorting and (with the right operator class) prefix matches.',
   },
   {
-    q: 'An index on (author_id, published) can efficiently serve which query?',
+    q: 'On the 200 000-row table, the plain index on `title` does not serve `WHERE title LIKE \'The 3f9a%\'` under en_US.utf8. What fixes it?',
     options: [
-      'WHERE published > 2000',
-      'WHERE author_id = 4',
-      'WHERE title LIKE \'%orchard\'',
-      'None of these',
+      'A hash index',
+      'An index with the text_pattern_ops operator class (or COLLATE "C")',
+      'Running ANALYZE again',
+      'Nothing can fix it',
     ],
     answer: 1,
+    explain: 'text_pattern_ops sorts by character, so the prefix becomes a range: Index Cond (title ~>=~ ... AND title ~<~ ...). The plain index gave a Seq Scan (10.8 ms).',
   },
   {
-    q: 'What does adding UNIQUE to an index do in addition to speeding up lookups?',
+    q: 'A query filters only on `published`, the second column of the index `(author_id, published)`, and `author_id` has 20 distinct values. On PostgreSQL 18 what happens?',
     options: [
-      'It compresses the index',
-      'It prevents two rows from sharing the same indexed value',
-      'It makes writes faster',
-      'It allows leading-wildcard LIKE searches',
+      'The index is never used',
+      'It can be used via a skip scan (about one search per author, Index Searches: 22)',
+      'PostgreSQL reorders the index columns',
+      'The query fails',
     ],
     answer: 1,
+    explain: 'Skip scan is new in 18 and only pays off with few distinct leading values. With isbn (200 000 distinct) as the leading column the plan was a Seq Scan.',
+  },
+  {
+    q: 'A CREATE UNIQUE INDEX CONCURRENTLY fails with a duplicate-key error. What state is the table in?',
+    options: [
+      'Unchanged: the failed build is fully rolled back',
+      'An invalid index remains (pg_index.indisvalid = false) and must be dropped',
+      'The table is locked until restart',
+      'The duplicate row is deleted automatically',
+    ],
+    answer: 1,
+    explain: 'CONCURRENTLY cannot run in a transaction, so a failed build leaves books_title_uniq behind with indisvalid = f (and indisready = f).',
+  },
+  {
+    q: '200 000 rows were inserted into tables with 0, 1 and 5 indexes. What did the lesson measure?',
+    options: [
+      'No difference: indexes only affect reads',
+      'About 384 ms, 508 ms and 1 994 ms respectively, so each index slows writes',
+      'Writes got faster with more indexes',
+      'Only the primary key affects writes',
+    ],
+    answer: 1,
+    explain: 'Every insert must update every index. Five indexes made the same load about 5.2 times slower on this Mac. pg_stat_user_indexes.idx_scan shows the ones never used.',
   },
 ];
 

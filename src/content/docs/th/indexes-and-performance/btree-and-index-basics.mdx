@@ -1,6 +1,6 @@
 ---
-title: B-tree และพื้นฐานของ index
-description: สร้าง index ด้วย CREATE INDEX ทำความเข้าใจ B-tree ที่เป็นค่าเริ่มต้นว่าช่วย query แบบไหนได้บ้าง composite index และกฎ left-prefix รวมถึง unique index
+title: B-tree และพื้นฐาน Index
+description: สร้าง index เห็น plan เปลี่ยนจาก Seq Scan เป็น Index Scan บน 200,000 row เรียนรู้ว่า B-tree ทำอะไรได้และไม่ได้ (LIKE prefix, composite index และ skip scan ของ PostgreSQL 18) และนับต้นทุนของ index ตอนเขียน
 sidebar:
   order: 2
 ---
@@ -9,233 +9,676 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-บทเรียนก่อนหน้านี้แสดงให้เห็น *ว่าทำไม* index ถึงช่วยได้ บทนี้จะแสดงให้เห็น *ว่าสร้างอย่างไร* และชนิดไหนที่คุณแทบจะต้องใช้เสมอ PostgreSQL รองรับ index หลายชนิด แต่มีอยู่ชนิดหนึ่งที่เป็นค่าเริ่มต้นและเป็นคำตอบที่ถูกต้องสำหรับกรณีส่วนใหญ่อย่างท่วมท้น นั่นคือ **B-tree**
+index คือโครงสร้างข้อมูลแยกที่ให้ PostgreSQL หา row ได้โดยไม่ต้องอ่านทั้ง table PostgreSQL รองรับ index หลายชนิด แต่มีหนึ่งชนิดที่เป็นค่าเริ่มต้นและเป็นคำตอบที่ถูกสำหรับกรณีส่วนใหญ่: **B-tree** บทนี้สร้างหนึ่งตัว ให้ดู plan เปลี่ยน และพูดตรง ๆ เรื่องต้นทุน
 
-เราจะใช้ table `books` จากโมดูล CRUD ต่อไป
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว plan คัดลอกจาก `psql` และเวลาทุกตัวมาจาก Mac เครื่องนี้ (รันครั้งเดียว ความต่างเล็ก ๆ ถือเป็นสัญญาณรบกวน)
+
+## ชุดข้อมูล
+
+บทนี้ต้องการ table ใหญ่พอให้ index มีความหมาย จึงสร้างข้อมูลเอง: หนังสือ 200 000 เล่ม แต่ละเล่มมี `isbn` ไม่ซ้ำ, `title`, ผู้เขียนหนึ่งใน 20 คน, ปีที่ตีพิมพ์ระหว่าง 1950 ถึง 2024 และยอดขาย
+
+```sql
+-- sql/setup.sql
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  isbn        text NOT NULL,
+  title       text NOT NULL,
+  author_id   int  NOT NULL,
+  published   int  NOT NULL,
+  copies_sold int  NOT NULL DEFAULT 0
+);
+INSERT INTO books (isbn, title, author_id, published, copies_sold)
+SELECT md5(g::text),
+       'The ' || substr(md5((g * 3)::text), 1, 12),
+       1 + g % 20,
+       1950 + ('x' || substr(md5((g * 5)::text), 1, 6))::bit(24)::int % 75,
+       (g * 7919) % 5000
+FROM generate_series(1, 200000) AS g;
+ANALYZE books;
+SELECT count(*) AS books, count(DISTINCT author_id) AS authors, pg_size_pretty(pg_table_size('books')) AS table_size
+FROM books;
+```
 
 ## การสร้าง index
 
-รูปแบบพื้นฐานคือระบุชื่อ table และ column หรือหลาย ๆ column ที่จะทำ index PostgreSQL จะเลือกชื่อให้คุณ หรือคุณจะตั้งชื่อเองก็ได้
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    -- let PostgreSQL name it
-    CREATE INDEX ON books (title);
-
-    -- or name it yourself
-    CREATE INDEX books_title_idx ON books (title);
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await pool.query('CREATE INDEX books_title_idx ON books (title)');
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute("CREATE INDEX books_title_idx ON books (title)")
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := conn.Exec(ctx, "CREATE INDEX books_title_idx ON books (title)")
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    sqlx::query("CREATE INDEX books_title_idx ON books (title)")
-        .execute(&pool)
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-เนื่องจากไม่ได้ระบุชนิดของ index PostgreSQL จึงสร้าง B-tree การเขียน `CREATE INDEX ... USING btree (title)` ก็ให้ผลเทียบเท่ากันทุกประการ — `USING btree` คือค่าเริ่มต้นที่ถูกใช้อย่างเงียบ ๆ
-
-**ใน pgAdmin:** ขยาย table ในแผนผัง (browser tree) คลิกขวาที่ Indexes แล้วเลือก Create กล่องโต้ตอบจะให้คุณเลือก column และ access method และแสดง SQL ที่ถูกสร้างขึ้นบนแท็บ SQL
-
-## B-tree ทำอะไรได้บ้าง
-
-B-tree เก็บรายการทั้งหมดไว้ในลำดับที่เรียงแล้ว และนั่นเองที่ทำให้ใช้งานได้หลากหลาย เพราะค่าต่าง ๆ ถูกเรียงลำดับไว้ index จึงสามารถตอบ query ใด ๆ ที่ขึ้นอยู่กับลำดับนั้นได้:
-
-| รูปแบบ query                           | ตัวอย่าง                                 | B-tree ช่วยไหม? |
-|----------------------------------------|------------------------------------------|---------------|
-| Equality                               | `WHERE title = 'Quiet Harbors'`          | ใช่           |
-| Range                                  | `WHERE published > 2000`                 | ใช่           |
-| Between                                | `WHERE published BETWEEN 1990 AND 2000`  | ใช่           |
-| Sorting                                | `ORDER BY published`                     | ใช่           |
-| Prefix match                           | `WHERE title LIKE 'The %'`               | เฉพาะเมื่อใช้ `text_pattern_ops` หรือ collation `C` |
-| Leading wildcard                       | `WHERE title LIKE '%orchard'`            | ไม่           |
-
-สอง row สุดท้ายคือประเด็นสำคัญ B-tree จัดการ `LIKE 'The %'` ได้เฉพาะเมื่อสร้างด้วย `text_pattern_ops` (หรือ column ใช้ collation `C` ถ้าใช้ collation default `en_US.utf8` planner จะ fallback เป็น Seq Scan) เพราะการค้นหายึดไว้ที่จุดเริ่มต้นของค่า แต่ช่วย `LIKE '%orchard'` ไม่ได้ เพราะ leading wildcard หมายความว่าค่าที่ตรงเงื่อนไขกระจัดกระจายอยู่ทั่วทั้งลำดับที่เรียงไว้ ไม่ได้ถูกจัดกลุ่มไว้ด้วยกัน
-
-## composite index และกฎ left-prefix
-
-index หนึ่งตัวสามารถครอบคลุมได้มากกว่าหนึ่ง column index แบบ **composite** (หรือ *multicolumn*) เช่นนี้จะเรียงลำดับตาม column แรก จากนั้นจึงเรียงตาม column ที่สองภายในแต่ละค่าของ column แรก ไล่ไปเรื่อย ๆ
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    CREATE INDEX books_author_published_idx
-      ON books (author_id, published);
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await pool.query(
-      'CREATE INDEX books_author_published_idx ON books (author_id, published)',
-    );
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute(
-        "CREATE INDEX books_author_published_idx ON books (author_id, published)"
-    )
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := conn.Exec(ctx,
-        "CREATE INDEX books_author_published_idx ON books (author_id, published)")
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    sqlx::query(
-        "CREATE INDEX books_author_published_idx ON books (author_id, published)",
-    )
-    .execute(&pool)
-    .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-ลำดับของ column มีความสำคัญเพราะ **กฎ left-prefix**: composite index สามารถถูกใช้ได้กับ query ที่กรองด้วย *prefix นำหน้า* ของ column ในนั้น index บน `(author_id, published)` ช่วย query เหล่านี้:
+รูปแบบพื้นฐานระบุ table และ column ที่จะ index ก่อนอื่น query เมื่อยังไม่มี index `md5('12345')` เป็นค่าคงที่ PostgreSQL จึงคำนวณให้ก่อนวาง plan:
 
 ```sql
--- uses the index: filters on the leading column
-SELECT * FROM books WHERE author_id = 4;
-
--- uses the index: filters on both columns
-SELECT * FROM books WHERE author_id = 4 AND published > 2000;
+-- sql/before-index.sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE isbn = md5('12345');
 ```
-
-แต่ index ตัวนี้ **ไม่** ช่วย query ข้างล่างอย่างมีประสิทธิภาพ เพราะ `published` ไม่ใช่ column นำหน้า:
-
-```sql
--- the index cannot be used as a simple lookup here
-SELECT * FROM books WHERE published > 2000;
-```
-
-ลองนึกถึงสมุดโทรศัพท์ที่เรียงตามนามสกุล แล้วจึงตามด้วยชื่อ คุณสามารถหาทุกคนที่มีนามสกุลที่กำหนด หรือหาชื่อเต็มที่เจาะจงได้ แต่คุณไม่สามารถหาทุกคนที่มีชื่อต้นที่กำหนดโดยไม่สนนามสกุลได้อย่างรวดเร็ว จงวาง column ที่คุณกรองบ่อยที่สุดไว้ก่อน
-
-## unique index
-
-การเพิ่ม `UNIQUE` ทำให้ index บังคับด้วยว่าจะไม่มีสอง row ที่มีค่าเดียวกัน นี่เป็นทั้งโครงสร้างเพื่อประสิทธิภาพและกฎความถูกต้องของข้อมูล (data integrity)
-
-<Tabs syncKey="lang">
-  <TabItem label="psql">
-    ```sql
-    CREATE UNIQUE INDEX books_isbn_idx ON books (isbn);
-    ```
-  </TabItem>
-  <TabItem label="Node.js">
-    ```js
-    await pool.query('CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)');
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    cur.execute("CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
-    ```
-  </TabItem>
-  <TabItem label="Go">
-    ```go
-    _, err := conn.Exec(ctx, "CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
-    ```
-  </TabItem>
-  <TabItem label="Rust">
-    ```rust
-    sqlx::query("CREATE UNIQUE INDEX books_isbn_idx ON books (isbn)")
-        .execute(&pool)
-        .await?;
-    ```
-  </TabItem>
-</Tabs>
-
-หลังจากนี้ `INSERT` หรือ `UPDATE` ที่จะสร้าง `isbn` ซ้ำกันจะล้มเหลวด้วย error การละเมิดความเป็น unique การกำหนด column เป็น `PRIMARY KEY` หรือ `UNIQUE` ในการนิยาม table จะสร้าง index แบบนี้ให้อัตโนมัติอยู่แล้ว จึงเป็นเหตุผลที่การค้นหาด้วย primary key เร็วตั้งแต่แรกโดยคุณไม่ต้องทำอะไรเลย
-
-คุณสามารถยืนยันว่า index เหล่านี้มีอยู่ได้ด้วย `\d books` ใน psql ซึ่งจะแสดงรายการ column ของตามด้วย index ของ table
 
 ```text
-Indexes:
-    "books_pkey" PRIMARY KEY, btree (id)
-    "books_author_published_idx" btree (author_id, published)
-    "books_isbn_idx" UNIQUE, btree (isbn)
-    "books_title_idx" btree (title)
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Seq Scan on books  (cost=0.00..4970.00 rows=1 width=70) (actual time=0.597..9.082 rows=1.00 loops=1)
+   Filter: (isbn = '827ccb0eea8a706c4c34a16891f84e7b'::text)
+   Rows Removed by Filter: 199999
+   Buffers: shared hit=2470
+ Planning:
+   Buffers: shared hit=106
+ Planning Time: 0.435 ms
+ Execution Time: 9.100 ms
+(8 rows)
 ```
+
+`Seq Scan`: อ่านทั้ง 2 470 page (`Buffers: shared hit=2470`) และทิ้ง 199 999 row (`Rows Removed by Filter`) 9.1 ms เพื่อได้ row เดียว ทีนี้สร้าง unique index บน `isbn` PostgreSQL ตั้งชื่อให้ถ้าคุณไม่ใส่ (`CREATE INDEX ON books (title)`) แต่การตั้งชื่อเองช่วยให้หาใน plan และ drop ทีหลังง่ายขึ้น
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/create-index.sql
+    CREATE UNIQUE INDEX books_isbn_key ON books (isbn);
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    await pool.query('CREATE UNIQUE INDEX books_isbn_key ON books (isbn)');
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute("CREATE UNIQUE INDEX books_isbn_key ON books (isbn)")
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    _, err := conn.Exec(ctx, "CREATE UNIQUE INDEX books_isbn_key ON books (isbn)")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    sqlx::query("CREATE UNIQUE INDEX books_isbn_key ON books (isbn)")
+        .execute(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+CREATE INDEX
+```
+
+ทั้งสี่ driver รันคำสั่งนี้หนึ่งครั้งกับชุดข้อมูลใหม่ แล้ว list index บน `books`:
+
+```text
+$ (each driver runs the CREATE UNIQUE INDEX once, then lists the indexes on books)
+Node.js (pg 8.23.0):    books_isbn_key, books_pkey
+Python (psycopg 3.3.6): books_isbn_key, books_pkey
+Go (pgx v5.11.0):       books_isbn_key books_pkey
+Rust (sqlx 0.9.0):      books_isbn_key, books_pkey
+```
+
+query เดิมอีกครั้ง:
+
+```sql
+-- sql/after-index.sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE isbn = md5('12345');
+```
+
+```text
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
+ Index Scan using books_isbn_key on books  (cost=0.42..8.44 rows=1 width=70) (actual time=0.037..0.040 rows=1.00 loops=1)
+   Index Cond: (isbn = '827ccb0eea8a706c4c34a16891f84e7b'::text)
+   Index Searches: 1
+   Buffers: shared hit=1 read=3
+ Planning:
+   Buffers: shared hit=127 read=1
+ Planning Time: 0.497 ms
+ Execution Time: 0.057 ms
+(8 rows)
+```
+
+`Index Scan using books_isbn_key`: รวม 0.06 ms ใช้ 4 buffer แทน 2 470 และบรรทัดใหม่ของ PG 18 `Index Searches: 1` (จำนวนครั้งที่ลงไปใน index) เร็วขึ้นมากกว่าร้อยเท่าบน 200 000 row และช่องว่างกว้างขึ้นเมื่อ table โต เพราะการค้นหาใน index เป็นลอการิทึมส่วนการ scan เป็นเชิงเส้น
+
+ต้นทุนคืออะไร? พื้นที่:
+
+```sql
+-- sql/index-sizes.sql
+SELECT relname, pg_size_pretty(pg_relation_size(oid)) AS size
+FROM pg_class
+WHERE relname IN ('books', 'books_pkey', 'books_isbn_key')
+ORDER BY pg_relation_size(oid) DESC;
+```
+
+```text
+    relname     |  size   
+----------------+---------
+ books          | 19 MB
+ books_isbn_key | 11 MB
+ books_pkey     | 4408 kB
+(3 rows)
+```
+
+index ของ `isbn` ใหญ่ 11 MB: เกินครึ่งของ table ขนาด 19 MB key เป็นสตริง 32 ตัวอักษรมันจึงไม่เล็ก index คือสำเนาของ column ที่ index บวก pointer เรียงตามลำดับ และต้องถูกดูแลทุกครั้งที่เขียน (วัดด้านล่าง)
+
+## B-tree ทำอะไรได้
+
+B-tree เก็บ key เรียงลำดับในต้นไม้สมดุล จึงรองรับทุกอย่างที่ตามลำดับนั้น: equality, range (`<`, `<=`, `>`, `>=`, `BETWEEN`), `IN`, `IS NULL` และที่สำคัญคือ `ORDER BY` กับ `LIMIT` เพราะ row ออกมาเรียงแล้ว เพิ่ม index บน `title` และขอห้า title แรก:
+
+```sql
+-- sql/title-index.sql
+CREATE INDEX books_title_idx ON books (title);
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books ORDER BY title LIMIT 5;
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE title BETWEEN 'The 3f9' AND 'The 3fa';
+```
+
+```text
+CREATE INDEX
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.42..0.84 rows=5 width=70) (actual time=0.034..0.044 rows=5.00 loops=1)
+   Buffers: shared hit=5 read=3
+   ->  Index Scan using books_title_idx on books  (cost=0.42..16860.37 rows=200000 width=70) (actual time=0.033..0.040 rows=5.00 loops=1)
+         Index Searches: 1
+         Buffers: shared hit=5 read=3
+ Planning:
+   Buffers: shared hit=119 read=1
+ Planning Time: 0.330 ms
+ Execution Time: 0.063 ms
+(9 rows)
+
+                                                         QUERY PLAN                                                         
+----------------------------------------------------------------------------------------------------------------------------
+ Index Scan using books_title_idx on books  (cost=0.42..8.44 rows=1 width=70) (actual time=0.036..0.109 rows=50.00 loops=1)
+   Index Cond: ((title >= 'The 3f9'::text) AND (title <= 'The 3fa'::text))
+   Index Searches: 1
+   Buffers: shared hit=51 read=2
+ Planning:
+   Buffers: shared hit=6
+ Planning Time: 0.057 ms
+ Execution Time: 0.115 ms
+(8 rows)
+```
+
+plan ของ `ORDER BY title LIMIT 5` ไม่มี node `Sort`: มันอ่านห้า entry แรกของ index แล้วหยุด (0.06 ms ถ้าไม่มี index PostgreSQL ต้องอ่านและ sort ทั้ง 200 000 row) query แบบ range (`BETWEEN 'The 3f9' AND 'The 3fa'`) ก็เป็น `Index Scan` เช่นกัน: ลงไปที่ match แรก เดิน entry ที่เรียงแล้ว และคืน 50 row ใน 0.1 ms
+
+| การดำเนินการ | B-tree รองรับหรือไม่? |
+|---|---|
+| `=`, `IN`, `IS NULL` | ใช่ |
+| `<`, `<=`, `>`, `>=`, `BETWEEN` | ใช่ |
+| `ORDER BY` / `LIMIT` บน column ที่ index | ใช่ ไม่ต้อง sort แยก |
+| `LIKE 'The 3f%'` (prefix) | เฉพาะเมื่อมี operator class ที่ถูกหรือ collation `C` ดูหัวข้อ *Reading AI-generated code* ด้านล่าง |
+| `LIKE '%3f'` (suffix / contains), `ILIKE` | ไม่: ใช้ trigram (`pg_trgm`) GIN index ดูบทถัดไป |
+| `lower(title) = ...` | ไม่ได้กับ index บน `title` ธรรมดา ต้องใช้ expression index |
+
+กรณี prefix ขึ้นกับ collation ของฐานข้อมูล ของเราคือ:
+
+```sql
+-- sql/collation.sql
+SELECT datcollate FROM pg_database WHERE datname = current_database();
+```
+
+```text
+ datcollate 
+------------
+ en_US.utf8
+(1 row)
+```
+
+## Composite index และกฎ left-prefix
+
+index ครอบหลาย column ได้ โดยเรียงลำดับ `(author_id, published)` เรียงตาม `author_id` ก่อน และตาม `published` ภายในผู้เขียนแต่ละคน เหมาะกับ query ที่ใช้ทั้งสอง ก่อนอื่น baseline ของ query บน `published` อย่างเดียว (2 762 จาก 200 000 row) แล้วค่อย index:
+
+```sql
+-- sql/composite-baseline.sql
+SELECT count(DISTINCT author_id) AS distinct_authors, count(DISTINCT published) AS distinct_years FROM books;
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE published = 2000;
+```
+
+```text
+ distinct_authors | distinct_years 
+------------------+----------------
+               20 |             75
+(1 row)
+
+                                                 QUERY PLAN                                                 
+------------------------------------------------------------------------------------------------------------
+ Seq Scan on books  (cost=0.00..4970.00 rows=2647 width=70) (actual time=0.018..8.079 rows=2762.00 loops=1)
+   Filter: (published = 2000)
+   Rows Removed by Filter: 197238
+   Buffers: shared hit=2470
+ Planning:
+   Buffers: shared hit=43
+ Planning Time: 0.282 ms
+ Execution Time: 8.181 ms
+(8 rows)
+```
+
+```sql
+-- sql/composite-index.sql
+CREATE INDEX books_author_published_idx ON books (author_id, published);
+-- both columns: the ideal case
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE author_id = 6 AND published = 2000;
+-- only the second column: PostgreSQL 18 skip scan
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE published = 2000;
+```
+
+```text
+CREATE INDEX
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on books  (cost=5.69..447.14 rows=136 width=70) (actual time=0.049..0.299 rows=143.00 loops=1)
+   Recheck Cond: ((author_id = 6) AND (published = 2000))
+   Heap Blocks: exact=140
+   Buffers: shared hit=140 read=2
+   ->  Bitmap Index Scan on books_author_published_idx  (cost=0.00..5.66 rows=136 width=0) (actual time=0.029..0.029 rows=143.00 loops=1)
+         Index Cond: ((author_id = 6) AND (published = 2000))
+         Index Searches: 1
+         Buffers: shared read=2
+ Planning:
+   Buffers: shared hit=122 read=1
+ Planning Time: 0.419 ms
+ Execution Time: 0.351 ms
+(12 rows)
+
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on books  (cost=106.70..2714.84 rows=2647 width=70) (actual time=0.553..2.396 rows=2762.00 loops=1)
+   Recheck Cond: (published = 2000)
+   Heap Blocks: exact=1673
+   Buffers: shared hit=1702 read=23
+   ->  Bitmap Index Scan on books_author_published_idx  (cost=0.00..106.04 rows=2647 width=0) (actual time=0.382..0.382 rows=2762.00 loops=1)
+         Index Cond: (published = 2000)
+         Index Searches: 22
+         Buffers: shared hit=29 read=23
+ Planning Time: 0.022 ms
+ Execution Time: 2.482 ms
+(10 rows)
+```
+
+plan แรกคือกรณีตำรา: ทั้งสอง column เป็น equality บน index จึงลงหนึ่งครั้ง (`Index Searches: 1`) และดึง 143 row ใน 0.3 ms
+
+query ที่สองกรองเฉพาะ column **ที่สอง** กฎที่เคยพูดกันว่า query แบบนี้ใช้ index ไม่ได้ เปลี่ยนใน PostgreSQL 18 ตอนนี้มันใช้ **skip scan** ได้: เพราะ `author_id` มีค่าไม่ซ้ำเพียง 20 ค่า executor ค้น index หนึ่งครั้งต่อผู้เขียนสำหรับ `published = 2000` (`Index Searches: 22` สำหรับผู้เขียนที่ไม่ซ้ำ 20 คน) แล้วรวมผล 2.5 ms เทียบกับ `Seq Scan` 8 ms ข้างบน ([docs](https://www.postgresql.org/docs/18/indexes-multicolumn.html), [release notes](https://www.postgresql.org/docs/18/release-18.html))
+
+skip scan คุ้มเฉพาะเมื่อ column นำหน้ามี **ค่าไม่ซ้ำน้อย** ให้ column นำหน้าเป็น `isbn` ที่มีค่าไม่ซ้ำ 200 000 แล้ว planner กลับไปใช้ sequential scan:
+
+```sql
+-- sql/composite-high-cardinality.sql
+-- same idea, but the leading column now has 200 000 distinct values
+DROP INDEX books_author_published_idx;
+CREATE INDEX books_isbn_published_idx ON books (isbn, published);
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM books WHERE published = 2000;
+DROP INDEX books_isbn_published_idx;
+```
+
+```text
+DROP INDEX
+CREATE INDEX
+                                                 QUERY PLAN                                                 
+------------------------------------------------------------------------------------------------------------
+ Seq Scan on books  (cost=0.00..4970.00 rows=2647 width=70) (actual time=0.013..8.087 rows=2762.00 loops=1)
+   Filter: (published = 2000)
+   Rows Removed by Filter: 197238
+   Buffers: shared hit=2470
+ Planning:
+   Buffers: shared hit=118 read=1
+ Planning Time: 0.363 ms
+ Execution Time: 8.211 ms
+(8 rows)
+
+DROP INDEX
+```
+
+กฎที่ใช้ได้จริงสำหรับ PostgreSQL 18 คือ: วาง column ที่คุณกรองด้วย `=` เสมอไว้ก่อน และมอง query "column ที่สองอย่างเดียว" ว่าเร็วเฉพาะเมื่อ column แรกมีค่าไม่ซ้ำน้อย (status, type, region) ก่อน 18 มันช้าเสมอ
+
+## Unique index
+
+unique index บังคับกฎด้วย การ insert row ที่สองที่มี `isbn` เดียวกันล้ม:
+
+```sql
+-- @expect-error 23505
+INSERT INTO books (isbn, title, author_id, published) VALUES (md5('12345'), 'A Duplicate Isbn', 1, 2000);
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "books_isbn_key"
+DETAIL:  Key (isbn)=(827ccb0eea8a706c4c34a16891f84e7b) already exists.
+```
+
+`NULL` หลายตัวอนุญาตใน column unique โดยค่าเริ่มต้น เพราะ `NULL` ไม่เท่ากับ `NULL`; `UNIQUE NULLS NOT DISTINCT` (PostgreSQL 15+) เปลี่ยนเรื่องนี้:
+
+```sql
+-- sql/unique-nulls.sql
+CREATE TABLE codes (code text UNIQUE);
+INSERT INTO codes VALUES (NULL), (NULL);
+SELECT count(*) AS null_rows FROM codes WHERE code IS NULL;
+CREATE TABLE codes_strict (code text UNIQUE NULLS NOT DISTINCT);
+INSERT INTO codes_strict VALUES (NULL);
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+ null_rows 
+-----------
+         2
+(1 row)
+
+CREATE TABLE
+INSERT 0 1
+```
+
+```sql
+-- @expect-error 23505
+INSERT INTO codes_strict VALUES (NULL);
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "codes_strict_code_key"
+DETAIL:  Key (code)=(null) already exists.
+```
+
+constraint `UNIQUE` หรือ `PRIMARY KEY` สร้าง unique index ให้คุณ: นั่นคือ `books_pkey` ในรายการขนาดข้างบน
+
+## สร้าง index บน table ที่ใช้งานอยู่
+
+`CREATE INDEX` ธรรมดาถือ lock ที่บล็อกการเขียนลง table (การอ่านยังทำได้) จนกว่าจะ build เสร็จ บน table ใหญ่อาจเป็นนาที นี่คือกรณีสอง session: session A สร้าง index, session B ลอง `UPDATE` หลังจากนั้น 0.1 วินาที และรอจน build จบ:
+
+```text
+-- session A: script
+\timing on
+CREATE INDEX books_expr_plain ON books (md5(title || isbn || title));
+-- session A: psql output
+Timing is on.
+CREATE INDEX
+Time: 247.257 ms
+
+-- session B (starts 0.1 s later): script
+\o /dev/null
+SELECT pg_sleep(0.1);
+\o
+\timing on
+UPDATE books SET copies_sold = copies_sold + 1 WHERE id = 1;
+-- session B: psql output
+Timing is on.
+UPDATE 1
+Time: 145.352 ms
+```
+
+`CREATE INDEX CONCURRENTLY` build โดยไม่บล็อกการเขียน แลกกับงานที่มากขึ้นและการ scan table สองรอบ `UPDATE` เดียวกันที่รันระหว่าง build แบบ concurrent เสร็จใน 2 ms ([docs](https://www.postgresql.org/docs/18/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY)):
+
+```text
+-- session A: script
+\timing on
+CREATE INDEX CONCURRENTLY books_expr_conc ON books (md5(title || isbn || title));
+-- session A: psql output
+Timing is on.
+CREATE INDEX
+Time: 272.840 ms
+
+-- session B (same script as above): psql output
+Timing is on.
+UPDATE 1
+Time: 1.990 ms
+```
+
+ข้อควรระวัง: ถ้า build แบบ concurrent ล้มเหลว มันทิ้ง index ที่ **invalid** ไว้ ตรงนี้เราเพิ่ม row ที่ title ซ้ำกับที่มีอยู่ แล้วลอง build unique index บน `title`:
+
+```sql
+-- @expect-error 23505
+INSERT INTO books (isbn, title, author_id, published) VALUES ('dup-title-isbn', (SELECT title FROM books WHERE id = 1), 1, 2000);
+CREATE UNIQUE INDEX CONCURRENTLY books_title_uniq ON books (title);
+```
+
+```text
+INSERT 0 1
+ERROR:  could not create unique index "books_title_uniq"
+DETAIL:  Key (title)=(The eccbc87e4b5c) is duplicated.
+```
+
+```sql
+-- sql/invalid-index.sql
+SELECT indexrelid::regclass AS index, indisvalid, indisready
+FROM pg_index
+WHERE indrelid = 'books'::regclass
+ORDER BY 1;
+DROP INDEX books_title_uniq;
+DELETE FROM books WHERE isbn = 'dup-title-isbn';
+```
+
+```text
+      index       | indisvalid | indisready 
+------------------+------------+------------
+ books_pkey       | t          | t
+ books_isbn_key   | t          | t
+ books_title_idx  | t          | t
+ books_title_uniq | f          | f
+(4 rows)
+
+DROP INDEX
+DELETE 1
+```
+
+`books_title_uniq` ยังอยู่ (และยังเพิ่มต้นทุนตอนเขียน!) แต่ `indisvalid` เป็น `f` จึงไม่มี query ใดใช้ drop แล้วลองใหม่ `pg_index.indisvalid = false` คือ query ที่ต้องจำหลัง `CONCURRENTLY` ที่ล้มเหลว
+
+## ต้นทุนของ index ตอนเขียน
+
+ทุก `INSERT` ต้องเพิ่ม entry ให้ทุก index 200 000 row เดียวกัน insert ลงสาม table รูปร่างเดียวกันที่มี index แบบ column เดียว 0, 1 และ 5 ตัว:
+
+```sql
+-- sql/write-cost.sql
+CREATE TABLE w0 (a int, b int, c int, d text, e text);
+CREATE TABLE w1 (a int, b int, c int, d text, e text);
+CREATE TABLE w5 (a int, b int, c int, d text, e text);
+CREATE INDEX ON w1 (a);
+CREATE INDEX ON w5 (a);
+CREATE INDEX ON w5 (b);
+CREATE INDEX ON w5 (c);
+CREATE INDEX ON w5 (d);
+CREATE INDEX ON w5 (e);
+\timing on
+INSERT INTO w0 SELECT g, g % 1000, g % 77, md5(g::text), md5((g + 1)::text) FROM generate_series(1, 200000) g;
+INSERT INTO w1 SELECT g, g % 1000, g % 77, md5(g::text), md5((g + 1)::text) FROM generate_series(1, 200000) g;
+INSERT INTO w5 SELECT g, g % 1000, g % 77, md5(g::text), md5((g + 1)::text) FROM generate_series(1, 200000) g;
+\timing off
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+Timing is on.
+INSERT 0 200000
+Time: 383.832 ms
+INSERT 0 200000
+Time: 507.583 ms
+INSERT 0 200000
+Time: 1994.141 ms (00:01.994)
+Timing is off.
+```
+
+384 ms เมื่อไม่มี index, 508 ms กับหนึ่งตัว, **1 994 ms กับห้าตัว**: ช้าลงราว 5.2 เท่าสำหรับ row ชุดเดียวกัน การอ่านเร็วขึ้น การเขียนจ่ายราคานั้น index ที่ไม่มี query ใดใช้คือต้นทุนล้วน ๆ และ PostgreSQL บอกได้ว่าตัวไหน:
+
+```sql
+-- sql/index-usage.sql
+CREATE INDEX books_copies_idx ON books (copies_sold);  -- nothing will ever use this one
+SELECT pg_stat_force_next_flush();
+SELECT indexrelname, idx_scan, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+FROM pg_stat_user_indexes
+WHERE relname = 'books'
+ORDER BY idx_scan, indexrelname;
+```
+
+```text
+CREATE INDEX
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+   indexrelname   | idx_scan |  size   
+------------------+----------+---------
+ books_copies_idx |        0 | 1400 kB
+ books_pkey       |        1 | 4408 kB
+ books_isbn_key   |        2 | 11 MB
+ books_title_idx  |        2 | 7960 kB
+(4 rows)
+```
+
+`idx_scan` นับจำนวนครั้งที่แต่ละ index ถูกใช้ตั้งแต่สถิติถูกรีเซ็ตครั้งล่าสุด `books_copies_idx` (ไม่เคยถูก query) มี 0 scan และเป็นน้ำหนักเปล่า 1.4 MB ในทุกการเขียน ก่อน drop อะไรก็ตาม ให้ดูทราฟฟิกครบรอบธุรกิจ และตรวจว่า index ไม่ได้รองรับ constraint (`books_pkey` และ `books_isbn_key` รองรับอยู่)
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอ endpoint ค้นหา title ที่ match แบบ prefix มันสร้าง index บน `title` และเขียนคอมเมนต์ว่า index รองรับการค้นหา:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "title search endpoint: prefix match, served by the index on title"
+CREATE INDEX books_title_idx ON books (title);
+
+SELECT id, title FROM books WHERE title LIKE 'The 3f9a%';`}>
+
+index มีอยู่และ query ถูกต้อง แต่ plan บอกอีกอย่าง ฐานข้อมูลนี้ใช้ collation `en_US.utf8` และ B-tree ธรรมดาบน `text` เรียงตามกฎของ collation นั้น ซึ่งไม่ตรงกับช่วงแบบทีละตัวอักษรที่ `LIKE 'The 3f9a%'` ต้องการ planner จึงใช้ไม่ได้:
+
+```sql
+-- sql/stb-wrong.sql
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, title FROM books WHERE title LIKE 'The 3f9a%';
+```
+
+```text
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Seq Scan on books (actual time=6.720..10.741 rows=2.00 loops=1)
+   Filter: (title ~~ 'The 3f9a%'::text)
+   Rows Removed by Filter: 199998
+   Buffers: shared hit=2470
+ Planning:
+   Buffers: shared hit=105 read=5
+ Planning Time: 0.394 ms
+ Execution Time: 10.781 ms
+(8 rows)
+```
+
+`Seq Scan`, 10.8 ms, ทิ้ง 199 998 row เพื่อคืน 2 วิธีแก้คือ index ที่ใช้ operator class `text_pattern_ops` ซึ่งเรียงตามตัวอักษรอย่างเคร่งครัด ตอนนี้ `LIKE 'prefix%'` กลายเป็น range (`Index Cond: ((title ~>=~ 'The 3f9a') AND (title ~<~ 'The 3f9b'))`) ([docs](https://www.postgresql.org/docs/18/indexes-opclass.html)):
+
+```sql
+-- sql/stb-fixed.sql
+CREATE INDEX books_title_pattern_idx ON books (title text_pattern_ops);
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, title FROM books WHERE title LIKE 'The 3f9a%';
+```
+
+```text
+CREATE INDEX
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Index Scan using books_title_pattern_idx on books (actual time=0.045..0.052 rows=2.00 loops=1)
+   Index Cond: ((title ~>=~ 'The 3f9a'::text) AND (title ~<~ 'The 3f9b'::text))
+   Filter: (title ~~ 'The 3f9a%'::text)
+   Index Searches: 1
+   Buffers: shared hit=2 read=3
+ Planning:
+   Buffers: shared hit=133 read=4
+ Planning Time: 0.647 ms
+ Execution Time: 0.084 ms
+(9 rows)
+```
+
+ทางเลือกคือประกาศ column (หรือ index) ด้วย `COLLATE "C"` ทั้งสองแบบไม่ช่วย `ILIKE` หรือ `%contains%` ซึ่งต้องใช้ trigram index
+
+</SpotTheBug>
+
+## Mental Model
+
+index คือสำเนาที่เรียงลำดับของบาง column แต่ละ entry ชี้ไปที่ row ใน table อะไรก็ตามที่ตอบได้ด้วย "หาตำแหน่งนี้ในลำดับ แล้วเดินตามไป" เร็ว: equality, range, prefix (เมื่อลำดับตรงกัน), `ORDER BY`, `MIN`/`MAX` อย่างอื่นถอยกลับไปอ่าน table ทุกการเขียนต้องอัปเดตทุก index index จึงเป็นการแลกเปลี่ยน: อ่านถูกลง เขียนช้าลงและใช้ดิสก์มากขึ้น
 
 ## เคล็ดลับและข้อควรระวัง
 
-- B-tree คือค่าเริ่มต้นและเป็นตัวเลือกที่ถูกต้องสำหรับเกือบทุกอย่าง ทั้ง equality, range, การ sort และ prefix match จงหันไปใช้ชนิดอื่นเฉพาะเมื่อ B-tree ทำงานนั้นไม่ได้จริง ๆ เท่านั้น
-- index ทุกตัวทำให้การเขียนช้าลงและใช้พื้นที่ดิสก์ เพราะแต่ละ `INSERT`, `UPDATE` และ `DELETE` ต้องคอยดูแล index ทุกตัว อย่าสร้าง index ให้ทุก column
-- สำหรับ composite index จงวาง column ที่เลือกเฉพาะเจาะจงที่สุดและถูกกรองบ่อยที่สุดไว้ก่อน และอย่าลืมกฎ left-prefix เมื่อตัดสินใจเรื่องลำดับของ column
-- composite index ที่ถูกเลือกมาอย่างดีเพียงตัวเดียวสามารถแทนที่ index column เดียวหลาย ๆ ตัวได้ แต่ก็ทดแทนไม่ได้เมื่อ query ของคุณกรองด้วย column ที่ตามหลังเพียงอย่างเดียว
-- การสร้าง index บน table ขนาดใหญ่ที่มีงานคึกคักจะ lock table นั้นไม่ให้เขียน จงใช้ `CREATE INDEX CONCURRENTLY` ในงาน production เพื่อหลีกเลี่ยงการบล็อก โดยแลกกับการสร้างที่ช้าลง
+- index column ที่คุณ filter, join และ sort โดยเรียงตามความสำคัญนั้น primary key และ unique constraint ถูก index อยู่แล้ว
+- column foreign key **ไม่** ถูก index อัตโนมัติ: index ถ้าคุณ join ด้วยหรือลบจาก table แม่ ([docs](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK))
+- สำหรับ composite index วาง column ที่เปรียบเทียบด้วย `=` เสมอไว้ก่อน ตั้งแต่ PostgreSQL 18 query ที่ข้าม column นำหน้ายังใช้ index ผ่าน skip scan ได้ แต่เฉพาะเมื่อ column นั้นมีค่าไม่ซ้ำน้อย
+- ตรวจ `EXPLAIN` ก่อนและหลัง planner ละเลย index เมื่อการ scan ถูกกว่า (table เล็ก หรือ query คืน row เป็นสัดส่วนมาก)
+- สร้างบน table ที่ใช้งานอยู่ด้วย `CREATE INDEX CONCURRENTLY` และตรวจ `indisvalid` ทีหลัง
+- ดู `pg_stat_user_indexes.idx_scan` หา index ที่ไม่เคยถูกใช้ แต่ละตัวทำให้ทุกการเขียนช้าลง
 
-<Callout title="ทำ index ให้กับ query ที่คุณใช้งานจริง">
-อย่าทำ index แบบคาดเดา จงดูที่ส่วน `WHERE`, `JOIN` และ `ORDER BY` ที่แอปพลิเคชันของคุณใช้งานจริง ๆ แล้วจึงเพิ่ม B-tree index ที่รองรับสิ่งเหล่านั้น index ที่ไม่มีใครใช้คือภาระล้วน ๆ เพราะเสียต้นทุนทุกครั้งที่เขียน แต่ไม่ได้คืนอะไรให้เลยตอนอ่าน
+<Callout title="Index ไม่ฟรี">
+index ทำให้การอ่านบน column นั้นเร็วขึ้นและทำให้ทุกการเขียนช้าลง อีกทั้งกินดิสก์ (ที่นี่ index ของ `isbn` ใหญ่เกินครึ่งของ table ห้า index ทำให้ bulk insert ช้าลงราว 5.2 เท่า) เพิ่ม index สำหรับ query ที่รันจริง และลบตัวที่ไม่มีใครใช้
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| เพิ่ม index ใหม่ | `SELECT`/`WHERE`/`JOIN` ที่ตรงกับ column นั้นเร็วขึ้นมาก | ทุก `INSERT`, `UPDATE`, `DELETE` ต้อง update index ด้วย เขียนช้าลงและใช้พื้นที่ดิสก์เพิ่ม |
-| ไม่เพิ่ม index (พึ่ง seq scan) | เขียนเร็ว ไม่มี index ให้ดูแล | อ่านช้าลงเมื่อ table โตขึ้น โดยเฉพาะ query ที่เลือกเฉพาะเจาะจง |
-| `CREATE INDEX` ธรรมดา | สร้างเร็วกว่า | lock table ไม่ให้เขียนระหว่างสร้าง |
-| `CREATE INDEX CONCURRENTLY` | ไม่ lock การเขียนระหว่างสร้าง | สร้างช้ากว่าและใช้ทรัพยากรมากกว่า อาจล้มเหลวและทิ้ง index ที่ invalid ไว้ |
+| เพิ่ม B-tree index | จาก 9.1 ms เหลือ 0.06 ms ตอน lookup; ไม่ต้อง sort สำหรับ `ORDER BY ... LIMIT` | 11 MB สำหรับ index `isbn`; เขียนช้าลง (5 index: 384 ms เป็น 1 994 ms สำหรับ insert 200 000) |
+| Composite `(a, b)` แทนสอง index | index เดียวรองรับ `a`, `a AND b` และ (PG 18, `a` ไม่ซ้ำน้อย) `b` | index ใหญ่ขึ้น; ไร้ประโยชน์กับ `b` อย่างเดียวเมื่อ `a` มีค่าไม่ซ้ำมาก |
+| `text_pattern_ops` | ทำให้ `LIKE 'prefix%'` ใช้ index ได้ | ต้องมี index ที่สองถ้าต้องการ ordering/range ปกติบน column เดียวกัน |
+| `CREATE INDEX CONCURRENTLY` | ไม่บล็อกการเขียน | ช้ากว่า scan table สองรอบ และทิ้ง invalid index ได้เมื่อล้มเหลว |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ทำ index ให้ทุก column "เผื่อไว้"** — ทุก index ที่ไม่ถูกใช้งานจริงยังคงสร้างต้นทุนกับทุกการเขียน จงดูที่ `WHERE`, `JOIN` และ `ORDER BY` ที่แอปพลิเคชันใช้งานจริงก่อนเพิ่ม index
-- **ไม่เคยลบ index ที่ไม่ได้ใช้** — index เก่าที่ไม่มี query ไหนพึ่งพาแล้วยังคงกินพื้นที่และทำให้การเขียนช้าลงต่อไปเรื่อย ๆ จงตรวจสอบด้วย `pg_stat_user_indexes` เป็นระยะแล้วพิจารณา drop ตัวที่ไม่ถูกใช้
-- **สร้าง index บน table ขนาดใหญ่ที่ใช้งานจริงโดยไม่ใช้ `CONCURRENTLY`** — `CREATE INDEX` ธรรมดาจับ lock ที่บล็อกการเขียนตลอดการสร้าง บน table ใหญ่นั่นอาจหมายถึงดาวน์ไทม์ยาวนาน ใน production จงใช้ `CREATE INDEX CONCURRENTLY` เสมอ
-
-> 💡 ตัวอย่างจากของจริง
->
-> **[กระบวนการ database review ของ GitLab](https://docs.gitlab.com/development/database_review/)** — บังคับให้ต้องมี database review อย่างเป็นทางการ พร้อมแนบ query plan ก่อน merge การเปลี่ยนแปลง schema หรือ index ใหม่เข้า production เพราะ index ที่ไม่ถูกใช้งานสร้างต้นทุนต่อการเขียนและพื้นที่เก็บข้อมูลอย่างเงียบ ๆ โดยไม่มีใครสังเกต
->
-> **[pganalyze](https://pganalyze.com/)** — เครื่องมือ monitoring ที่สร้างขึ้นมาเพื่อดู index usage และประสิทธิภาพ query ตามช่วงเวลาโดยเฉพาะ ทำให้ทีมเห็นได้ชัดว่า index ตัวไหนควรเก็บไว้และตัวไหนควร drop
+- **"B-tree รองรับ `LIKE 'prefix%'` เสมอ"** ไม่ใช่ใต้ `en_US.utf8`: index ธรรมดาได้ `Seq Scan`, `text_pattern_ops` ได้ `Index Scan`
+- **"composite index ช่วย query บน column ที่สองไม่ได้"** จริงก่อน PostgreSQL 18 เมื่อค่านำหน้าไม่ซ้ำน้อย skip scan ทำให้ใช้ได้ (`Index Searches: 22`) และเมื่อมากมันไม่ได้ผล
+- **"index มากยิ่งดี"** ห้า index ทำให้ insert เดียวกันช้าลง 5.2 เท่า
+- **"CREATE INDEX CONCURRENTLY ที่ล้มเหลวไม่ทิ้งอะไรไว้"** มันทิ้ง invalid index ที่ยังเสียต้นทุนตอนเขียน
+- **"primary key ต้องมี index เพิ่ม"** `PRIMARY KEY` และ `UNIQUE` สร้างให้แล้ว
 
 export const quizBtree = [
   {
-    q: 'CREATE INDEX สร้าง index ชนิดใดเมื่อคุณไม่ได้ระบุชนิด?',
+    q: 'index ชนิดใดเป็นค่าเริ่มต้นใน PostgreSQL?',
     options: ['Hash', 'GIN', 'B-tree', 'BRIN'],
     answer: 2,
+    explain: 'CREATE INDEX ที่ไม่มี USING สร้าง B-tree ซึ่งรองรับ equality, range, การเรียงลำดับ และ (ด้วย operator class ที่ถูก) การ match แบบ prefix',
   },
   {
-    q: 'index บน (author_id, published) สามารถรองรับ query ใดได้อย่างมีประสิทธิภาพ?',
+    q: 'บน table 200 000 row index ธรรมดาบน `title` ไม่รองรับ `WHERE title LIKE \'The 3f9a%\'` ใต้ en_US.utf8 อะไรแก้ได้?',
     options: [
-      'WHERE published > 2000',
-      'WHERE author_id = 4',
-      'WHERE title LIKE \'%orchard\'',
-      'ไม่มีข้อใดเลย',
+      'hash index',
+      'index ที่ใช้ operator class text_pattern_ops (หรือ COLLATE "C")',
+      'รัน ANALYZE อีกครั้ง',
+      'ไม่มีอะไรแก้ได้',
     ],
     answer: 1,
+    explain: 'text_pattern_ops เรียงตามตัวอักษร prefix จึงกลายเป็น range: Index Cond (title ~>=~ ... AND title ~<~ ...) index ธรรมดาได้ Seq Scan (10.8 ms)',
   },
   {
-    q: 'การเพิ่ม UNIQUE ให้ index ทำอะไรเพิ่มเติมนอกเหนือจากการเร่งความเร็วการค้นหา?',
+    q: 'query กรองเฉพาะ `published` ซึ่งเป็น column ที่สองของ index `(author_id, published)` และ `author_id` มีค่าไม่ซ้ำ 20 ค่า บน PostgreSQL 18 จะเกิดอะไรขึ้น?',
     options: [
-      'บีบอัด index',
-      'ป้องกันไม่ให้สอง row มีค่าที่ทำ index เดียวกัน',
-      'ทำให้การเขียนเร็วขึ้น',
-      'ทำให้ค้นหา LIKE แบบ leading-wildcard ได้',
+      'ไม่เคยใช้ index',
+      'ใช้ผ่าน skip scan ได้ (ค้นราวหนึ่งครั้งต่อผู้เขียน Index Searches: 22)',
+      'PostgreSQL จัดลำดับ column ของ index ใหม่',
+      'query ล้ม',
     ],
     answer: 1,
+    explain: 'skip scan เป็นของใหม่ใน 18 และคุ้มเฉพาะเมื่อค่านำหน้าไม่ซ้ำน้อย เมื่อ isbn (ไม่ซ้ำ 200 000 ค่า) เป็น column นำหน้า plan เป็น Seq Scan',
+  },
+  {
+    q: 'CREATE UNIQUE INDEX CONCURRENTLY ล้มด้วย error ค่าซ้ำ table อยู่ในสถานะใด?',
+    options: [
+      'ไม่เปลี่ยน: build ที่ล้มถูก rollback หมด',
+      'มี invalid index เหลืออยู่ (pg_index.indisvalid = false) และต้อง drop',
+      'table ถูก lock จนกว่าจะ restart',
+      'row ซ้ำถูกลบอัตโนมัติ',
+    ],
+    answer: 1,
+    explain: 'CONCURRENTLY รันใน transaction ไม่ได้ build ที่ล้มจึงทิ้ง books_title_uniq ไว้ด้วย indisvalid = f (และ indisready = f)',
+  },
+  {
+    q: 'insert 200 000 row ลง table ที่มี index 0, 1 และ 5 ตัว บทเรียนวัดได้อะไร?',
+    options: [
+      'ไม่ต่างกัน: index กระทบเฉพาะการอ่าน',
+      'ประมาณ 384 ms, 508 ms และ 1 994 ms ตามลำดับ ดังนั้นแต่ละ index ทำให้เขียนช้าลง',
+      'มี index มากขึ้น การเขียนเร็วขึ้น',
+      'เฉพาะ primary key ที่กระทบการเขียน',
+    ],
+    answer: 1,
+    explain: 'ทุก insert ต้องอัปเดตทุก index ห้า index ทำให้การโหลดเดียวกันช้าลงราว 5.2 เท่าบน Mac เครื่องนี้ pg_stat_user_indexes.idx_scan แสดงตัวที่ไม่เคยถูกใช้',
   },
 ];
 
