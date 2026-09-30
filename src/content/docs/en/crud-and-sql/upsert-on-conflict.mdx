@@ -1,6 +1,6 @@
 ---
 title: Upsert with ON CONFLICT
-description: Insert a row or update it if it already exists, in one statement — PostgreSQL upsert with ON CONFLICT, the EXCLUDED pseudo-table, and DO NOTHING.
+description: Insert-or-update in one atomic statement — INSERT ... ON CONFLICT with DO UPDATE and EXCLUDED, DO NOTHING, and why it beats check-then-insert.
 sidebar:
   order: 5
 ---
@@ -10,13 +10,107 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 Sometimes you want to insert a row, but if a matching one already exists you would rather update it than fail. Doing this by hand — check first, then insert or update — is racy: two requests can both see "no row" and both try to insert. PostgreSQL solves this atomically with `INSERT ... ON CONFLICT`, often called **upsert** (update plus insert).
 
-For these examples, imagine the `books` table has a unique constraint on `title`, so no two books can share the exact same title.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The single-session examples are `sql` fences run top to bottom in one empty database. The concurrency examples are real two-session runs (two `psql` processes started at the same time), printed exactly as they came back; timings are from this Mac.
+
+## Why not check first?
+
+Here is check-then-insert with two sessions, on a table with no unique constraint. Each checks that the email is unused, thinks for a second, and inserts. Both saw zero rows, so both insert:
+
+```text
+-- session A: script
+BEGIN;
+SELECT count(*) AS a_sees FROM signups WHERE email = 'ada@example.com';
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+INSERT INTO signups (email) VALUES ('ada@example.com');
+COMMIT;
+-- session A: psql output
+BEGIN
+ a_sees 
+--------
+      0
+(1 row)
+
+INSERT 0 1
+COMMIT
+
+-- session B (same script, run at the same time): script
+BEGIN;
+SELECT count(*) AS b_sees FROM signups WHERE email = 'ada@example.com';
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+INSERT INTO signups (email) VALUES ('ada@example.com');
+COMMIT;
+-- session B (same script, run at the same time): psql output
+BEGIN
+ b_sees 
+--------
+      0
+(1 row)
+
+INSERT 0 1
+COMMIT
+
+-- afterwards, from any session:
+SELECT email, count(*) FROM signups GROUP BY 1;
+      email      | count 
+-----------------+-------
+ ada@example.com |     2
+(1 row)
+```
+
+Two rows with the same email. This is the **race** that a unique constraint plus a single atomic statement removes.
+
+## The unique constraint
+
+For these examples the `books` table gets a unique constraint on `title`, so no two books can share the exact same title. A plain duplicate insert now fails with `23505`:
 
 ```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+```sql
+-- sql/books-title-unique.sql
 ALTER TABLE books ADD CONSTRAINT books_title_key UNIQUE (title);
+```
+
+```sql
+-- @expect-error 23505
+INSERT INTO books (title, author_id, published) VALUES ('The Glass Orchard', 1, 2018);
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "books_title_key"
+DETAIL:  Key (title)=(The Glass Orchard) already exists.
 ```
 
 ## How upsert decides
@@ -24,28 +118,31 @@ ALTER TABLE books ADD CONSTRAINT books_title_key UNIQUE (title);
 When the insert would violate the named unique constraint, PostgreSQL does not error out; instead it runs the action in your `ON CONFLICT` clause — either updating the existing row or quietly doing nothing.
 
 export const upsertDiagram = `flowchart TD
-  A[INSERT row] --> B{Conflicts with unique constraint?}
-  B -- No --> C[Insert the new row]
-  B -- Yes --> D{ON CONFLICT action}
-  D -- DO UPDATE --> E[Update the existing row]
-  D -- DO NOTHING --> F[Leave the existing row unchanged]`;
+  A["INSERT row"] --> B{"Conflicts with unique constraint?"}
+  B -- No --> C["Insert the new row"]
+  B -- Yes --> D{"ON CONFLICT action"}
+  D -- DO UPDATE --> E["Update the existing row"]
+  D -- DO NOTHING --> F["Leave the existing row unchanged"]`;
 
 <Mermaid code={upsertDiagram} title="What ON CONFLICT does on a duplicate" />
 
 ## DO UPDATE with EXCLUDED
 
-You name the column (or constraint) that defines a conflict, then describe how to update. Inside the update, the special `EXCLUDED` table holds the values you *tried* to insert, so you can copy them into the existing row.
+You name the column (or constraint) that defines a conflict, then describe how to update. Inside the update, the special `EXCLUDED` table holds the values you *tried* to insert, so you can copy them into the existing row. Each example below is in a rolled-back transaction, so the dataset stays the same.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/upsert-do-update.sql
+    BEGIN;
     INSERT INTO books (title, author_id, published, copies_sold)
-    VALUES ('The Glass Orchard', 1, 2005, 1200)
+    VALUES ('The Glass Orchard', 1, 2018, 1300)
     ON CONFLICT (title)
     DO UPDATE SET
       published   = EXCLUDED.published,
       copies_sold = EXCLUDED.copies_sold
     RETURNING id, title, copies_sold;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -57,7 +154,7 @@ You name the column (or constraint) that defines a conflict, then describe how t
        DO UPDATE SET published = EXCLUDED.published,
                      copies_sold = EXCLUDED.copies_sold
        RETURNING id, title, copies_sold`,
-      ['The Glass Orchard', 1, 2005, 1200],
+      ['The Glass Orchard', 1, 2018, 1300],
     );
     ```
   </TabItem>
@@ -72,7 +169,7 @@ You name the column (or constraint) that defines a conflict, then describe how t
                       copies_sold = EXCLUDED.copies_sold
         RETURNING id, title, copies_sold
         """,
-        ("The Glass Orchard", 1, 2005, 1200),
+        ("The Glass Orchard", 1, 2018, 1300),
     )
     ```
   </TabItem>
@@ -85,7 +182,7 @@ You name the column (or constraint) that defines a conflict, then describe how t
          DO UPDATE SET published = EXCLUDED.published,
                        copies_sold = EXCLUDED.copies_sold
          RETURNING id, title, copies_sold`,
-        "The Glass Orchard", 1, 2005, 1200)
+        "The Glass Orchard", 1, 2018, 1300)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -100,26 +197,106 @@ You name the column (or constraint) that defines a conflict, then describe how t
     )
     .bind("The Glass Orchard")
     .bind(1_i64)
-    .bind(2005_i32)
-    .bind(1200_i32)
+    .bind(2018_i32)
+    .bind(1300_i32)
     .fetch_all(&pool)
     .await?;
     ```
   </TabItem>
 </Tabs>
 
-Because a book titled "The Glass Orchard" already exists, the insert turns into an update of that row:
-
 ```text
- id |       title       | copies_sold
+BEGIN
+ id |       title       | copies_sold 
 ----+-------------------+-------------
-  1 | The Glass Orchard |        1200
+  2 | The Glass Orchard |        1300
 (1 row)
+
+INSERT 0 1
+ROLLBACK
 ```
 
-Run the same statement with a brand-new title and there is no conflict, so it inserts normally and returns the freshly generated id.
+Because a book titled "The Glass Orchard" already exists (id 2), the insert turns into an update of that row. Run the same statement with a brand-new title and there is no conflict, so it inserts normally and returns the freshly generated id. That id is 7, not 5: the failed insert above and the earlier attempts each consumed an identity value (more on that below).
+
+```sql
+-- sql/upsert-new-row.sql
+BEGIN;
+INSERT INTO books (title, author_id, published, copies_sold)
+VALUES ('Salt Road', 3, 2024, 10)
+ON CONFLICT (title)
+DO UPDATE SET copies_sold = EXCLUDED.copies_sold
+RETURNING id, title, copies_sold;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |   title   | copies_sold 
+----+-----------+-------------
+  7 | Salt Road |          10
+(1 row)
+
+INSERT 0 1
+ROLLBACK
+```
 
 **In pgAdmin:** run the statement twice in the Query Tool — the first run inserts, the second hits the conflict and updates. The Data Output grid shows the returned row each time.
+
+How do you tell an insert from an update in the result? PostgreSQL 18's `RETURNING old.x, new.x` does it: `old` is NULL when the row was inserted. The older trick is `xmax = 0` (a system column that is 0 for a freshly inserted row), shown in the last column:
+
+```sql
+-- sql/upsert-returning-old-new.sql
+BEGIN;
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('The Glass Orchard', 1, 2018, 1300),
+  ('Salt Road',         3, 2024,   10)
+ON CONFLICT (title)
+DO UPDATE SET copies_sold = EXCLUDED.copies_sold
+RETURNING title, old.copies_sold AS was, new.copies_sold AS now, (xmax = 0) AS inserted;
+ROLLBACK;
+```
+
+```text
+BEGIN
+       title       | was  | now  | inserted 
+-------------------+------+------+----------
+ The Glass Orchard | 1250 | 1300 | f
+ Salt Road         |      |   10 | t
+(2 rows)
+
+INSERT 0 2
+ROLLBACK
+```
+
+A `WHERE` on `DO UPDATE` limits when the update happens. Below, the conflict is detected, the guard is false, and nothing changes: no row is updated and `RETURNING` returns nothing (so a `RETURNING` on an upsert can be empty even though a conflict occurred):
+
+```sql
+-- sql/upsert-where-guard.sql
+BEGIN;
+INSERT INTO books (title, author_id, published, copies_sold)
+VALUES ('The Glass Orchard', 1, 2018, 100)
+ON CONFLICT (title)
+DO UPDATE SET copies_sold = EXCLUDED.copies_sold
+WHERE EXCLUDED.copies_sold > books.copies_sold
+RETURNING id, title, copies_sold;
+SELECT copies_sold FROM books WHERE id = 2;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id | title | copies_sold 
+----+-------+-------------
+(0 rows)
+
+INSERT 0 0
+ copies_sold 
+-------------
+        1250
+(1 row)
+
+ROLLBACK
+```
 
 ## DO NOTHING
 
@@ -129,7 +306,7 @@ If you only want to insert when the row is new, and silently skip duplicates, us
   <TabItem label="psql">
     ```sql
     INSERT INTO books (title, author_id, published)
-    VALUES ('The Glass Orchard', 1, 2005)
+    VALUES ('The Glass Orchard', 1, 2018)
     ON CONFLICT (title) DO NOTHING;
     ```
   </TabItem>
@@ -137,7 +314,7 @@ If you only want to insert when the row is new, and silently skip duplicates, us
     ```js
     const res = await pool.query(
       'INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING',
-      ['The Glass Orchard', 1, 2005],
+      ['The Glass Orchard', 1, 2018],
     );
     console.log(res.rowCount); // 0 when the row already existed
     ```
@@ -146,7 +323,7 @@ If you only want to insert when the row is new, and silently skip duplicates, us
     ```python
     cur.execute(
         "INSERT INTO books (title, author_id, published) VALUES (%s, %s, %s) ON CONFLICT (title) DO NOTHING",
-        ("The Glass Orchard", 1, 2005),
+        ("The Glass Orchard", 1, 2018),
     )
     # cur.rowcount is 0 when nothing was inserted
     ```
@@ -155,7 +332,7 @@ If you only want to insert when the row is new, and silently skip duplicates, us
     ```go
     tag, err := conn.Exec(ctx,
         "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING",
-        "The Glass Orchard", 1, 2005)
+        "The Glass Orchard", 1, 2018)
     // tag.RowsAffected() is 0 when the row already existed
     ```
   </TabItem>
@@ -166,7 +343,7 @@ If you only want to insert when the row is new, and silently skip duplicates, us
     )
     .bind("The Glass Orchard")
     .bind(1_i64)
-    .bind(2005_i32)
+    .bind(2018_i32)
     .execute(&pool)
     .await?;
     // result.rows_affected() is 0 when nothing was inserted
@@ -174,14 +351,333 @@ If you only want to insert when the row is new, and silently skip duplicates, us
   </TabItem>
 </Tabs>
 
-When the row already exists, zero rows are affected; when it is new, one row is inserted.
+When the row already exists, zero rows are affected (`INSERT 0 0`) and `RETURNING` is empty; when it is new, one row is inserted (`INSERT 0 1`) and its id comes back. The second statement inserts a new book, then the third removes it again:
+
+```sql
+-- sql/upsert-do-nothing.sql
+INSERT INTO books (title, author_id, published)
+VALUES ('The Glass Orchard', 1, 2018)
+ON CONFLICT (title) DO NOTHING
+RETURNING id;
+INSERT INTO books (title, author_id, published)
+VALUES ('Salt Road', 3, 2024)
+ON CONFLICT (title) DO NOTHING
+RETURNING id;
+DELETE FROM books WHERE title = 'Salt Road';
+```
+
+```text
+ id 
+----
+(0 rows)
+
+INSERT 0 0
+ id 
+----
+ 12
+(1 row)
+
+INSERT 0 1
+DELETE 1
+```
+
+All four drivers, run once against a scratch database (the two variants above, with the row count for `DO NOTHING`):
+
+```text
+$ (each snippet run once against the course dataset in a scratch database, reset before every run)
+[DO UPDATE ... RETURNING] Node.js (pg 8.23.0): [ { id: '2', title: 'The Glass Orchard', copies_sold: 1300 } ]
+[DO UPDATE ... RETURNING] Python (psycopg 3.3.6): [(2, 'The Glass Orchard', 1300)]
+[DO UPDATE ... RETURNING] Go (pgx v5.11.0): [2 The Glass Orchard 1300]
+[DO UPDATE ... RETURNING] Rust (sqlx 0.9.0): 2 The Glass Orchard 1300
+[DO NOTHING (rows affected)] Node.js (pg 8.23.0): 0
+[DO NOTHING (rows affected)] Python (psycopg 3.3.6): 0
+[DO NOTHING (rows affected)] Go (pgx v5.11.0): 0
+[DO NOTHING (rows affected)] Rust (sqlx 0.9.0): 0
+```
+
+## The errors you will meet
+
+`ON CONFLICT DO UPDATE` needs to know which unique constraint defines "the same row". Without a target it is refused (`42601`); with a column that has no unique constraint it fails with `42P10` (`DO NOTHING` may omit the target, but a named target must match a unique index):
+
+```sql
+-- @expect-error 42601
+INSERT INTO books (title, author_id, published) VALUES ('Salt Road', 3, 2024)
+ON CONFLICT DO UPDATE SET published = EXCLUDED.published;
+```
+
+```text
+ERROR:  ON CONFLICT DO UPDATE requires inference specification or constraint name
+LINE 2: ON CONFLICT DO UPDATE SET published = EXCLUDED.published;
+        ^
+HINT:  For example, ON CONFLICT (column_name).
+```
+
+```sql
+-- @expect-error 42P10
+INSERT INTO books (title, author_id, published) VALUES ('Salt Road', 3, 2024)
+ON CONFLICT (published) DO NOTHING;
+```
+
+```text
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+```
+
+One more, when a single statement proposes two rows that hit the same existing row. PostgreSQL will not update one row twice in one command (`21000`):
+
+```sql
+-- @expect-error 21000
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Tidal Notes', 2, 2011, 1),
+  ('Tidal Notes', 2, 2011, 2)
+ON CONFLICT (title) DO UPDATE SET copies_sold = EXCLUDED.copies_sold;
+```
+
+```text
+ERROR:  ON CONFLICT DO UPDATE command cannot affect row a second time
+HINT:  Ensure that no rows proposed for insertion within the same command have duplicate constrained values.
+```
+
+## Upsert and identity gaps
+
+The insert is attempted before the conflict is detected, so a conflicting row still consumes an identity value. Two conflicts here burn ids 3 and 4, and the next real insert gets 5 (`books` above jumped for the same reason). Identity columns are unique, not gapless:
+
+```sql
+-- sql/identity-gap.sql
+CREATE TABLE tags (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, label text NOT NULL UNIQUE);
+INSERT INTO tags (label) VALUES ('sql'), ('postgres');
+INSERT INTO tags (label) VALUES ('sql'), ('postgres') ON CONFLICT (label) DO NOTHING;
+INSERT INTO tags (label) VALUES ('upsert') RETURNING id;
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+INSERT 0 0
+ id 
+----
+  5
+(1 row)
+
+INSERT 0 1
+```
+
+## Atomicity, proved
+
+Same two-session setup as the racy example, now with a primary key and `ON CONFLICT DO NOTHING`. Session A inserts and holds its transaction open for 2 seconds; session B tries the same email half a second later. B does not fail and does not duplicate: it waits for A, then finds the conflict and inserts nothing:
+
+```text
+-- session A: script
+BEGIN;
+INSERT INTO signups (email, name) VALUES ('ada@example.com', 'from A') ON CONFLICT (email) DO NOTHING;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+INSERT 0 1
+COMMIT
+
+-- session B (started 0.5 s later): script
+\o /dev/null
+SELECT pg_sleep(0.5);
+\o
+\timing on
+INSERT INTO signups (email, name) VALUES ('ada@example.com', 'from B') ON CONFLICT (email) DO NOTHING;
+-- session B (started 0.5 s later): psql output
+Timing is on.
+INSERT 0 0
+Time: 1505.512 ms (00:01.506)
+
+-- afterwards:
+SELECT * FROM signups;
+      email      |  name  
+-----------------+--------
+ ada@example.com | from A
+(1 row)
+```
+
+B waited 1.5 seconds (until A committed), reported `INSERT 0 0`, and the table holds one row. That is the guarantee: exactly one insert, whichever session wins.
+
+Isolation level matters. At `REPEATABLE READ`, a transaction works from a snapshot. If the conflicting row was changed by someone else after that snapshot, `DO UPDATE` cannot silently update a row the transaction never saw in that state, so it raises a serialization failure and you must retry the whole transaction ([docs](https://www.postgresql.org/docs/18/transaction-iso.html#XACT-REPEATABLE-READ)):
+
+```text
+-- session A (starts 1 s in): script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE signups SET name = 'changed by A' WHERE email = 'ada@example.com';
+-- session A (starts 1 s in): psql output
+UPDATE 1
+
+-- session B: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT name AS b_snapshot_sees FROM signups;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+INSERT INTO signups (email, name) VALUES ('ada@example.com', 'from B')
+ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name;
+COMMIT;
+-- session B: psql output
+BEGIN
+ b_snapshot_sees 
+-----------------
+ ada
+(1 row)
+
+ERROR:  could not serialize access due to concurrent update
+ROLLBACK
+```
+
+## MERGE: the standard-SQL cousin
+
+`MERGE` (PostgreSQL 15+, with `RETURNING` and `merge_action()` since 17) expresses the same intent in standard SQL and is more general: several WHEN branches, conditions, and DELETE. It does not need a unique constraint. The price is that it is not an atomic upsert:
+
+```sql
+-- sql/merge.sql
+BEGIN;
+MERGE INTO books AS b
+USING (VALUES ('The Glass Orchard', 1, 2018, 1300), ('Salt Road', 3, 2024, 10)) AS v (title, author_id, published, copies_sold)
+ON b.title = v.title
+WHEN MATCHED THEN
+  UPDATE SET copies_sold = v.copies_sold
+WHEN NOT MATCHED THEN
+  INSERT (title, author_id, published, copies_sold) VALUES (v.title, v.author_id, v.published, v.copies_sold)
+RETURNING merge_action() AS action, b.id, b.title, b.copies_sold;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ action | id |       title       | copies_sold 
+--------+----+-------------------+-------------
+ UPDATE |  2 | The Glass Orchard |        1300
+ INSERT | 15 | Salt Road         |          10
+(2 rows)
+
+MERGE 2
+ROLLBACK
+```
+
+Two sessions running the same `MERGE` for a key that does not exist yet both take the NOT MATCHED branch, and the loser gets a unique violation instead of `DO NOTHING`'s quiet skip:
+
+```text
+-- session A: script
+BEGIN;
+MERGE INTO signups s USING (VALUES ('ada@example.com', 'from A')) v(email, name) ON s.email = v.email
+WHEN MATCHED THEN UPDATE SET name = v.name
+WHEN NOT MATCHED THEN INSERT (email, name) VALUES (v.email, v.name);
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+MERGE 1
+COMMIT
+
+-- session B (started 0.5 s later): script
+\o /dev/null
+SELECT pg_sleep(0.5);
+\o
+\timing on
+MERGE INTO signups s USING (VALUES ('ada@example.com', 'from B')) v(email, name) ON s.email = v.email
+WHEN MATCHED THEN UPDATE SET name = v.name
+WHEN NOT MATCHED THEN INSERT (email, name) VALUES (v.email, v.name);
+-- session B (started 0.5 s later): psql output
+Timing is on.
+ERROR:  duplicate key value violates unique constraint "signups_pkey"
+DETAIL:  Key (email)=(ada@example.com) already exists.
+Time: 1502.088 ms (00:01.502)
+```
+
+Use `ON CONFLICT` for "insert or update this key, concurrently, exactly once"; use `MERGE` for set-based synchronisation from a source you control, and be ready to retry on `23505`.
+
+## Reading AI-generated code
+
+An assistant is told the table is unique per title and author, and writes an upsert whose comment says exactly that:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "editions are unique per (title, author) - upsert on title"
+CREATE TABLE editions (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title     text NOT NULL,
+  author_id bigint NOT NULL,
+  price     numeric(8, 2) NOT NULL,
+  UNIQUE (title, author_id)
+);
+
+INSERT INTO editions (title, author_id, price)
+VALUES ('Quiet Harbors', 1, 12.00)
+ON CONFLICT (title) DO UPDATE SET price = EXCLUDED.price;`}>
+
+The comment is right and the code is wrong. `ON CONFLICT (title)` must match a unique index on exactly `title`; the table only has one on `(title, author_id)`. The statement fails as soon as it runs, in production, with `42P10`:
+
+```sql
+-- sql/editions.sql
+CREATE TABLE editions (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title     text NOT NULL,
+  author_id bigint NOT NULL,
+  price     numeric(8, 2) NOT NULL,
+  UNIQUE (title, author_id)
+);
+```
+
+```sql
+-- @expect-error 42P10
+INSERT INTO editions (title, author_id, price)
+VALUES ('Quiet Harbors', 1, 12.00)
+ON CONFLICT (title) DO UPDATE SET price = EXCLUDED.price;
+```
+
+```text
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+```
+
+The fix is to name the real conflict target: the column list of the unique index, or the constraint by name. Both forms upsert the same row:
+
+```sql
+-- sql/editions-fixed.sql
+INSERT INTO editions (title, author_id, price)
+VALUES ('Quiet Harbors', 1, 12.00)
+ON CONFLICT (title, author_id) DO UPDATE SET price = EXCLUDED.price
+RETURNING id, title, price;
+INSERT INTO editions (title, author_id, price)
+VALUES ('Quiet Harbors', 1, 14.50)
+ON CONFLICT ON CONSTRAINT editions_title_author_id_key DO UPDATE SET price = EXCLUDED.price
+RETURNING id, title, price;
+```
+
+```text
+ id |     title     | price 
+----+---------------+-------
+  1 | Quiet Harbors | 12.00
+(1 row)
+
+INSERT 0 1
+ id |     title     | price 
+----+---------------+-------
+  1 | Quiet Harbors | 14.50
+(1 row)
+
+INSERT 0 1
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+An upsert is an insert that carries its own answer to "what if this key exists?". The database implements it by inserting into the unique index first, which serialises concurrent writers on the key: the second writer waits for the first, then sees the conflict. That is why it is atomic where check-then-insert is not, why it needs a unique index to point at, and why every attempt, successful or not, consumes an identity value.
 
 ## Tips / gotchas
 
-- Upsert needs a unique constraint or unique index to detect a conflict. `ON CONFLICT (title)` only works because `title` is unique; without that, PostgreSQL has no notion of a duplicate.
+- Upsert needs a unique constraint or unique index to detect a conflict, and the `ON CONFLICT` target must match it exactly (`42P10` otherwise).
 - The `EXCLUDED` table refers to the row you tried to insert. Use it in `DO UPDATE` to pull the new values into the existing row.
-- You can add a `WHERE` to `DO UPDATE` to update only under certain conditions, for example `DO UPDATE SET copies_sold = EXCLUDED.copies_sold WHERE EXCLUDED.copies_sold > books.copies_sold`.
-- `DO NOTHING` returns zero affected rows on a conflict, so check the row count if you need to know whether an insert actually happened.
+- You can add a `WHERE` to `DO UPDATE` to update only under certain conditions, for example `DO UPDATE SET copies_sold = EXCLUDED.copies_sold WHERE EXCLUDED.copies_sold > books.copies_sold`; the row is then neither updated nor returned.
+- `DO NOTHING` returns zero affected rows and an empty `RETURNING` on a conflict, so check the row count if you need to know whether an insert actually happened.
+- One statement cannot conflict with the same existing row twice (`21000`); deduplicate the input first.
+- Under `REPEATABLE READ` or `SERIALIZABLE`, be ready to retry on `40001`.
 - Keep passing values as placeholders here too; upsert is still an `INSERT`, and the same SQL injection rules apply.
 
 <Callout title="One atomic statement">
@@ -192,22 +688,19 @@ The real win of `ON CONFLICT` is atomicity. A check-then-insert in application c
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| `INSERT ... ON CONFLICT` | Atomic, one round trip, no race condition | Needs a unique constraint or unique index for the conflict to target |
-| Check-then-insert in application code | Easy to read, logic is straightforward | A classic race condition when multiple requests run at once |
+| `INSERT ... ON CONFLICT` | Atomic, one round trip, no race condition (proved above) | Needs a unique constraint or unique index for the conflict to target; burns identity values on conflicts |
+| Check-then-insert in application code | Easy to read, logic is straightforward | A classic race condition when multiple requests run at once (two rows above) |
 | `DO UPDATE` on conflict | Data is always synced to the latest value | Can unintentionally overwrite existing values if you are not careful |
 | `DO NOTHING` on conflict | Safe, never overwrites existing data | Duplicate events are silently dropped even when an update was actually needed |
+| `MERGE` | Standard SQL, several branches, no unique constraint needed | Concurrent runs can fail with unique violations (proved above) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Using `SELECT` to check whether a row exists, then `INSERT` in application code** — this races when multiple requests see "no row" at the same time. Use `ON CONFLICT` instead for atomicity.
-- **Forgetting that `ON CONFLICT` needs a unique/exclusion constraint to target** — if the column named in `ON CONFLICT (...)` is not unique, PostgreSQL raises an error immediately.
-- **Using `DO NOTHING` when the row actually needed an update** — this leaves stale data in place silently. Choose between `DO UPDATE` and `DO NOTHING` based on the real intent.
-
-> 💡 Real-world example
->
-> **E-commerce checkout** — uses `ON CONFLICT` to create an order idempotently when a client retries a failed request (such as a network timeout), without creating a duplicate order.
->
-> **Inventory/stock management** — uses the same upsert primitive to apply stock-count update events that a message queue may redeliver, without corrupting the stock number through a race condition.
+- **"ON CONFLICT DO NOTHING means nothing happens."** The insert is still attempted: an identity value is consumed and a lock may be waited for (B waited 1.5 s).
+- **"RETURNING always returns the row."** Not for `DO NOTHING`, and not when a `DO UPDATE ... WHERE` is false.
+- **"MERGE is a better upsert."** It is more general, not more atomic (the race4 run).
+- **"Any unique column can be the target."** The target must match a unique index exactly; a composite index does not serve a single-column target.
+- **"Upsert is safe at any isolation level."** At `REPEATABLE READ` it can fail with `40001` and needs a retry loop.
 
 export const quizUpsert = [
   {
@@ -219,6 +712,7 @@ export const quizUpsert = [
       'A default value',
     ],
     answer: 1,
+    explain: 'Without a matching unique index PostgreSQL raises `there is no unique or exclusion constraint matching the ON CONFLICT specification` (42P10), as in the lesson.',
   },
   {
     q: 'In DO UPDATE, what does EXCLUDED.copies_sold refer to?',
@@ -229,6 +723,7 @@ export const quizUpsert = [
       'A random row from the table',
     ],
     answer: 1,
+    explain: '`EXCLUDED` is the row proposed for insertion; the existing row is referenced by the table name (`books.copies_sold`).',
   },
   {
     q: 'What does ON CONFLICT (title) DO NOTHING do when the title already exists?',
@@ -239,6 +734,29 @@ export const quizUpsert = [
       'Deletes the existing row',
     ],
     answer: 2,
+    explain: 'The command tag is `INSERT 0 0` and `RETURNING` yields no rows.',
+  },
+  {
+    q: 'Two sessions run the same `INSERT ... ON CONFLICT (email) DO NOTHING` for a new email at the same time. What is the outcome?',
+    options: [
+      'Two rows with the same email',
+      'One row; the second session waits, then inserts nothing',
+      'The second session fails with a deadlock',
+      'Both fail with a unique violation',
+    ],
+    answer: 1,
+    explain: 'The unique index serialises the writers. In the lesson B waited 1.5 s for A to commit and reported `INSERT 0 0`.',
+  },
+  {
+    q: 'Which statement about identity ids and upsert is true?',
+    options: [
+      'A conflicting insert does not consume an identity value',
+      'A conflicting insert still consumes an identity value, leaving a gap',
+      'DO NOTHING resets the sequence',
+      'Identity values are only consumed on commit',
+    ],
+    answer: 1,
+    explain: 'The row is proposed (and its id drawn) before the conflict is found. Two conflicts left a gap of two ids (3 and 4) in the lesson\'s `tags` table.',
   },
 ];
 

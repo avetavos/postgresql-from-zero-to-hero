@@ -1,6 +1,6 @@
 ---
 title: Upsert ด้วย ON CONFLICT
-description: เพิ่ม row ใหม่ หรือ update row เดิมถ้ามีอยู่แล้ว ในคำสั่งเดียว — upsert ของ PostgreSQL ด้วย ON CONFLICT, pseudo-table EXCLUDED และ DO NOTHING
+description: insert-หรือ-update ใน statement เดียวแบบ atomic — INSERT ... ON CONFLICT พร้อม DO UPDATE กับ EXCLUDED, DO NOTHING และเหตุผลที่ดีกว่าการตรวจก่อนแล้วค่อย insert
 sidebar:
   order: 5
 ---
@@ -10,42 +10,139 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-บางครั้งคุณอยากจะ insert row หนึ่ง แต่ถ้ามีตัวที่ตรงกันอยู่แล้ว คุณอยาก update row เดิมมากกว่าปล่อยให้ล้มเหลว การทำสิ่งนี้ด้วยมือ — ตรวจสอบก่อน แล้วค่อย insert หรือ update — มี race condition: คำขอสองอันสามารถเห็น "ไม่มี row" ทั้งคู่ และพยายาม insert ทั้งคู่ได้ PostgreSQL แก้ปัญหานี้แบบ atomic ด้วย `INSERT ... ON CONFLICT` ซึ่งมักเรียกว่า **upsert** (update บวก insert)
+บางครั้งคุณอยากจะ insert row แต่ถ้ามี row ที่ตรงกันอยู่แล้ว คุณอยาก update มากกว่าล้มเหลว การทำด้วยมือ — ตรวจก่อน แล้ว insert หรือ update — มี race: สอง request เห็น "ไม่มี row" พร้อมกันแล้วต่างพยายาม insert PostgreSQL แก้เรื่องนี้แบบ atomic ด้วย `INSERT ... ON CONFLICT` ที่มักเรียกว่า **upsert** (update บวก insert)
 
-สำหรับตัวอย่างเหล่านี้ ลองจินตนาการว่า table `books` มี unique constraint บน `title` ดังนั้นจึงไม่มีหนังสือสองเล่มที่มี title เหมือนกันเป๊ะ ๆ ได้
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) ตัวอย่าง session เดียวคือ fence `sql` ที่รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ตัวอย่างเรื่อง concurrency เป็นการรันจริงสอง session (สองโปรเซส `psql` ที่เริ่มพร้อมกัน) พิมพ์ตามที่ตอบกลับมาเป๊ะ ตัวเลขเวลามาจาก Mac เครื่องนี้
+
+## ทำไมไม่ตรวจก่อน?
+
+นี่คือ check-then-insert กับสอง session บน table ที่ไม่มี unique constraint แต่ละตัวตรวจว่าอีเมลยังไม่ถูกใช้ คิดหนึ่งวินาที แล้ว insert ทั้งคู่เห็นศูนย์ row จึง insert ทั้งคู่:
+
+```text
+-- session A: script
+BEGIN;
+SELECT count(*) AS a_sees FROM signups WHERE email = 'ada@example.com';
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+INSERT INTO signups (email) VALUES ('ada@example.com');
+COMMIT;
+-- session A: psql output
+BEGIN
+ a_sees 
+--------
+      0
+(1 row)
+
+INSERT 0 1
+COMMIT
+
+-- session B (same script, run at the same time): script
+BEGIN;
+SELECT count(*) AS b_sees FROM signups WHERE email = 'ada@example.com';
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+INSERT INTO signups (email) VALUES ('ada@example.com');
+COMMIT;
+-- session B (same script, run at the same time): psql output
+BEGIN
+ b_sees 
+--------
+      0
+(1 row)
+
+INSERT 0 1
+COMMIT
+
+-- afterwards, from any session:
+SELECT email, count(*) FROM signups GROUP BY 1;
+      email      | count 
+-----------------+-------
+ ada@example.com |     2
+(1 row)
+```
+
+สอง row ที่อีเมลเดียวกัน นี่คือ **race** ที่ unique constraint บวก statement เดียวแบบ atomic ขจัดได้
+
+## unique constraint
+
+สำหรับตัวอย่างเหล่านี้ table `books` ได้ unique constraint บน `title` จึงไม่มีหนังสือสองเล่มใช้ชื่อเดียวกันเป๊ะ การ insert ซ้ำธรรมดาตอนนี้ล้มเหลวด้วย `23505`:
 
 ```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+```sql
+-- sql/books-title-unique.sql
 ALTER TABLE books ADD CONSTRAINT books_title_key UNIQUE (title);
 ```
 
-## upsert ตัดสินใจอย่างไร
+```sql
+-- @expect-error 23505
+INSERT INTO books (title, author_id, published) VALUES ('The Glass Orchard', 1, 2018);
+```
 
-เมื่อ insert จะละเมิด unique constraint ที่ระบุชื่อไว้ PostgreSQL จะไม่ขึ้น error แต่จะรัน action ใน `ON CONFLICT` clause ของคุณแทน — ไม่ว่าจะเป็นการ update row ที่มีอยู่ หรือไม่ทำอะไรเลยอย่างเงียบ ๆ
+```text
+ERROR:  duplicate key value violates unique constraint "books_title_key"
+DETAIL:  Key (title)=(The Glass Orchard) already exists.
+```
+
+## upsert ตัดสินอย่างไร
+
+เมื่อการ insert จะฝ่าฝืน unique constraint ที่ระบุ PostgreSQL ไม่ error แต่รัน action ใน clause `ON CONFLICT` ของคุณ — อาจ update row ที่มีอยู่ หรือไม่ทำอะไรอย่างเงียบ ๆ
 
 export const upsertDiagram = `flowchart TD
-  A[INSERT row] --> B{Conflicts with unique constraint?}
-  B -- No --> C[Insert the new row]
-  B -- Yes --> D{ON CONFLICT action}
-  D -- DO UPDATE --> E[Update the existing row]
-  D -- DO NOTHING --> F[Leave the existing row unchanged]`;
+  A["INSERT row"] --> B{"Conflicts with unique constraint?"}
+  B -- No --> C["Insert the new row"]
+  B -- Yes --> D{"ON CONFLICT action"}
+  D -- DO UPDATE --> E["Update the existing row"]
+  D -- DO NOTHING --> F["Leave the existing row unchanged"]`;
 
-<Mermaid code={upsertDiagram} title="ON CONFLICT ทำอะไรเมื่อเจอข้อมูลซ้ำ" />
+<Mermaid code={upsertDiagram} title="ON CONFLICT ทำอะไรเมื่อเจอค่าซ้ำ" />
 
-## DO UPDATE ด้วย EXCLUDED
+## DO UPDATE กับ EXCLUDED
 
-คุณระบุชื่อ column (หรือ constraint) ที่นิยาม conflict แล้วอธิบายว่าจะ update อย่างไร ภายในการ update นั้น table พิเศษ `EXCLUDED` เก็บค่าที่คุณ *พยายาม* จะ insert ไว้ คุณจึงคัดลอกค่าเหล่านั้นลงใน row เดิมได้
+คุณระบุ column (หรือ constraint) ที่นิยามความขัดแย้ง แล้วอธิบายวิธี update ภายใน update มี table พิเศษ `EXCLUDED` เก็บค่าที่คุณ *พยายาม* insert เพื่อคัดลอกเข้า row ที่มีอยู่ ตัวอย่างด้านล่างแต่ละอันอยู่ใน transaction ที่ rollback ชุดข้อมูลจึงคงเดิม
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/upsert-do-update.sql
+    BEGIN;
     INSERT INTO books (title, author_id, published, copies_sold)
-    VALUES ('The Glass Orchard', 1, 2005, 1200)
+    VALUES ('The Glass Orchard', 1, 2018, 1300)
     ON CONFLICT (title)
     DO UPDATE SET
       published   = EXCLUDED.published,
       copies_sold = EXCLUDED.copies_sold
     RETURNING id, title, copies_sold;
+    ROLLBACK;
     ```
   </TabItem>
   <TabItem label="Node.js">
@@ -57,7 +154,7 @@ export const upsertDiagram = `flowchart TD
        DO UPDATE SET published = EXCLUDED.published,
                      copies_sold = EXCLUDED.copies_sold
        RETURNING id, title, copies_sold`,
-      ['The Glass Orchard', 1, 2005, 1200],
+      ['The Glass Orchard', 1, 2018, 1300],
     );
     ```
   </TabItem>
@@ -72,7 +169,7 @@ export const upsertDiagram = `flowchart TD
                       copies_sold = EXCLUDED.copies_sold
         RETURNING id, title, copies_sold
         """,
-        ("The Glass Orchard", 1, 2005, 1200),
+        ("The Glass Orchard", 1, 2018, 1300),
     )
     ```
   </TabItem>
@@ -85,7 +182,7 @@ export const upsertDiagram = `flowchart TD
          DO UPDATE SET published = EXCLUDED.published,
                        copies_sold = EXCLUDED.copies_sold
          RETURNING id, title, copies_sold`,
-        "The Glass Orchard", 1, 2005, 1200)
+        "The Glass Orchard", 1, 2018, 1300)
     ```
   </TabItem>
   <TabItem label="Rust">
@@ -100,36 +197,116 @@ export const upsertDiagram = `flowchart TD
     )
     .bind("The Glass Orchard")
     .bind(1_i64)
-    .bind(2005_i32)
-    .bind(1200_i32)
+    .bind(2018_i32)
+    .bind(1300_i32)
     .fetch_all(&pool)
     .await?;
     ```
   </TabItem>
 </Tabs>
 
-เนื่องจากหนังสือชื่อ "The Glass Orchard" มีอยู่แล้ว การ insert จึงกลายเป็นการ update ของ row นั้น:
-
 ```text
- id |       title       | copies_sold
+BEGIN
+ id |       title       | copies_sold 
 ----+-------------------+-------------
-  1 | The Glass Orchard |        1200
+  2 | The Glass Orchard |        1300
 (1 row)
+
+INSERT 0 1
+ROLLBACK
 ```
 
-รันคำสั่งเดียวกันด้วย title ใหม่เอี่ยม แล้วจะไม่มี conflict จึง insert ตามปกติและคืน id ที่ถูกสร้างขึ้นใหม่สด ๆ
+เพราะมีหนังสือชื่อ "The Glass Orchard" อยู่แล้ว (id 2) การ insert จึงกลายเป็น update ของ row นั้น รัน statement เดียวกันกับ title ใหม่เอี่ยม จะไม่มี conflict มัน insert ตามปกติและคืน id ที่เพิ่งสร้าง id นั้นคือ 7 ไม่ใช่ 5: insert ที่ล้มเหลวข้างบนและความพยายามก่อนหน้าแต่ละครั้งใช้ค่า identity ไป (ดูเพิ่มเติมด้านล่าง)
 
-**ใน pgAdmin:** รันคำสั่งสองครั้งใน Query Tool — การรันครั้งแรก insert ครั้งที่สองชน conflict และ update table Data Output แสดง row ที่ถูกคืนกลับมาในแต่ละครั้ง
+```sql
+-- sql/upsert-new-row.sql
+BEGIN;
+INSERT INTO books (title, author_id, published, copies_sold)
+VALUES ('Salt Road', 3, 2024, 10)
+ON CONFLICT (title)
+DO UPDATE SET copies_sold = EXCLUDED.copies_sold
+RETURNING id, title, copies_sold;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id |   title   | copies_sold 
+----+-----------+-------------
+  7 | Salt Road |          10
+(1 row)
+
+INSERT 0 1
+ROLLBACK
+```
+
+**ใน pgAdmin:** รัน statement สองครั้งใน Query Tool — ครั้งแรก insert ครั้งที่สองชน conflict แล้ว update grid Data Output แสดง row ที่คืนมาทุกครั้ง
+
+แยก insert จาก update ในผลลัพธ์ได้อย่างไร? `RETURNING old.x, new.x` ของ PostgreSQL 18 ทำได้: `old` เป็น NULL เมื่อ row ถูก insert เทคนิคเก่าคือ `xmax = 0` (system column ที่เป็น 0 สำหรับ row ที่เพิ่ง insert) แสดงในคอลัมน์สุดท้าย:
+
+```sql
+-- sql/upsert-returning-old-new.sql
+BEGIN;
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('The Glass Orchard', 1, 2018, 1300),
+  ('Salt Road',         3, 2024,   10)
+ON CONFLICT (title)
+DO UPDATE SET copies_sold = EXCLUDED.copies_sold
+RETURNING title, old.copies_sold AS was, new.copies_sold AS now, (xmax = 0) AS inserted;
+ROLLBACK;
+```
+
+```text
+BEGIN
+       title       | was  | now  | inserted 
+-------------------+------+------+----------
+ The Glass Orchard | 1250 | 1300 | f
+ Salt Road         |      |   10 | t
+(2 rows)
+
+INSERT 0 2
+ROLLBACK
+```
+
+`WHERE` บน `DO UPDATE` จำกัดว่าเมื่อไหร่ update จะเกิดขึ้น ด้านล่าง ตรวจพบ conflict แต่ guard เป็นเท็จ และไม่มีอะไรเปลี่ยน: ไม่มี row ถูก update และ `RETURNING` ไม่คืนอะไร (ดังนั้น `RETURNING` ของ upsert ว่างได้แม้เกิด conflict):
+
+```sql
+-- sql/upsert-where-guard.sql
+BEGIN;
+INSERT INTO books (title, author_id, published, copies_sold)
+VALUES ('The Glass Orchard', 1, 2018, 100)
+ON CONFLICT (title)
+DO UPDATE SET copies_sold = EXCLUDED.copies_sold
+WHERE EXCLUDED.copies_sold > books.copies_sold
+RETURNING id, title, copies_sold;
+SELECT copies_sold FROM books WHERE id = 2;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ id | title | copies_sold 
+----+-------+-------------
+(0 rows)
+
+INSERT 0 0
+ copies_sold 
+-------------
+        1250
+(1 row)
+
+ROLLBACK
+```
 
 ## DO NOTHING
 
-ถ้าคุณต้องการ insert เฉพาะตอนที่ row เป็นของใหม่ และข้ามตัวซ้ำไปเงียบ ๆ ให้ใช้ `DO NOTHING` ไม่มี error, ไม่มี update
+ถ้าอยาก insert เฉพาะเมื่อ row ใหม่ และข้ามค่าซ้ำอย่างเงียบ ๆ ใช้ `DO NOTHING` ไม่มี error ไม่มี update
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
     INSERT INTO books (title, author_id, published)
-    VALUES ('The Glass Orchard', 1, 2005)
+    VALUES ('The Glass Orchard', 1, 2018)
     ON CONFLICT (title) DO NOTHING;
     ```
   </TabItem>
@@ -137,7 +314,7 @@ export const upsertDiagram = `flowchart TD
     ```js
     const res = await pool.query(
       'INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING',
-      ['The Glass Orchard', 1, 2005],
+      ['The Glass Orchard', 1, 2018],
     );
     console.log(res.rowCount); // 0 when the row already existed
     ```
@@ -146,7 +323,7 @@ export const upsertDiagram = `flowchart TD
     ```python
     cur.execute(
         "INSERT INTO books (title, author_id, published) VALUES (%s, %s, %s) ON CONFLICT (title) DO NOTHING",
-        ("The Glass Orchard", 1, 2005),
+        ("The Glass Orchard", 1, 2018),
     )
     # cur.rowcount is 0 when nothing was inserted
     ```
@@ -155,7 +332,7 @@ export const upsertDiagram = `flowchart TD
     ```go
     tag, err := conn.Exec(ctx,
         "INSERT INTO books (title, author_id, published) VALUES ($1, $2, $3) ON CONFLICT (title) DO NOTHING",
-        "The Glass Orchard", 1, 2005)
+        "The Glass Orchard", 1, 2018)
     // tag.RowsAffected() is 0 when the row already existed
     ```
   </TabItem>
@@ -166,7 +343,7 @@ export const upsertDiagram = `flowchart TD
     )
     .bind("The Glass Orchard")
     .bind(1_i64)
-    .bind(2005_i32)
+    .bind(2018_i32)
     .execute(&pool)
     .await?;
     // result.rows_affected() is 0 when nothing was inserted
@@ -174,71 +351,412 @@ export const upsertDiagram = `flowchart TD
   </TabItem>
 </Tabs>
 
-เมื่อ row มีอยู่แล้ว จะไม่มี row ใดได้รับผลกระทบ แต่ถ้าเป็น row ใหม่ ก็จะ insert เพิ่มหนึ่ง row
+เมื่อ row มีอยู่แล้ว ศูนย์ row ได้รับผลกระทบ (`INSERT 0 0`) และ `RETURNING` ว่าง เมื่อเป็น row ใหม่ หนึ่ง row ถูก insert (`INSERT 0 1`) และ id ของมันกลับมา statement ที่สอง insert หนังสือใหม่ แล้วตัวที่สามลบมันออก:
+
+```sql
+-- sql/upsert-do-nothing.sql
+INSERT INTO books (title, author_id, published)
+VALUES ('The Glass Orchard', 1, 2018)
+ON CONFLICT (title) DO NOTHING
+RETURNING id;
+INSERT INTO books (title, author_id, published)
+VALUES ('Salt Road', 3, 2024)
+ON CONFLICT (title) DO NOTHING
+RETURNING id;
+DELETE FROM books WHERE title = 'Salt Road';
+```
+
+```text
+ id 
+----
+(0 rows)
+
+INSERT 0 0
+ id 
+----
+ 12
+(1 row)
+
+INSERT 0 1
+DELETE 1
+```
+
+ทั้งสี่ driver รันหนึ่งครั้งกับฐานข้อมูลชั่วคราว (สองแบบข้างบน พร้อมจำนวน row สำหรับ `DO NOTHING`):
+
+```text
+$ (each snippet run once against the course dataset in a scratch database, reset before every run)
+[DO UPDATE ... RETURNING] Node.js (pg 8.23.0): [ { id: '2', title: 'The Glass Orchard', copies_sold: 1300 } ]
+[DO UPDATE ... RETURNING] Python (psycopg 3.3.6): [(2, 'The Glass Orchard', 1300)]
+[DO UPDATE ... RETURNING] Go (pgx v5.11.0): [2 The Glass Orchard 1300]
+[DO UPDATE ... RETURNING] Rust (sqlx 0.9.0): 2 The Glass Orchard 1300
+[DO NOTHING (rows affected)] Node.js (pg 8.23.0): 0
+[DO NOTHING (rows affected)] Python (psycopg 3.3.6): 0
+[DO NOTHING (rows affected)] Go (pgx v5.11.0): 0
+[DO NOTHING (rows affected)] Rust (sqlx 0.9.0): 0
+```
+
+## error ที่คุณจะเจอ
+
+`ON CONFLICT DO UPDATE` ต้องรู้ว่า unique constraint ตัวไหนนิยาม "row เดียวกัน" ถ้าไม่มี target จะถูกปฏิเสธ (`42601`) ถ้าใช้ column ที่ไม่มี unique constraint จะล้มเหลวด้วย `42P10` (`DO NOTHING` ละ target ได้ แต่ target ที่ระบุต้องตรงกับ unique index):
+
+```sql
+-- @expect-error 42601
+INSERT INTO books (title, author_id, published) VALUES ('Salt Road', 3, 2024)
+ON CONFLICT DO UPDATE SET published = EXCLUDED.published;
+```
+
+```text
+ERROR:  ON CONFLICT DO UPDATE requires inference specification or constraint name
+LINE 2: ON CONFLICT DO UPDATE SET published = EXCLUDED.published;
+        ^
+HINT:  For example, ON CONFLICT (column_name).
+```
+
+```sql
+-- @expect-error 42P10
+INSERT INTO books (title, author_id, published) VALUES ('Salt Road', 3, 2024)
+ON CONFLICT (published) DO NOTHING;
+```
+
+```text
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+```
+
+อีกข้อ เมื่อ statement เดียวเสนอสอง row ที่ชน row เดิมตัวเดียวกัน PostgreSQL จะไม่ update row เดียวสองครั้งในคำสั่งเดียว (`21000`):
+
+```sql
+-- @expect-error 21000
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Tidal Notes', 2, 2011, 1),
+  ('Tidal Notes', 2, 2011, 2)
+ON CONFLICT (title) DO UPDATE SET copies_sold = EXCLUDED.copies_sold;
+```
+
+```text
+ERROR:  ON CONFLICT DO UPDATE command cannot affect row a second time
+HINT:  Ensure that no rows proposed for insertion within the same command have duplicate constrained values.
+```
+
+## upsert กับช่องว่างของ identity
+
+การ insert ถูกพยายามก่อนที่จะตรวจพบ conflict row ที่ชนจึงยังใช้ค่า identity ไปหนึ่งค่า สอง conflict ที่นี่เผา id 3 และ 4 และ insert จริงครั้งถัดไปได้ 5 (`books` ข้างบนกระโดดด้วยเหตุผลเดียวกัน) identity column ไม่ซ้ำ แต่ไม่ไร้ช่องว่าง:
+
+```sql
+-- sql/identity-gap.sql
+CREATE TABLE tags (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, label text NOT NULL UNIQUE);
+INSERT INTO tags (label) VALUES ('sql'), ('postgres');
+INSERT INTO tags (label) VALUES ('sql'), ('postgres') ON CONFLICT (label) DO NOTHING;
+INSERT INTO tags (label) VALUES ('upsert') RETURNING id;
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+INSERT 0 0
+ id 
+----
+  5
+(1 row)
+
+INSERT 0 1
+```
+
+## Atomicity ที่พิสูจน์แล้ว
+
+การตั้งค่าสอง session เหมือนตัวอย่างที่มี race แต่ตอนนี้มี primary key และ `ON CONFLICT DO NOTHING` session A insert และเปิด transaction ค้างไว้ 2 วินาที session B ลองอีเมลเดียวกันครึ่งวินาทีหลัง B ไม่ล้มเหลวและไม่ซ้ำ: มันรอ A แล้วเจอ conflict และไม่ insert อะไร:
+
+```text
+-- session A: script
+BEGIN;
+INSERT INTO signups (email, name) VALUES ('ada@example.com', 'from A') ON CONFLICT (email) DO NOTHING;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+INSERT 0 1
+COMMIT
+
+-- session B (started 0.5 s later): script
+\o /dev/null
+SELECT pg_sleep(0.5);
+\o
+\timing on
+INSERT INTO signups (email, name) VALUES ('ada@example.com', 'from B') ON CONFLICT (email) DO NOTHING;
+-- session B (started 0.5 s later): psql output
+Timing is on.
+INSERT 0 0
+Time: 1505.512 ms (00:01.506)
+
+-- afterwards:
+SELECT * FROM signups;
+      email      |  name  
+-----------------+--------
+ ada@example.com | from A
+(1 row)
+```
+
+B รอ 1.5 วินาที (จน A commit) รายงาน `INSERT 0 0` และ table มีหนึ่ง row นั่นคือคำรับประกัน: insert เพียงครั้งเดียว ไม่ว่า session ไหนชนะ
+
+isolation level สำคัญ ที่ `REPEATABLE READ` transaction ทำงานจาก snapshot ถ้า row ที่ชนถูกคนอื่นเปลี่ยนหลัง snapshot นั้น `DO UPDATE` ไม่สามารถ update row ที่ transaction ไม่เคยเห็นในสถานะนั้นได้อย่างเงียบ ๆ มันจึงส่ง serialization failure และคุณต้อง retry ทั้ง transaction ([docs](https://www.postgresql.org/docs/18/transaction-iso.html#XACT-REPEATABLE-READ)):
+
+```text
+-- session A (starts 1 s in): script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE signups SET name = 'changed by A' WHERE email = 'ada@example.com';
+-- session A (starts 1 s in): psql output
+UPDATE 1
+
+-- session B: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT name AS b_snapshot_sees FROM signups;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+INSERT INTO signups (email, name) VALUES ('ada@example.com', 'from B')
+ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name;
+COMMIT;
+-- session B: psql output
+BEGIN
+ b_snapshot_sees 
+-----------------
+ ada
+(1 row)
+
+ERROR:  could not serialize access due to concurrent update
+ROLLBACK
+```
+
+## MERGE: ญาติแบบ SQL มาตรฐาน
+
+`MERGE` (PostgreSQL 15+ และมี `RETURNING` กับ `merge_action()` ตั้งแต่ 17) แสดงเจตนาเดียวกันด้วย SQL มาตรฐานและกว้างกว่า: หลายกิ่ง WHEN, เงื่อนไข และ DELETE ไม่ต้องมี unique constraint ราคาคือมันไม่ใช่ upsert แบบ atomic:
+
+```sql
+-- sql/merge.sql
+BEGIN;
+MERGE INTO books AS b
+USING (VALUES ('The Glass Orchard', 1, 2018, 1300), ('Salt Road', 3, 2024, 10)) AS v (title, author_id, published, copies_sold)
+ON b.title = v.title
+WHEN MATCHED THEN
+  UPDATE SET copies_sold = v.copies_sold
+WHEN NOT MATCHED THEN
+  INSERT (title, author_id, published, copies_sold) VALUES (v.title, v.author_id, v.published, v.copies_sold)
+RETURNING merge_action() AS action, b.id, b.title, b.copies_sold;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ action | id |       title       | copies_sold 
+--------+----+-------------------+-------------
+ UPDATE |  2 | The Glass Orchard |        1300
+ INSERT | 15 | Salt Road         |          10
+(2 rows)
+
+MERGE 2
+ROLLBACK
+```
+
+สอง session ที่รัน `MERGE` เดียวกันสำหรับ key ที่ยังไม่มี ต่างเข้ากิ่ง NOT MATCHED และผู้แพ้ได้ unique violation แทนการข้ามอย่างเงียบ ๆ ของ `DO NOTHING`:
+
+```text
+-- session A: script
+BEGIN;
+MERGE INTO signups s USING (VALUES ('ada@example.com', 'from A')) v(email, name) ON s.email = v.email
+WHEN MATCHED THEN UPDATE SET name = v.name
+WHEN NOT MATCHED THEN INSERT (email, name) VALUES (v.email, v.name);
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+MERGE 1
+COMMIT
+
+-- session B (started 0.5 s later): script
+\o /dev/null
+SELECT pg_sleep(0.5);
+\o
+\timing on
+MERGE INTO signups s USING (VALUES ('ada@example.com', 'from B')) v(email, name) ON s.email = v.email
+WHEN MATCHED THEN UPDATE SET name = v.name
+WHEN NOT MATCHED THEN INSERT (email, name) VALUES (v.email, v.name);
+-- session B (started 0.5 s later): psql output
+Timing is on.
+ERROR:  duplicate key value violates unique constraint "signups_pkey"
+DETAIL:  Key (email)=(ada@example.com) already exists.
+Time: 1502.088 ms (00:01.502)
+```
+
+ใช้ `ON CONFLICT` สำหรับ "insert หรือ update key นี้ พร้อมกัน หนึ่งครั้งพอดี" ใช้ `MERGE` สำหรับการ sync แบบเซตจากแหล่งที่คุณควบคุม และพร้อม retry เมื่อเจอ `23505`
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกบอกว่า table unique ต่อ title และ author และเขียน upsert ที่คอมเมนต์บอกตรงนั้นเป๊ะ:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "editions are unique per (title, author) - upsert on title"
+CREATE TABLE editions (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title     text NOT NULL,
+  author_id bigint NOT NULL,
+  price     numeric(8, 2) NOT NULL,
+  UNIQUE (title, author_id)
+);
+
+INSERT INTO editions (title, author_id, price)
+VALUES ('Quiet Harbors', 1, 12.00)
+ON CONFLICT (title) DO UPDATE SET price = EXCLUDED.price;`}>
+
+คอมเมนต์ถูกและโค้ดผิด `ON CONFLICT (title)` ต้องตรงกับ unique index บน `title` เท่านั้น แต่ table มีเฉพาะบน `(title, author_id)` statement ล้มเหลวทันทีที่รัน บน production ด้วย `42P10`:
+
+```sql
+-- sql/editions.sql
+CREATE TABLE editions (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title     text NOT NULL,
+  author_id bigint NOT NULL,
+  price     numeric(8, 2) NOT NULL,
+  UNIQUE (title, author_id)
+);
+```
+
+```sql
+-- @expect-error 42P10
+INSERT INTO editions (title, author_id, price)
+VALUES ('Quiet Harbors', 1, 12.00)
+ON CONFLICT (title) DO UPDATE SET price = EXCLUDED.price;
+```
+
+```text
+ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+```
+
+วิธีแก้คือระบุ conflict target จริง: รายการ column ของ unique index หรือชื่อ constraint ทั้งสองรูปแบบ upsert row เดียวกัน:
+
+```sql
+-- sql/editions-fixed.sql
+INSERT INTO editions (title, author_id, price)
+VALUES ('Quiet Harbors', 1, 12.00)
+ON CONFLICT (title, author_id) DO UPDATE SET price = EXCLUDED.price
+RETURNING id, title, price;
+INSERT INTO editions (title, author_id, price)
+VALUES ('Quiet Harbors', 1, 14.50)
+ON CONFLICT ON CONSTRAINT editions_title_author_id_key DO UPDATE SET price = EXCLUDED.price
+RETURNING id, title, price;
+```
+
+```text
+ id |     title     | price 
+----+---------------+-------
+  1 | Quiet Harbors | 12.00
+(1 row)
+
+INSERT 0 1
+ id |     title     | price 
+----+---------------+-------
+  1 | Quiet Harbors | 14.50
+(1 row)
+
+INSERT 0 1
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+upsert คือ insert ที่พกคำตอบของตัวเองสำหรับ "ถ้า key นี้มีอยู่แล้วล่ะ?" ฐานข้อมูลทำโดย insert ลง unique index ก่อน ซึ่งทำให้ผู้เขียนพร้อมกันบน key เรียงเป็นแถว: ผู้เขียนคนที่สองรอคนแรก แล้วเห็น conflict นั่นคือเหตุผลที่มัน atomic ในขณะที่ check-then-insert ไม่ใช่ ทำไมต้องมี unique index ให้ชี้ และทำไมทุกความพยายาม ไม่ว่าสำเร็จหรือไม่ ใช้ค่า identity ไป
 
 ## เคล็ดลับและข้อควรระวัง
 
-- upsert ต้องการ unique constraint หรือ unique index เพื่อตรวจจับ conflict `ON CONFLICT (title)` ทำงานได้เพราะ `title` เป็น unique เท่านั้น หากไม่มีสิ่งนั้น PostgreSQL ก็ไม่มีแนวคิดเรื่องข้อมูลซ้ำ
-- table `EXCLUDED` อ้างถึง row ที่คุณพยายาม insert ใช้ใน `DO UPDATE` เพื่อดึงค่าใหม่เข้าไปใน row ที่มีอยู่
-- คุณสามารถเพิ่ม `WHERE` ให้กับ `DO UPDATE` เพื่อ update เฉพาะภายใต้เงื่อนไขบางอย่าง เช่น `DO UPDATE SET copies_sold = EXCLUDED.copies_sold WHERE EXCLUDED.copies_sold > books.copies_sold`
-- `DO NOTHING` คืนค่า row ที่ได้รับผลกระทบเป็นศูนย์เมื่อเกิด conflict ดังนั้นจงตรวจสอบจำนวน row หากคุณจำเป็นต้องรู้ว่า insert เกิดขึ้นจริงหรือไม่
-- จงส่งค่าผ่าน placeholder ตรงนี้ด้วยเช่นกัน upsert ยังคงเป็น `INSERT` และกฎ SQL injection เดียวกันก็ยังใช้ได้
+- upsert ต้องมี unique constraint หรือ unique index เพื่อตรวจ conflict และ target ของ `ON CONFLICT` ต้องตรงเป๊ะ (ไม่เช่นนั้น `42P10`)
+- table `EXCLUDED` อ้างถึง row ที่คุณพยายาม insert ใช้ใน `DO UPDATE` เพื่อดึงค่าใหม่เข้า row ที่มีอยู่
+- เพิ่ม `WHERE` ให้ `DO UPDATE` เพื่อ update เฉพาะเงื่อนไขบางอย่าง เช่น `DO UPDATE SET copies_sold = EXCLUDED.copies_sold WHERE EXCLUDED.copies_sold > books.copies_sold` row นั้นจะไม่ถูก update และไม่ถูกคืน
+- `DO NOTHING` คืนศูนย์ row และ `RETURNING` ว่างเมื่อ conflict จึงตรวจจำนวน row ถ้าต้องรู้ว่า insert เกิดขึ้นจริงไหม
+- statement เดียวชน row เดิมตัวเดียวกันสองครั้งไม่ได้ (`21000`) ให้กำจัดข้อมูลซ้ำใน input ก่อน
+- ภายใต้ `REPEATABLE READ` หรือ `SERIALIZABLE` พร้อม retry เมื่อเจอ `40001`
+- ส่งค่าผ่าน placeholder ที่นี่ด้วย upsert ยังเป็น `INSERT` และกฎ SQL injection เดิมใช้ได้
 
-<Callout title="คำสั่ง atomic เดียว">
-ชัยชนะที่แท้จริงของ `ON CONFLICT` คือความเป็น atomic การตรวจสอบแล้วค่อย insert ในโค้ดแอปพลิเคชันอาจแพ้ race ระหว่างคำขอสองอันได้ แต่คำสั่ง upsert เดียวจะ insert หรือ update เพียงครั้งเดียวพอดี โดยมี unique constraint บังคับความถูกต้องให้คุณ
+<Callout title="statement atomic เดียว">
+ข้อดีจริงของ `ON CONFLICT` คือ atomicity การ check-then-insert ในโค้ดแอปแพ้ race ระหว่างสอง request ได้ แต่ statement upsert เดียว insert หรือ update หนึ่งครั้งพอดี โดย unique constraint บังคับความถูกต้องให้คุณ
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| `INSERT ... ON CONFLICT` | atomic, round trip เดียว, ไม่มี race condition | ต้องมี unique constraint หรือ unique index ให้ conflict อ้างอิงได้ |
-| ตรวจสอบก่อนแล้วค่อย insert ในโค้ดแอป (check-then-insert) | อ่านง่าย เข้าใจ logic ได้ตรงไปตรงมา | เป็น race condition แบบคลาสสิกเมื่อมีหลาย request พร้อมกัน |
-| `DO UPDATE` เมื่อชน conflict | ข้อมูลถูก sync ให้เป็นค่าล่าสุดเสมอ | overwrite ค่าที่มีอยู่แล้วโดยไม่ตั้งใจได้ถ้าไม่ระวัง |
-| `DO NOTHING` เมื่อชน conflict | ปลอดภัย ไม่เผลอเขียนทับข้อมูลเดิม | ข้อมูลซ้ำจะถูกละเว้นอย่างเงียบ ๆ แม้บางครั้งควรจะ update จริง |
+| `INSERT ... ON CONFLICT` | Atomic, round trip เดียว ไม่มี race condition (พิสูจน์ข้างบน) | ต้องมี unique constraint หรือ unique index ให้ conflict ชี้ และเผาค่า identity เมื่อ conflict |
+| check-then-insert ในโค้ดแอป | อ่านง่าย ตรรกะตรงไปตรงมา | race condition คลาสสิกเมื่อหลาย request ทำงานพร้อมกัน (สอง row ข้างบน) |
+| `DO UPDATE` เมื่อ conflict | ข้อมูลซิงก์กับค่าล่าสุดเสมอ | อาจเขียนทับค่าที่มีอยู่โดยไม่ตั้งใจถ้าไม่ระวัง |
+| `DO NOTHING` เมื่อ conflict | ปลอดภัย ไม่เคยเขียนทับข้อมูลเดิม | event ซ้ำถูกทิ้งเงียบ ๆ แม้ที่จริงต้อง update |
+| `MERGE` | SQL มาตรฐาน หลายกิ่ง ไม่ต้องมี unique constraint | การรันพร้อมกันอาจล้มด้วย unique violation (พิสูจน์ข้างบน) |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ `SELECT` ตรวจสอบว่า row มีอยู่ก่อน แล้วค่อย `INSERT` ในโค้ดแอปพลิเคชัน** — race กันได้เมื่อมีหลาย request พร้อมกันเห็น "ไม่มี row" ทั้งคู่ ให้ใช้ `ON CONFLICT` แทนเพื่อความ atomic
-- **ลืมว่า `ON CONFLICT` ต้องมี unique/exclusion constraint ให้เล็ง** — ถ้า column ที่ระบุใน `ON CONFLICT (...)` ไม่ใช่ unique PostgreSQL จะขึ้น error ทันที
-- **ใช้ `DO NOTHING` ทั้งที่ต้องการให้ row ถูก update** — ทำให้ข้อมูลเก่าค้างอยู่โดยไม่รู้ตัว ต้องเลือกระหว่าง `DO UPDATE` กับ `DO NOTHING` ให้ตรงกับ intent จริง
-
-> 💡 ตัวอย่างจากของจริง
->
-> **ระบบ checkout ของ e-commerce** — ใช้ `ON CONFLICT` เพื่อสร้าง order แบบ idempotent เมื่อ client retry request ที่ล้มเหลว (เช่น network timeout) โดยไม่สร้าง order ซ้ำซ้อน
->
-> **ระบบจัดการ inventory / stock** — ใช้ upsert primitive แบบเดียวกันเพื่อรับ event อัปเดตจำนวนสินค้าที่อาจถูกส่งซ้ำจาก message queue โดยไม่ทำให้ตัวเลข stock ผิดเพี้ยนจาก race condition
+- **"ON CONFLICT DO NOTHING แปลว่าไม่มีอะไรเกิดขึ้น"** การ insert ยังถูกพยายาม: ค่า identity ถูกใช้ และอาจต้องรอ lock (B รอ 1.5 วินาที)
+- **"RETURNING คืน row เสมอ"** ไม่ใช่กับ `DO NOTHING` และไม่ใช่เมื่อ `DO UPDATE ... WHERE` เป็นเท็จ
+- **"MERGE เป็น upsert ที่ดีกว่า"** มันกว้างกว่า ไม่ได้ atomic กว่า (การรัน race4)
+- **"column unique ใดก็เป็น target ได้"** target ต้องตรงกับ unique index เป๊ะ index แบบผสมไม่รองรับ target column เดียว
+- **"upsert ปลอดภัยทุก isolation level"** ที่ `REPEATABLE READ` มันล้มด้วย `40001` ได้และต้องมีลูป retry
 
 export const quizUpsert = [
   {
-    q: 'column ต้องมีอะไรอยู่ก่อน ON CONFLICT (col) ถึงจะตรวจจับค่าซ้ำได้?',
+    q: 'ต้องมีอะไรบน column ก่อนที่ ON CONFLICT (col) จะตรวจค่าซ้ำได้?',
     options: [
       'foreign key',
       'unique constraint หรือ unique index',
-      'NOT NULL constraint',
-      'default value',
+      'constraint NOT NULL',
+      'ค่า default',
     ],
     answer: 1,
+    explain: 'ถ้าไม่มี unique index ที่ตรงกัน PostgreSQL ส่ง `there is no unique or exclusion constraint matching the ON CONFLICT specification` (42P10) ตามบทเรียน',
   },
   {
-    q: 'ใน DO UPDATE ค่า EXCLUDED.copies_sold หมายถึงอะไร?',
+    q: 'ใน DO UPDATE, EXCLUDED.copies_sold อ้างถึงอะไร?',
     options: [
       'ค่าที่เก็บอยู่ใน row เดิมตอนนี้',
-      'ค่าที่เราพยายาม insert เข้าไป',
-      'เป็น 0 เสมอ',
+      'ค่าที่คุณพยายาม insert',
+      'ศูนย์เสมอ',
       'row สุ่มจาก table',
     ],
     answer: 1,
+    explain: '`EXCLUDED` คือ row ที่เสนอให้ insert ส่วน row ที่มีอยู่อ้างด้วยชื่อ table (`books.copies_sold`)',
   },
   {
-    q: 'ON CONFLICT (title) DO NOTHING ทำอะไรเมื่อ title นั้นมีอยู่แล้ว?',
+    q: 'ON CONFLICT (title) DO NOTHING ทำอะไรเมื่อ title มีอยู่แล้ว?',
     options: [
-      'เกิด unique violation error',
-      'อัปเดต row เดิม',
-      'ข้ามการ insert โดยไม่กระทบ row ใด ๆ',
-      'ลบ row เดิมทิ้ง',
+      'ส่ง unique violation error',
+      'update row ที่มีอยู่',
+      'ข้ามการ insert ไม่กระทบ row ใดเลย',
+      'ลบ row ที่มีอยู่',
     ],
     answer: 2,
+    explain: 'command tag คือ `INSERT 0 0` และ `RETURNING` ไม่ให้ row',
+  },
+  {
+    q: 'สอง session รัน `INSERT ... ON CONFLICT (email) DO NOTHING` สำหรับอีเมลใหม่เดียวกันพร้อมกัน ผลเป็นอย่างไร?',
+    options: [
+      'สอง row ที่อีเมลเดียวกัน',
+      'หนึ่ง row; session ที่สองรอแล้วไม่ insert อะไร',
+      'session ที่สองล้มด้วย deadlock',
+      'ทั้งคู่ล้มด้วย unique violation',
+    ],
+    answer: 1,
+    explain: 'unique index ทำให้ผู้เขียนเรียงเป็นแถว ในบทเรียน B รอ 1.5 วินาทีให้ A commit และรายงาน `INSERT 0 0`',
+  },
+  {
+    q: 'ข้อใดจริงเกี่ยวกับ id แบบ identity และ upsert?',
+    options: [
+      'insert ที่ conflict ไม่ใช้ค่า identity',
+      'insert ที่ conflict ยังใช้ค่า identity ไป ทำให้เกิดช่องว่าง',
+      'DO NOTHING รีเซ็ต sequence',
+      'ค่า identity ถูกใช้เฉพาะตอน commit',
+    ],
+    answer: 1,
+    explain: 'row ถูกเสนอ (และ id ถูกจับ) ก่อนพบ conflict สอง conflict ทิ้งช่องว่างสอง id (3 และ 4) ใน table `tags` ของบทเรียน',
   },
 ];
 
