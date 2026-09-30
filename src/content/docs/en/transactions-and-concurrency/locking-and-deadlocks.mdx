@@ -1,6 +1,6 @@
 ---
 title: Locking and deadlocks
-description: Take explicit row locks with SELECT ... FOR UPDATE and FOR SHARE, understand lock waits, see how two transactions deadlock, and use NOWAIT and SKIP LOCKED to control waiting.
+description: Row locks with SELECT ... FOR UPDATE, lost updates and lock waits reproduced with real sessions, the four row-lock modes, deadlocks, NOWAIT, SKIP LOCKED queues and advisory locks.
 sidebar:
   order: 5
 ---
@@ -10,16 +10,199 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-MVCC removes the need for read locks, but writes still have to be coordinated. When two transactions want to change the same row, one must wait for the other to finish. Most of the time PostgreSQL takes the necessary **row locks** for you during an `UPDATE` or `DELETE`. Sometimes, though, you want to lock a row at the moment you read it, so that nobody else can change it before you do.
+MVCC removes the need for read locks, but writes still have to be coordinated. When two transactions want to change the same row, one must wait for the other to finish. Most of the time PostgreSQL takes the necessary **row locks** for you during an `UPDATE` or `DELETE`. Sometimes, though, you want to lock a row at the moment you read it, so that nobody else can change it before you do ([docs](https://www.postgresql.org/docs/18/explicit-locking.html)).
 
-## Reserving a row with FOR UPDATE
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The single-session fences are `sql` fences run in one empty database; every lock wait, deadlock and queue example is a real run of two or three `psql` processes started together, printed as they came back. `\o /dev/null` around `pg_sleep(n)` hides the empty result of the sleep, and `\! sleep n` (a shell command) pauses a session without a query running, so that it shows up as `idle in transaction`. Process ids and timings are from this Mac and differ on every run.
 
-`SELECT ... FOR UPDATE` reads a row and locks it as if you were about to update it. Any other transaction that tries to update, delete, or also lock that row must wait until you commit or roll back. This is the standard pattern for "read a balance, decide, then write it back" without a lost update.
+Three tables: `accounts` and `ledger_entries` (with a foreign key to it) for row locks, and a `jobs` table for a work queue.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+
+CREATE TABLE ledger_entries (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  account_id bigint NOT NULL REFERENCES accounts (id),
+  amount     numeric NOT NULL
+);
+
+CREATE TABLE jobs (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  status  text NOT NULL DEFAULT 'pending',
+  payload text NOT NULL
+);
+INSERT INTO jobs (payload) SELECT 'job-' || g FROM generate_series(1, 6) g;
+```
+
+## Lock waits, and how to see them
+
+`SELECT ... FOR UPDATE` reads a row and locks it as if you were about to update it. Any other transaction that tries to update, delete, or also lock that row must wait until you commit or roll back. Session A locks Ada's row and holds it for three seconds; B asks for the same lock one second in; C looks at `pg_stat_activity` and `pg_locks` at two seconds:
+
+```text
+-- session A (holder): script
+BEGIN;
+SELECT balance FROM accounts WHERE id = 1 FOR UPDATE;
+\! sleep 3
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+COMMIT;
+-- session A (holder): psql output
+BEGIN
+ balance 
+---------
+     500
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- session B (waiter): script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+\timing on
+SELECT balance FROM accounts WHERE id = 1 FOR UPDATE;
+-- session B (waiter): psql output
+Timing is on.
+ balance 
+---------
+     400
+(1 row)
+
+Time: 2008.066 ms (00:02.008)
+
+-- session C (observer): script
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+SELECT pid, state, wait_event_type, wait_event, pg_blocking_pids(pid) AS blocked_by, left(query, 44) AS query
+FROM pg_stat_activity
+WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()
+ORDER BY pid;
+SELECT locktype, mode, granted, pid FROM pg_locks WHERE NOT granted;
+-- session C (observer): psql output
+  pid  |        state        | wait_event_type |  wait_event   | blocked_by |                    query                     
+-------+---------------------+-----------------+---------------+------------+----------------------------------------------
+ 21999 | idle in transaction | Client          | ClientRead    | {}         | SELECT balance FROM accounts WHERE id = 1 FO
+ 22000 | active              | Lock            | transactionid | {21999}    | SELECT balance FROM accounts WHERE id = 1 FO
+(2 rows)
+
+   locktype    |   mode    | granted |  pid  
+---------------+-----------+---------+-------
+ transactionid | ShareLock | f       | 22000
+(1 row)
+```
+
+B printed nothing for about two seconds, until A committed, and then it received the new balance (400, not 500). C shows why: A is `idle in transaction` doing nothing, while B is `active` with `wait_event_type = Lock` and `wait_event = transactionid`, and `pg_blocking_pids(pid)` names A's process. In `pg_locks`, B holds an ungranted `ShareLock` on A's transaction id: a row-level wait is implemented as a wait for the other transaction to end. Whenever an application "hangs", these two views tell you who waits for whom.
+
+## The lost update, and FOR UPDATE
+
+Here is the read-modify-write bug that motivates row locks. Both sessions read Ada's balance (500), compute the new value in the application, and write it back. Each was correct given what it read; together they lose one of the withdrawals:
+
+```text
+-- session A: script
+BEGIN;
+SELECT balance AS a_read FROM accounts WHERE id = 1;
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = 500 - 100 WHERE id = 1;  -- computed in the application
+COMMIT;
+-- session A: psql output
+BEGIN
+ a_read 
+--------
+    500
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- session B: script
+BEGIN;
+SELECT balance AS b_read FROM accounts WHERE id = 1;
+\o /dev/null
+SELECT pg_sleep(1.5);
+\o
+UPDATE accounts SET balance = 500 - 50 WHERE id = 1;   -- computed from the same stale read
+COMMIT;
+-- session B: psql output
+BEGIN
+ b_read 
+--------
+    500
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- afterwards:
+SELECT balance FROM accounts WHERE id = 1;
+ balance 
+---------
+     450
+(1 row)
+```
+
+Ada should have 350 after withdrawing 100 and 50, but the table says 450: A's withdrawal vanished, overwritten by B's write, which was computed from a stale read. With `FOR UPDATE` on the read, B has to wait for A, and its read returns the value A wrote:
+
+```text
+-- session A: script
+BEGIN;
+SELECT balance AS a_read FROM accounts WHERE id = 1 FOR UPDATE;
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+COMMIT;
+-- session A: psql output
+BEGIN
+ a_read 
+--------
+    500
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(0.3);
+\o
+BEGIN;
+SELECT balance AS b_read FROM accounts WHERE id = 1 FOR UPDATE;
+UPDATE accounts SET balance = balance - 50 WHERE id = 1;
+COMMIT;
+-- session B: psql output
+BEGIN
+ b_read 
+--------
+    400
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- afterwards:
+SELECT balance FROM accounts WHERE id = 1;
+ balance 
+---------
+     350
+(1 row)
+```
+
+The balance is 350. In the drivers the same pattern looks like this (each run once, starting from Ada 500):
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/for-update.sql
     BEGIN;
     SELECT balance FROM accounts WHERE id = 1 FOR UPDATE;
     -- the row is now locked for this transaction
@@ -29,58 +212,189 @@ MVCC removes the need for read locks, but writes still have to be coordinated. W
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await client.query('BEGIN');
-    const { rows } = await client.query(
-      'SELECT balance FROM accounts WHERE id = $1 FOR UPDATE',
-      [1],
-    );
-    await client.query('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [100, 1]);
-    await client.query('COMMIT');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query('SELECT balance::float8 AS balance FROM accounts WHERE id = $1 FOR UPDATE', [1]);
+      const next = rows[0].balance - 100;
+      await client.query('UPDATE accounts SET balance = $1 WHERE id = $2', [next, 1]);
+      await client.query('COMMIT');
+      console.log('was', rows[0].balance, 'now', next);
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     with conn.transaction():
-        cur.execute("SELECT balance FROM accounts WHERE id = %s FOR UPDATE", (1,))
+        cur.execute("SELECT balance::float8 FROM accounts WHERE id = %s FOR UPDATE", (1,))
         balance = cur.fetchone()[0]
-        cur.execute("UPDATE accounts SET balance = balance - %s WHERE id = %s", (100, 1))
+        cur.execute("UPDATE accounts SET balance = %s WHERE id = %s", (balance - 100, 1))
+    print("was", balance, "now", balance - 100)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    tx, _ := conn.Begin(ctx)
+    tx, err := conn.Begin(ctx)
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback(ctx)
     var balance float64
-    tx.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1 FOR UPDATE", 1).Scan(&balance)
-    tx.Exec(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", 100, 1)
-    tx.Commit(ctx)
+    if err := tx.QueryRow(ctx, "SELECT balance::float8 FROM accounts WHERE id = $1 FOR UPDATE", 1).Scan(&balance); err != nil {
+        return err
+    }
+    if _, err := tx.Exec(ctx, "UPDATE accounts SET balance = $1 WHERE id = $2", balance-100, 1); err != nil {
+        return err
+    }
+    fmt.Println("was", balance, "now", balance-100)
+    return tx.Commit(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let mut tx = pool.begin().await?;
-    let balance: f64 = sqlx::query_scalar("SELECT balance FROM accounts WHERE id = $1 FOR UPDATE")
+    let balance: f64 = sqlx::query_scalar("SELECT balance::float8 FROM accounts WHERE id = $1 FOR UPDATE")
         .bind(1_i64)
         .fetch_one(&mut *tx)
         .await?;
-    sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE id = $2")
-        .bind(100_f64).bind(1_i64)
+    sqlx::query("UPDATE accounts SET balance = $1::float8::numeric WHERE id = $2")
+        .bind(balance - 100.0)
+        .bind(1_i64)
         .execute(&mut *tx)
         .await?;
+    println!("was {balance} now {}", balance - 100.0);
     tx.commit().await?;
     ```
   </TabItem>
 </Tabs>
 
-The companion lock is `FOR SHARE`: it lets others read and also take `FOR SHARE`, but blocks anyone wanting `FOR UPDATE` or a write. Use it when you must guarantee a row will not change underneath you, yet you do not intend to write it yourself.
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[FOR UPDATE] Node.js (pg 8.23.0): was 500 now 400 | afterwards Ada 400, Linus 100
+[FOR UPDATE] Python (psycopg 3.3.6): was 500.0 now 400.0 | afterwards Ada 400, Linus 100
+[FOR UPDATE] Go (pgx v5.11.0): was 500 now 400 | afterwards Ada 400, Linus 100
+[FOR UPDATE] Rust (sqlx 0.9.0): was 500 now 400 | afterwards Ada 400, Linus 100
+```
 
-## Lock waits
-
-When a transaction asks for a lock another holds, it simply waits. The waiting query appears to hang; it resumes the instant the holder commits or rolls back. A short hold is invisible to users; a long hold turns into a queue.
+When the change can be expressed as a single statement, you do not need `FOR UPDATE` at all: `UPDATE accounts SET balance = balance - 50` reads and writes the row under one lock. Under Read Committed a waiting `UPDATE` also **re-checks its WHERE clause** against the new version of the row once the other transaction commits (PostgreSQL calls this EvalPlanQual, [docs](https://www.postgresql.org/docs/18/transaction-iso.html#XACT-READ-COMMITTED)). A takes 100 from Ada and holds the transaction open; B tries to take 50 only `WHERE balance >= 450`:
 
 ```text
--- session 2 issues SELECT ... FOR UPDATE on a row session 1 already locked
--- session 2 prints nothing and blocks here until session 1 ends its transaction
+-- session A: script
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+UPDATE 1
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance - 50 WHERE id = 1 AND balance >= 450;
+-- session B: psql output
+UPDATE 0
+
+-- afterwards:
+SELECT balance FROM accounts WHERE id = 1;
+ balance 
+---------
+     400
+(1 row)
 ```
+
+B waited, looked at the row A had left (400), found that the condition no longer held, and updated nothing: `UPDATE 0`, not an error.
+
+## The four row-lock modes
+
+`FOR UPDATE` is the strongest of four modes. Sessions can ask for weaker ones when they only need to keep a row from being deleted or from having its key changed:
+
+- `FOR UPDATE` — I may delete this row or change any column.
+- `FOR NO KEY UPDATE` — I will change the row but not its key columns. This is what an ordinary `UPDATE` takes.
+- `FOR SHARE` — nobody may change or delete this row while I look at it, but others may share the lock.
+- `FOR KEY SHARE` — nobody may delete it or change its key. This is what foreign-key checks take on the parent row.
+
+Which pairs conflict? Every cell below is a real run: session A holds the row lock in the row's mode, session B tries the column's mode with `NOWAIT` half a second later:
+
+| A holds \ B asks | FOR KEY SHARE | FOR SHARE | FOR NO KEY UPDATE | FOR UPDATE |
+|---|---|---|---|---|
+| FOR KEY SHARE | ok | ok | ok | conflict |
+| FOR SHARE | ok | ok | conflict | conflict |
+| FOR NO KEY UPDATE | ok | conflict | conflict | conflict |
+| FOR UPDATE | conflict | conflict | conflict | conflict |
+
+The practical effect is on foreign keys. A child insert takes `FOR KEY SHARE` on the parent row. If another transaction holds `FOR UPDATE` on that parent, the insert waits:
+
+```text
+-- session A: script
+BEGIN;
+SELECT id FROM accounts WHERE id = 1 FOR UPDATE;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+ id 
+----
+  1
+(1 row)
+
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(0.5);
+\o
+\timing on
+INSERT INTO ledger_entries (account_id, amount) VALUES (1, 10);
+-- session B: psql output
+Timing is on.
+INSERT 0 1
+Time: 1513.899 ms (00:01.514)
+```
+
+but if the other transaction holds `FOR NO KEY UPDATE`, which is what a plain `UPDATE` of a non-key column takes, the insert goes straight through:
+
+```text
+-- session A: script
+BEGIN;
+SELECT id FROM accounts WHERE id = 1 FOR NO KEY UPDATE;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+ id 
+----
+  1
+(1 row)
+
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(0.5);
+\o
+\timing on
+INSERT INTO ledger_entries (account_id, amount) VALUES (1, 10);
+-- session B: psql output
+Timing is on.
+INSERT 0 1
+Time: 8.963 ms
+```
+
+1.5 seconds versus 9 milliseconds. Prefer `FOR NO KEY UPDATE` over `FOR UPDATE` when you are not going to delete the row or change its key.
 
 ## When waiting becomes a deadlock
 
@@ -92,75 +406,490 @@ export const deadlockCycle = `flowchart LR
 
 <Mermaid code={deadlockCycle} title="A deadlock cycle: each transaction waits on a lock the other holds" />
 
-PostgreSQL runs a deadlock detector. After a short timeout it notices the cycle, picks one transaction as the victim, and aborts it with an error so the other can continue. The victim sees SQLSTATE `40P01` and should retry its whole transaction.
+PostgreSQL runs a deadlock detector. A waiter checks for a cycle only after it has waited `deadlock_timeout`; the default is one second. When it finds one it aborts a transaction so the others can continue (which one is hard to predict, [docs](https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-DEADLOCKS)). The two sessions below update the same two rows in opposite order:
 
-```text
-ERROR:  deadlock detected
-DETAIL:  Process 12345 waits for ShareLock on transaction 678; blocked by process 12346.
-HINT:  See server log for query details.
+```sql
+-- sql/timeouts.sql
+SHOW deadlock_timeout;
+SHOW lock_timeout;
 ```
 
-## Choosing not to wait: NOWAIT and SKIP LOCKED
+```text
+ deadlock_timeout 
+------------------
+ 1s
+(1 row)
 
-Sometimes waiting is the wrong behaviour. Two modifiers change it. `NOWAIT` makes the statement fail immediately instead of queuing if the row is locked. `SKIP LOCKED` quietly steps over locked rows and returns only the ones it could lock, which is the backbone of work-queue patterns where many workers each grab the next free job.
+ lock_timeout 
+--------------
+ 0
+(1 row)
+```
+
+```text
+-- session A: script
+BEGIN;
+UPDATE accounts SET balance = balance - 10 WHERE id = 1;
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance + 10 WHERE id = 2;
+COMMIT;
+-- session A: psql output
+BEGIN
+UPDATE 1
+ERROR:  deadlock detected
+DETAIL:  Process 21947 waits for ShareLock on transaction 729227; blocked by process 21946.
+Process 21946 waits for ShareLock on transaction 729228; blocked by process 21947.
+HINT:  See server log for query details.
+CONTEXT:  while updating tuple (0,2) in relation "accounts"
+ROLLBACK
+
+-- session B: script
+BEGIN;
+UPDATE accounts SET balance = balance - 10 WHERE id = 2;
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance + 10 WHERE id = 1;
+COMMIT;
+-- session B: psql output
+BEGIN
+UPDATE 1
+UPDATE 1
+COMMIT
+
+-- afterwards:
+SELECT id, balance FROM accounts ORDER BY id;
+ id | balance 
+----+---------
+  1 |     510
+  2 |      90
+(2 rows)
+```
+
+Session A was chosen as the victim: it gets SQLSTATE `40P01` and must retry the whole transaction, while B's second update, freed by A's rollback, went through. The client message names process ids but not the statements. Those go to the server log, which is where you diagnose a deadlock afterwards:
+
+```text
+2026-09-30 07:52:51.275 UTC [21947] ERROR:  deadlock detected
+2026-09-30 07:52:51.275 UTC [21947] DETAIL:  Process 21947 waits for ShareLock on transaction 729227; blocked by process 21946.
+	Process 21946 waits for ShareLock on transaction 729228; blocked by process 21947.
+	Process 21947: UPDATE accounts SET balance = balance + 10 WHERE id = 2;
+	Process 21946: UPDATE accounts SET balance = balance + 10 WHERE id = 1;
+2026-09-30 07:52:51.275 UTC [21947] HINT:  See server log for query details.
+2026-09-30 07:52:51.275 UTC [21947] CONTEXT:  while updating tuple (0,2) in relation "accounts"
+2026-09-30 07:52:51.275 UTC [21947] STATEMENT:  UPDATE accounts SET balance = balance + 10 WHERE id = 2;
+```
+
+**In pgAdmin:** to observe a live lock wait, run `BEGIN; SELECT ... FOR UPDATE` in one Query Tool tab without committing, then run the same in a second tab and watch it hang. The `pg_locks` view shows who holds what while you experiment.
+
+## Choosing not to wait: NOWAIT, lock_timeout and SKIP LOCKED
+
+Sometimes waiting is the wrong behaviour. `NOWAIT` makes a `SELECT ... FOR UPDATE` fail immediately if the row is locked. `lock_timeout` bounds the wait for any statement. Both raise SQLSTATE `55P03` (with different messages). `SKIP LOCKED` does not fail at all: it quietly steps over locked rows. A holds Ada's row; B tries three things:
+
+```text
+-- session A: script
+BEGIN;
+SELECT 1 FROM accounts WHERE id = 1 FOR UPDATE;
+\o /dev/null
+SELECT pg_sleep(3);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+ ?column? 
+----------
+        1
+(1 row)
+
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+SELECT * FROM accounts WHERE id = 1 FOR UPDATE NOWAIT;
+SET lock_timeout = '500ms';
+UPDATE accounts SET balance = balance WHERE id = 1;
+SELECT * FROM accounts WHERE id = 2 FOR UPDATE NOWAIT;
+-- session B: psql output
+ERROR:  could not obtain lock on row in relation "accounts"
+SET
+ERROR:  canceling statement due to lock timeout
+CONTEXT:  while updating tuple (0,1) in relation "accounts"
+ id | owner | balance 
+----+-------+---------
+  2 | Linus |     100
+(1 row)
+```
+
+`NOWAIT` on the locked row fails at once with `could not obtain lock on row in relation "accounts"`. With `lock_timeout = '500ms'` the `UPDATE` waits half a second and is cancelled with `canceling statement due to lock timeout`. And the same `NOWAIT` on a different, unlocked row (Linus) simply succeeds.
+
+`SKIP LOCKED` is the backbone of work queues where many workers each take the next free job; the PostgreSQL documentation describes it as a way to avoid lock contention with multiple consumers of a queue-like table ([docs](https://www.postgresql.org/docs/18/sql-select.html#SQL-FOR-UPDATE-SHARE)). It gives an inconsistent view of the table on purpose, so it is wrong for anything that must see every row. Two workers each claim two pending jobs from a six-job table; worker 2 starts half a second after worker 1 while worker 1 still holds its rows:
+
+```text
+-- session worker 1: script
+BEGIN;
+SELECT id, payload FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+UPDATE jobs SET status = 'done' WHERE id IN (1, 2);
+COMMIT;
+-- session worker 1: psql output
+BEGIN
+ id | payload 
+----+---------
+  1 | job-1
+  2 | job-2
+(2 rows)
+
+UPDATE 2
+COMMIT
+
+-- session worker 2: script
+\o /dev/null
+SELECT pg_sleep(0.5);
+\o
+BEGIN;
+SELECT id, payload FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED;
+UPDATE jobs SET status = 'done' WHERE id IN (3, 4);
+COMMIT;
+-- session worker 2: psql output
+BEGIN
+ id | payload 
+----+---------
+  3 | job-3
+  4 | job-4
+(2 rows)
+
+UPDATE 2
+COMMIT
+
+-- afterwards:
+SELECT id, status FROM jobs ORDER BY id;
+ id | status  
+----+---------
+  1 | done
+  2 | done
+  3 | done
+  4 | done
+  5 | pending
+  6 | pending
+(6 rows)
+```
+
+Worker 2 got jobs 3 and 4 instead of waiting for 1 and 2. The idiomatic form claims a job in one statement, so a crash between claim and update cannot leave a job locked forever:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    -- fail at once rather than wait:
-    SELECT * FROM accounts WHERE id = 1 FOR UPDATE NOWAIT;
-
-    -- a worker grabbing the next available job, ignoring locked ones:
-    SELECT id FROM jobs WHERE status = 'pending'
-    ORDER BY id
-    FOR UPDATE SKIP LOCKED
-    LIMIT 1;
+    -- sql/skip-locked.sql
+    -- claim the next pending job in one statement; rows other workers hold are skipped
+    UPDATE jobs SET status = 'running'
+    WHERE id = (
+      SELECT id FROM jobs WHERE status = 'pending'
+      ORDER BY id
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    RETURNING id, payload;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const { rows } = await client.query(
-      `SELECT id FROM jobs WHERE status = 'pending'
-       ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`,
+    const { rows } = await pool.query(
+      `UPDATE jobs SET status = 'running'
+       WHERE id = (SELECT id FROM jobs WHERE status = 'pending'
+                   ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
+       RETURNING id, payload`,
     );
+    console.log(rows);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute(
-        "SELECT id FROM jobs WHERE status = 'pending' "
-        "ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"
+        """UPDATE jobs SET status = 'running'
+           WHERE id = (SELECT id FROM jobs WHERE status = 'pending'
+                       ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
+           RETURNING id, payload"""
     )
-    job = cur.fetchone()
+    print(cur.fetchall())
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    rows, err := tx.Query(ctx,
-        `SELECT id FROM jobs WHERE status = 'pending'
-         ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1`)
+    rows, err := conn.Query(ctx,
+        `UPDATE jobs SET status = 'running'
+         WHERE id = (SELECT id FROM jobs WHERE status = 'pending'
+                     ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
+         RETURNING id, payload`)
+    if err != nil {
+        return err
+    }
+    defer rows.Close()
+    for rows.Next() {
+        var id int64
+        var payload string
+        rows.Scan(&id, &payload)
+        fmt.Println(id, payload)
+    }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let job: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM jobs WHERE status = 'pending' \
-         ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1",
+    let rows = sqlx::query(
+        "UPDATE jobs SET status = 'running'
+         WHERE id = (SELECT id FROM jobs WHERE status = 'pending'
+                     ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
+         RETURNING id, payload",
     )
-    .fetch_optional(&mut *tx)
+    .fetch_all(&pool)
     .await?;
+    for r in rows {
+        println!("{} {}", r.get::<i64, _>("id"), r.get::<String, _>("payload"));
+    }
     ```
   </TabItem>
 </Tabs>
 
-**In pgAdmin:** to observe a live lock wait, run a `BEGIN; SELECT ... FOR UPDATE` in one Query Tool tab without committing, then run the same in a second tab and watch it hang. The `pg_locks` view shows who holds what while you experiment.
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[SKIP LOCKED claim] Node.js (pg 8.23.0): [ { id: '1', payload: 'job-1' } ] | afterwards 1:running 2:pending 3:pending 4:pending 5:pending 6:pending
+[SKIP LOCKED claim] Python (psycopg 3.3.6): [(1, 'job-1')] | afterwards 1:running 2:pending 3:pending 4:pending 5:pending 6:pending
+[SKIP LOCKED claim] Go (pgx v5.11.0): 1 job-1 | afterwards 1:running 2:pending 3:pending 4:pending 5:pending 6:pending
+[SKIP LOCKED claim] Rust (sqlx 0.9.0): 1 job-1 | afterwards 1:running 2:pending 3:pending 4:pending 5:pending 6:pending
+```
+
+## Table locks and advisory locks
+
+Every statement also takes a table-level lock. Most are harmless, but `ACCESS EXCLUSIVE` (taken by `LOCK TABLE`, `DROP TABLE`, `VACUUM FULL` and many `ALTER TABLE` forms) conflicts with everything, including a plain `SELECT`. A holds it for two seconds; B's `count(*)` starts half a second in:
+
+```text
+-- session A: script
+BEGIN;
+LOCK TABLE accounts IN ACCESS EXCLUSIVE MODE;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+COMMIT;
+-- session A: psql output
+BEGIN
+LOCK TABLE
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(0.5);
+\o
+\timing on
+SELECT count(*) FROM accounts;
+-- session B: psql output
+Timing is on.
+ count 
+-------
+     2
+(1 row)
+
+Time: 1504.090 ms (00:01.504)
+```
+
+B waited 1.5 seconds for a query that reads one table. This is why schema changes on hot tables are dangerous.
+
+**Advisory locks** are locks with no table behind them: you pick a number, the database keeps track of who holds it. They are for coordination the application owns, like "only one worker runs this nightly job". Session-level advisory locks last until unlocked or until the connection ends; the `xact` variants end with the transaction:
+
+```text
+-- session A: script
+SELECT pg_try_advisory_lock(42) AS a_got_it;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+SELECT pg_advisory_unlock(42) AS a_released;
+-- session A: psql output
+ a_got_it 
+----------
+ t
+(1 row)
+
+ a_released 
+------------
+ t
+(1 row)
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+SELECT pg_try_advisory_lock(42) AS b_got_it;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+SELECT pg_try_advisory_lock(42) AS b_got_it_later;
+SELECT pg_advisory_unlock(42) AS b_released;
+-- session B: psql output
+ b_got_it 
+----------
+ f
+(1 row)
+
+ b_got_it_later 
+----------------
+ t
+(1 row)
+
+ b_released 
+------------
+ t
+(1 row)
+```
+
+```sql
+-- sql/advisory-xact.sql
+BEGIN;
+SELECT pg_advisory_xact_lock(7);
+SELECT locktype, classid, objid, mode, granted
+FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+COMMIT;
+SELECT count(*) AS advisory_locks_left
+FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid();
+```
+
+```text
+BEGIN
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ locktype | classid | objid |     mode      | granted 
+----------+---------+-------+---------------+---------
+ advisory |       0 |     7 | ExclusiveLock | t
+(1 row)
+
+COMMIT
+ advisory_locks_left 
+---------------------
+                   0
+(1 row)
+```
+
+B could not get lock 42 until A released it. Be careful with the session-level kind behind a transaction-mode connection pooler: the lock belongs to a server connection, not to your client (the pooling lesson shows what goes wrong). Prefer `pg_advisory_xact_lock` there.
+
+## Reading AI-generated code
+
+An assistant writes a money-transfer function and explains, correctly, that each `UPDATE` locks its row:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "debit first, then credit; both rows are locked by the UPDATEs"
+CREATE FUNCTION transfer(from_id bigint, to_id bigint, amount numeric) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE accounts SET balance = balance - amount WHERE id = from_id;
+  PERFORM pg_sleep(1);  -- stands in for a fraud check or an audit call
+  UPDATE accounts SET balance = balance + amount WHERE id = to_id;
+END;
+$$;`}>
+
+The comment is right, and the function still deadlocks. It locks the debited account first and the credited account second, so `transfer(1, 2, ...)` and `transfer(2, 1, ...)` running together lock the two rows in opposite orders. That is exactly the cycle from the diagram. Run at the same time (the `pg_sleep` stands in for real work between the two updates):
+
+```sql
+-- sql/transfer-buggy.sql
+CREATE FUNCTION transfer(from_id bigint, to_id bigint, amount numeric) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE accounts SET balance = balance - amount WHERE id = from_id;
+  PERFORM pg_sleep(1);  -- stands in for a fraud check or an audit call
+  UPDATE accounts SET balance = balance + amount WHERE id = to_id;
+END;
+$$;
+```
+
+```text
+-- session A: script
+SELECT transfer(1, 2, 10);
+-- session A: psql output
+ transfer 
+----------
+ 
+(1 row)
+
+-- session B: script
+SELECT transfer(2, 1, 10);
+-- session B: psql output
+ERROR:  deadlock detected
+DETAIL:  Process 22310 waits for ShareLock on transaction 729301; blocked by process 22311.
+Process 22311 waits for ShareLock on transaction 729300; blocked by process 22310.
+HINT:  See server log for query details.
+CONTEXT:  while updating tuple (0,1) in relation "accounts"
+SQL statement "UPDATE accounts SET balance = balance + amount WHERE id = to_id"
+PL/pgSQL function transfer(bigint,bigint,numeric) line 5 at SQL statement
+
+-- afterwards:
+SELECT id, balance FROM accounts ORDER BY id;
+ id | balance 
+----+---------
+  1 |     490
+  2 |     110
+(2 rows)
+```
+
+One transfer fails with `40P01`, and only the other one's effect is in the table (1 is down 10 and 2 is up 10). The fix is to take every lock the function needs up front, in one deterministic order, and only then write. Locking in primary-key order means any two transfers queue up instead of forming a cycle:
+
+```sql
+-- sql/transfer-fixed.sql
+CREATE OR REPLACE FUNCTION transfer(from_id bigint, to_id bigint, amount numeric) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM 1 FROM accounts WHERE id IN (from_id, to_id) ORDER BY id FOR UPDATE;  -- always lock in id order
+  UPDATE accounts SET balance = balance - amount WHERE id = from_id;
+  PERFORM pg_sleep(1);  -- stands in for a fraud check or an audit call
+  UPDATE accounts SET balance = balance + amount WHERE id = to_id;
+END;
+$$;
+```
+
+```text
+-- session A: script
+SELECT transfer(1, 2, 10);
+-- session A: psql output
+ transfer 
+----------
+ 
+(1 row)
+
+-- session B: script
+SELECT transfer(2, 1, 10);
+-- session B: psql output
+ transfer 
+----------
+ 
+(1 row)
+
+-- afterwards:
+SELECT id, balance FROM accounts ORDER BY id;
+ id | balance 
+----+---------
+  1 |     500
+  2 |     100
+(2 rows)
+```
+
+Both transfers succeed, one after the other, and the two opposite transfers cancel out. Keep the retry loop for `40P01` anyway, as the isolation lesson does for `40001`: consistent ordering removes the common cause, not every possible one.
+
+</SpotTheBug>
+
+## Mental Model
+
+A lock is a queue ticket on one thing. MVCC means readers never need a ticket; writers do, one per row they change, and the ticket is held until commit or rollback, not until the statement ends. Waiting is therefore always waiting for a transaction, which is why a forgotten transaction holds up everyone behind it. A deadlock is two people each holding a ticket the other needs; the database breaks the tie by cancelling one.
 
 ## Tips / gotchas
 
 - Lock rows in a consistent order everywhere in your code. If every transaction touches row 1 before row 2, the cycle that causes a deadlock can never form.
 - Treat deadlock errors (`40P01`) and serialization failures (`40001`) the same way: roll back and retry the whole transaction. Both are expected under concurrency.
 - Keep the work between taking a lock and committing as short as possible. The longer you hold a lock, the longer others queue behind you.
+- Prefer a single relative `UPDATE` to read-then-write. Use `FOR UPDATE` when you must read, decide, then write.
 - `SKIP LOCKED` is ideal for queues but wrong for accounting; it deliberately ignores rows, so never use it where you must see every matching row.
+- Set `lock_timeout` (and `idle_in_transaction_session_timeout`) so a stuck session cannot block a hot table indefinitely.
 
 <Callout title="A consistent lock order prevents most deadlocks">
 Deadlocks are not caused by locking too much, but by locking in conflicting orders. Decide one global order for acquiring locks, for example always by ascending primary key, and apply it in every transaction. PostgreSQL will still detect any deadlock that slips through, but you will rarely hand it one to find.
@@ -171,21 +900,19 @@ Deadlocks are not caused by locking too much, but by locking in conflicting orde
 | Option | Benefit | Cost |
 |---------|---------|------|
 | Row-level lock | High concurrency, since other transactions can still edit other rows in the same table | Must design a consistent lock order yourself, or risk a deadlock |
-| Table-level lock | Easy to write, guarantees nobody else touches the whole table while you work | Blocks a lot of unrelated concurrent work unnecessarily, lowering system-wide throughput |
-| Explicit `SELECT ... FOR UPDATE` | Precise control over when the lock is taken, prevents lost updates | More code to write, and you must think through the lock order yourself |
-| Relying on the implicit lock from a plain `UPDATE` | Shorter code, no need to think about locking up front | No control over lock timing, risking a race between reading and writing |
+| Table-level lock | Easy to write, guarantees nobody else touches the whole table while you work | Blocks even plain `SELECT`s (1.5 s wait above) |
+| Explicit `SELECT ... FOR UPDATE` | Precise control over when the lock is taken, prevents lost updates (350, not 450) | More code to write, and you must think through the lock order yourself |
+| Relying on the implicit lock from a single relative `UPDATE` | Shorter code, no need to think about locking up front | Only works when the change fits in one statement |
+| `NOWAIT` / `lock_timeout` | Fail fast instead of queueing | The caller must handle `55P03` |
+| `SKIP LOCKED` | Many workers share a queue without blocking | Deliberately inconsistent view of the table |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Locking rows in a different order on different code paths** — this is the classic recipe for a deadlock. Pick one global lock order, such as ascending primary key, and use it everywhere.
-- **Holding a transaction and its locks open during a slow application-side task** — the longer a lock is held, the longer the queue behind it grows. Do the slow work outside the transaction, then open a short transaction just for the write.
-- **Not handling the deadlock error** — PostgreSQL always aborts one transaction as the victim with SQLSTATE `40P01`. Without a retry, the victim's work simply disappears.
-
-> 💡 Real-world example
->
-> **Postgres-backed job queues** — use `SELECT ... FOR UPDATE SKIP LOCKED` so multiple workers can each grab a different row concurrently without waiting on each other's locks — a widely used pattern for building a job queue directly on the database without a separate message broker.
->
-> **Seat/ticket booking systems** — use `SELECT ... FOR UPDATE` to lock a seat before confirming a booking, so two people can never both successfully book the same seat at once.
+- **"A deadlock means I locked too much."** It means two transactions locked in different orders; the same locks in one order never deadlock.
+- **"The database picks the deadlock victim fairly."** It is not predictable: in the run above the transaction that happened to run the check was cancelled.
+- **"SELECT FOR UPDATE and UPDATE are different kinds of lock."** A plain `UPDATE` takes `FOR NO KEY UPDATE`, which conflicts with `FOR UPDATE` and with itself.
+- **"A lock is released at the end of the statement."** Row locks last until the transaction ends.
+- **"Read Committed makes read-then-write safe."** Both sessions read 500 and one withdrawal was lost.
 
 export const quizLocks = [
   {
@@ -197,6 +924,7 @@ export const quizLocks = [
       'Commits the current transaction',
     ],
     answer: 1,
+    explain: 'In the run B stayed blocked for about two seconds on `wait_event = transactionid` until A committed.',
   },
   {
     q: 'How does PostgreSQL resolve a deadlock between two transactions?',
@@ -207,6 +935,7 @@ export const quizLocks = [
       'It lowers the isolation level automatically',
     ],
     answer: 1,
+    explain: 'After `deadlock_timeout` (1 s) a waiter finds the cycle and cancels a transaction with `ERROR: deadlock detected` (40P01); the other continues.',
   },
   {
     q: 'Which practice most reliably prevents deadlocks?',
@@ -217,6 +946,29 @@ export const quizLocks = [
       'Running VACUUM more often',
     ],
     answer: 1,
+    explain: 'The buggy `transfer` locked from-then-to; the fixed one locks both rows in id order and the two opposite transfers ran one after the other.',
+  },
+  {
+    q: 'Two workers run SELECT ... FOR UPDATE SKIP LOCKED LIMIT 2 on a queue table while the first still holds its rows. What does the second get?',
+    options: [
+      'It waits until the first commits',
+      'It fails with a deadlock',
+      'The next unlocked rows, without waiting',
+      'The same rows as the first worker',
+    ],
+    answer: 2,
+    explain: 'Worker 1 took jobs 1 and 2; worker 2 skipped them and got 3 and 4.',
+  },
+  {
+    q: 'A plain UPDATE of a non-key column on a parent row runs while a child row is inserted with a foreign key to it. Does the insert wait?',
+    options: [
+      'Yes, until the UPDATE commits',
+      'No: UPDATE takes FOR NO KEY UPDATE, which does not conflict with the FOR KEY SHARE lock of the foreign-key check',
+      'Only under Serializable',
+      'Yes, but only for 1 ms',
+    ],
+    answer: 1,
+    explain: 'The lock-mode matrix shows FOR KEY SHARE is compatible with FOR NO KEY UPDATE; the insert took 9 ms, versus 1.5 s behind a FOR UPDATE.',
   },
 ];
 
