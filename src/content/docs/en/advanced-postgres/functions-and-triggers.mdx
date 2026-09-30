@@ -1,6 +1,6 @@
 ---
-title: Functions and triggers
-description: Write a small PL/pgSQL function that returns a value with CREATE FUNCTION ... LANGUAGE plpgsql, then wire a trigger to run it automatically — keeping updated_at current or auditing every insert.
+title: Functions and Triggers
+description: Write PL/pgSQL functions and row and statement triggers, see what IMMUTABLE changes for indexes, measure what a trigger costs on 200,000 updates, avoid infinite recursion, and secure SECURITY DEFINER functions against search_path hijacking.
 sidebar:
   order: 5
 ---
@@ -10,64 +10,242 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 So far every piece of logic has lived in your application. PostgreSQL can also run logic itself: a **function** is a named, reusable block of code stored in the database, and a **trigger** is a rule that fires a function automatically whenever rows change. Together they let you enforce behavior in one place, no matter which application or person touches the table.
 
-We work with a `products` table that tracks when each row was last changed.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The `sql` fences run top to bottom in one empty database; outputs (including `NOTICE` messages) are pasted from `psql`; timings are from this Mac.
+
+## The dataset
+
+A `products` table that tracks when each row was last changed, and a `product_audit` table for a change log:
 
 ```sql
+-- sql/setup.sql
 CREATE TABLE products (
   id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name       text NOT NULL,
   price      numeric(10, 2) NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE product_audit (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  product_id bigint NOT NULL,
+  action     text NOT NULL,
+  old_price  numeric(10, 2),
+  new_price  numeric(10, 2),
+  changed_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO products (name, price) VALUES ('Trail Jacket', 129.50), ('City Backpack', 89.00), ('Camp Stove', 45.00);
 ```
 
 ## A small PL/pgSQL function
 
-`CREATE FUNCTION` with `LANGUAGE plpgsql` defines a function in PostgreSQL's procedural language. PL/pgSQL adds variables, conditionals, and loops on top of SQL. Here is a focused function that returns a value: it applies a percentage discount to a price.
+`CREATE FUNCTION` with `LANGUAGE plpgsql` defines a function in PostgreSQL's procedural language. PL/pgSQL adds variables, conditionals, and loops on top of SQL. This one applies a percentage discount to a price, and refuses nonsense input with `RAISE EXCEPTION`. It is marked `IMMUTABLE` (same input, same output, no database access), for a reason explained two sections down:
 
 ```sql
-CREATE FUNCTION apply_discount(price numeric, percent numeric)
+-- sql/function.sql
+CREATE FUNCTION apply_discount(price numeric, pct numeric)
 RETURNS numeric
 LANGUAGE plpgsql
+IMMUTABLE
 AS $$
 BEGIN
-  IF percent < 0 OR percent > 100 THEN
-    RAISE EXCEPTION 'percent must be between 0 and 100, got %', percent;
+  IF pct < 0 OR pct > 100 THEN
+    RAISE EXCEPTION 'discount must be between 0 and 100, got %', pct;
   END IF;
-  RETURN round(price - (price * percent / 100), 2);
+  RETURN round(price * (1 - pct / 100), 2);
 END;
 $$;
+
+SELECT name, price, apply_discount(price, 15) AS after_15_percent FROM products ORDER BY id;
 ```
 
 ```text
 CREATE FUNCTION
+     name      | price  | after_15_percent 
+---------------+--------+------------------
+ Trail Jacket  | 129.50 |           110.08
+ City Backpack |  89.00 |            75.65
+ Camp Stove    |  45.00 |            38.25
+(3 rows)
 ```
 
-The `$$` markers are dollar quoting — they delimit the function body so you do not have to escape the quotes inside it. Call the function like any built-in:
+Bad input fails with a clear message, and SQLSTATE `P0001` (the default for `RAISE EXCEPTION`), plus a `CONTEXT` line naming the function and line:
 
 ```sql
-SELECT name, price, apply_discount(price, 15) AS sale_price
-FROM products;
+-- @expect-error P0001
+SELECT apply_discount(100, 150);
 ```
 
 ```text
-    name     | price  | sale_price
--------------+--------+------------
- Trail Runner| 120.00 |     102.00
- City Loafer |  95.00 |      80.75
-(2 rows)
+ERROR:  discount must be between 0 and 100, got 150
+CONTEXT:  PL/pgSQL function apply_discount(numeric,numeric) line 4 at RAISE
+```
+
+Calling it from application code is an ordinary query with parameters (passed as text and cast with `::text::numeric` so every driver can send them without a decimal library). Each driver ran it once:
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/call-function.sql
+    SELECT apply_discount($1::text::numeric, $2::text::numeric)::float8 AS discounted \bind '80' '15' \g
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT apply_discount($1::text::numeric, $2::text::numeric)::float8 AS discounted',
+      ['80', '15'],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT apply_discount(%s::text::numeric, %s::text::numeric)::float8 AS discounted",
+        ("80", "15"),
+    )
+    row = cur.fetchone()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var discounted float64
+    err := conn.QueryRow(ctx,
+        "SELECT apply_discount($1::text::numeric, $2::text::numeric)::float8 AS discounted",
+        "80", "15").Scan(&discounted)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let row = sqlx::query(
+        "SELECT apply_discount($1::text::numeric, $2::text::numeric)::float8 AS discounted",
+    )
+    .bind("80")
+    .bind("15")
+    .fetch_one(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ discounted 
+------------
+         68
+(1 row)
+```
+
+```text
+$ (each snippet run once against the dataset above; every driver inserts its own new product, so the ids differ)
+[apply_discount 80, 15]  Node.js (pg 8.23.0):       { discounted: 68 }
+[apply_discount 80, 15]  Python (psycopg 3.3.6):    (68.0,)
+[apply_discount 80, 15]  Go (pgx v5.11.0):          68
+[apply_discount 80, 15]  Rust (sqlx 0.9.0):         68
+[insert + audit rows]    Node.js:                   id 7, audit rows 1
+[insert + audit rows]    Python:                    id 8, audit rows 1
+[insert + audit rows]    Go:                        id 9, audit rows 1
+[insert + audit rows]    Rust:                      id 10, audit rows 1
+```
+
+### IMMUTABLE, STABLE, VOLATILE
+
+Every function has a **volatility** label that tells the planner what it may assume. `IMMUTABLE`: same arguments, same result, forever (`lower`, arithmetic). `STABLE`: same result within one statement (`now()`, or reading a table). `VOLATILE` (the default): anything, including side effects (`random()`). It matters for indexes: an expression index needs a function the planner can trust never changes its answer. A new function defaults to `VOLATILE`:
+
+```sql
+-- sql/volatility.sql
+CREATE TABLE items (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, price numeric(10, 2) NOT NULL);
+INSERT INTO items (price) SELECT (g % 1000) + 0.5 FROM generate_series(1, 100000) g;
+-- a function is VOLATILE unless you say otherwise
+CREATE FUNCTION discounted(p numeric) RETURNS numeric LANGUAGE plpgsql
+AS $$ BEGIN RETURN round(p * 0.9, 2); END; $$;
+SELECT proname, provolatile FROM pg_proc WHERE proname = 'discounted';
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+CREATE FUNCTION
+  proname   | provolatile 
+------------+-------------
+ discounted | v
+(1 row)
+```
+
+```sql
+-- @expect-error 42P17
+CREATE INDEX items_discounted_idx ON items (discounted(price));
+```
+
+```text
+ERROR:  functions in index expression must be marked IMMUTABLE
+```
+
+Declare it `IMMUTABLE` (only if it is true: an index built on a function that lies returns wrong answers later) and the index works and is used by queries that repeat the expression:
+
+```sql
+-- sql/volatility-immutable.sql
+ALTER FUNCTION discounted(numeric) IMMUTABLE;
+CREATE INDEX items_discounted_idx ON items (discounted(price));
+ANALYZE items;
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM items WHERE discounted(price) = 450.45;
+```
+
+```text
+ALTER FUNCTION
+CREATE INDEX
+ANALYZE
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on items (actual time=0.062..0.195 rows=100.00 loops=1)
+   Recheck Cond: (discounted(price) = 450.45)
+   Heap Blocks: exact=100
+   ->  Bitmap Index Scan on items_discounted_idx (actual time=0.047..0.047 rows=100.00 loops=1)
+         Index Cond: (discounted(price) = 450.45)
+         Index Searches: 1
+ Planning Time: 0.157 ms
+ Execution Time: 0.216 ms
+(8 rows)
+```
+
+There is one subtlety. A simple `LANGUAGE sql` function is *inlined* into the calling expression before that check, so PostgreSQL accepts the index even though the label is still `VOLATILE`, and the plan shows the inlined body:
+
+```sql
+-- sql/volatility-inlined.sql
+-- a simple LANGUAGE sql function is inlined into the expression before the volatility check
+CREATE FUNCTION discounted_sql(p numeric) RETURNS numeric LANGUAGE sql AS 'SELECT round(p * 0.9, 2)';
+SELECT proname, provolatile FROM pg_proc WHERE proname = 'discounted_sql';
+CREATE INDEX items_discounted_sql_idx ON items (discounted_sql(price));
+ANALYZE items;
+EXPLAIN (COSTS OFF) SELECT * FROM items WHERE discounted_sql(price) = 450.45;
+```
+
+```text
+CREATE FUNCTION
+    proname     | provolatile 
+----------------+-------------
+ discounted_sql | v
+(1 row)
+
+CREATE INDEX
+ANALYZE
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Bitmap Heap Scan on items
+   Recheck Cond: (round((price * 0.9), 2) = 450.45)
+   ->  Bitmap Index Scan on items_discounted_sql_idx
+         Index Cond: (round((price * 0.9), 2) = 450.45)
+(4 rows)
 ```
 
 ## A trigger function
 
-A trigger needs a function that returns the special type `trigger`. Inside it, the implicit record `NEW` holds the row being inserted or updated, and `OLD` holds the previous version on an update. This function stamps the current time onto `updated_at` before the row is written.
+A trigger function takes no arguments and returns `trigger`. Inside, `NEW` is the row being written and `OLD` the row it replaces; `TG_OP` tells you the operation. A `BEFORE` row trigger can change `NEW` and **must return it** for the row to be written. This one keeps `updated_at` honest no matter which client updates the row:
 
 ```sql
-CREATE FUNCTION set_updated_at()
-RETURNS trigger
+-- sql/before-trigger.sql
+CREATE FUNCTION set_updated_at() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -75,150 +253,545 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+
+CREATE TRIGGER products_set_updated_at
+BEFORE UPDATE ON products
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- the caller never mentions updated_at, yet it changes
+UPDATE products SET price = 132.00 WHERE name = 'Trail Jacket'
+RETURNING name, price, old.updated_at < new.updated_at AS timestamp_bumped;
 ```
 
 ```text
 CREATE FUNCTION
-```
-
-A `BEFORE` trigger must `RETURN NEW` — the row it returns is the one that actually gets stored, so this is how a trigger can modify incoming data.
-
-## Wiring the trigger
-
-`CREATE TRIGGER` connects the function to a table and an event. This one fires `BEFORE UPDATE` for each affected row.
-
-```sql
-CREATE TRIGGER trg_set_updated_at
-BEFORE UPDATE ON products
-FOR EACH ROW
-EXECUTE FUNCTION set_updated_at();
-```
-
-```text
 CREATE TRIGGER
-```
-
-Now any update refreshes the timestamp without the application having to remember:
-
-```sql
-UPDATE products SET price = 110.00 WHERE name = 'Trail Runner'
-RETURNING name, price, updated_at;
-```
-
-```text
-    name     | price  |          updated_at
--------------+--------+-------------------------------
- Trail Runner| 110.00 | 2026-06-25 09:14:02.118+00
+     name     | price  | timestamp_bumped 
+--------------+--------+------------------
+ Trail Jacket | 132.00 | t
 (1 row)
+
+UPDATE 1
 ```
 
-## Auditing on insert
+`RETURNING old.updated_at < new.updated_at` (PostgreSQL 18's `old`/`new` in `RETURNING`) proves the timestamp was bumped by the trigger; the statement never mentioned `updated_at`.
 
-The same pattern audits changes. Create an audit table, a trigger function that records the new row, and an `AFTER INSERT` trigger so the log is written once the insert succeeds.
+## Auditing with AFTER triggers and WHEN
+
+An `AFTER` row trigger runs once the row is written; its return value is ignored, so `RETURN NULL` is fine. The `WHEN` clause filters at the trigger level: the update trigger below fires only if the price really changed, and the second identical update leaves no audit row:
 
 ```sql
-CREATE TABLE product_audit (
-  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  product_id bigint NOT NULL,
-  action     text NOT NULL,
-  logged_at  timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE FUNCTION audit_product_insert()
-RETURNS trigger
+-- sql/after-trigger.sql
+CREATE FUNCTION audit_product() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  INSERT INTO product_audit (product_id, action)
-  VALUES (NEW.id, 'INSERT');
-  RETURN NEW;
+  IF TG_OP = 'INSERT' THEN
+    INSERT INTO product_audit (product_id, action, new_price) VALUES (NEW.id, 'insert', NEW.price);
+  ELSE
+    INSERT INTO product_audit (product_id, action, old_price, new_price) VALUES (NEW.id, 'update', OLD.price, NEW.price);
+  END IF;
+  RETURN NULL;   -- the return value of an AFTER row trigger is ignored
 END;
 $$;
 
-CREATE TRIGGER trg_audit_product_insert
-AFTER INSERT ON products
-FOR EACH ROW
-EXECUTE FUNCTION audit_product_insert();
+CREATE TRIGGER products_audit_insert AFTER INSERT ON products
+FOR EACH ROW EXECUTE FUNCTION audit_product();
+
+-- WHEN: fire only if the price really changed
+CREATE TRIGGER products_audit_update AFTER UPDATE ON products
+FOR EACH ROW WHEN (OLD.price IS DISTINCT FROM NEW.price)
+EXECUTE FUNCTION audit_product();
+
+INSERT INTO products (name, price) VALUES ('Wool Socks', 12.50);
+UPDATE products SET price = 14.00 WHERE name = 'Wool Socks';
+UPDATE products SET price = 14.00 WHERE name = 'Wool Socks';   -- same price: the audit trigger does not fire
+SELECT product_id, action, old_price, new_price FROM product_audit ORDER BY id;
 ```
 
 ```text
+CREATE FUNCTION
 CREATE TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+UPDATE 1
+UPDATE 1
+ product_id | action | old_price | new_price 
+------------+--------+-----------+-----------
+          4 | insert |           |     12.50
+          4 | update |     12.50 |     14.00
+(2 rows)
 ```
 
-An `AFTER` trigger runs once the row is safely written, which is right for logging — you only want an audit entry for inserts that actually happened.
+Two audit rows (the insert, and the first update), not three. Inserting from code fires the trigger the same way; each driver inserted one product and checked the audit table:
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/insert-fires-trigger.sql
+    INSERT INTO products (name, price) VALUES ($1, $2::text::numeric) RETURNING id \bind 'Rain Poncho' '19.00' \g
+    SELECT count(*) AS audit_rows_for_it FROM product_audit WHERE product_id = 5;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'INSERT INTO products (name, price) VALUES ($1, $2::text::numeric) RETURNING id',
+      ['Rain Poncho', '19.00'],
+    );
+    const audit = await pool.query('SELECT count(*) FROM product_audit WHERE product_id = $1', [res.rows[0].id]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO products (name, price) VALUES (%s, %s::text::numeric) RETURNING id",
+        ("Rain Poncho", "19.00"),
+    )
+    new_id = cur.fetchone()[0]
+    cur.execute("SELECT count(*) FROM product_audit WHERE product_id = %s", (new_id,))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var newID int64
+    err := conn.QueryRow(ctx,
+        "INSERT INTO products (name, price) VALUES ($1, $2::text::numeric) RETURNING id",
+        "Rain Poncho", "19.00").Scan(&newID)
+    var audits int64
+    err2 := conn.QueryRow(ctx, "SELECT count(*) FROM product_audit WHERE product_id = $1", newID).Scan(&audits)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let new_id: i64 = sqlx::query_scalar(
+        "INSERT INTO products (name, price) VALUES ($1, $2::text::numeric) RETURNING id",
+    )
+    .bind("Rain Poncho")
+    .bind("19.00")
+    .fetch_one(&pool)
+    .await?;
+    let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM product_audit WHERE product_id = $1")
+        .bind(new_id)
+        .fetch_one(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ id 
+----
+  5
+(1 row)
+
+INSERT 0 1
+ audit_rows_for_it 
+-------------------
+                 1
+(1 row)
+```
+
+## More trigger behaviors
+
+**A `BEFORE` trigger that returns `NULL` cancels the operation for that row**, silently (the statement reports `DELETE 0`, and no error). Occasionally useful, often surprising:
+
+```sql
+-- sql/cancel-row.sql
+CREATE FUNCTION forbid_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE NOTICE 'not deleting %', OLD.name;
+  RETURN NULL;   -- NULL from a BEFORE row trigger silently skips this row
+END;
+$$;
+CREATE TRIGGER products_no_delete BEFORE DELETE ON products FOR EACH ROW EXECUTE FUNCTION forbid_delete();
+DELETE FROM products WHERE name = 'Camp Stove';
+SELECT count(*) AS products_left FROM products;
+DROP TRIGGER products_no_delete ON products;
+```
+
+```text
+CREATE FUNCTION
+CREATE TRIGGER
+NOTICE:  not deleting Camp Stove
+DELETE 0
+ products_left 
+---------------
+             5
+(1 row)
+
+DROP TRIGGER
+```
+
+**Statement-level triggers** fire once per statement, not per row, and can see all the changed rows through a *transition table* (`REFERENCING NEW TABLE AS new_rows`). Here one `UPDATE` of five rows produces one notice:
+
+```sql
+-- sql/statement-trigger.sql
+CREATE FUNCTION log_bulk() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE NOTICE 'statement changed % rows, average new price %',
+    (SELECT count(*) FROM new_rows), (SELECT round(avg(price), 2) FROM new_rows);
+  RETURN NULL;
+END;
+$$;
+CREATE TRIGGER products_bulk AFTER UPDATE ON products
+REFERENCING NEW TABLE AS new_rows
+FOR EACH STATEMENT EXECUTE FUNCTION log_bulk();
+BEGIN;
+UPDATE products SET price = price * 1.1;
+ROLLBACK;
+DROP TRIGGER products_bulk ON products;
+```
+
+```text
+CREATE FUNCTION
+CREATE TRIGGER
+BEGIN
+NOTICE:  statement changed 5 rows, average new price 65.78
+UPDATE 5
+ROLLBACK
+DROP TRIGGER
+```
+
+**Validation** belongs in a `CHECK` constraint when it can be expressed as one. When it cannot (it needs other tables, or a custom message), a `BEFORE` trigger can raise the same error class with `USING ERRCODE = 'check_violation'` (SQLSTATE `23514`):
+
+```sql
+-- sql/raise-in-trigger.sql
+CREATE FUNCTION require_positive_price() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.price <= 0 THEN
+    RAISE EXCEPTION 'price must be positive, got %', NEW.price USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER products_positive_price BEFORE INSERT OR UPDATE ON products
+FOR EACH ROW EXECUTE FUNCTION require_positive_price();
+```
+
+```sql
+-- @expect-error 23514
+INSERT INTO products (name, price) VALUES ('Free Thing', 0);
+```
+
+```text
+ERROR:  price must be positive, got 0.00
+CONTEXT:  PL/pgSQL function require_positive_price() line 4 at RAISE
+```
+
+## Triggers can recurse
+
+A trigger that writes to its own table fires itself. This `AFTER UPDATE` trigger updates the same row again, which fires the trigger again, until PostgreSQL gives up:
+
+```sql
+-- sql/recursion-setup.sql
+CREATE FUNCTION touch_again() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE products SET updated_at = now() WHERE id = NEW.id;   -- fires this trigger again
+  RETURN NULL;
+END;
+$$;
+CREATE TRIGGER products_touch AFTER UPDATE ON products FOR EACH ROW EXECUTE FUNCTION touch_again();
+```
+
+```sql
+-- @expect-error stack depth limit exceeded
+\set VERBOSITY terse
+UPDATE products SET price = price WHERE id = 1;
+\set VERBOSITY verbose
+```
+
+```text
+ERROR:  stack depth limit exceeded
+```
+
+(`\set VERBOSITY terse` hides the roughly 100 lines of `CONTEXT` repeated by every level; the full message also carries `HINT: Increase the configuration parameter "max_stack_depth" (currently 2048kB)`, which is the wrong fix: the recursion has no end.) The guard is `pg_trigger_depth()`, which counts nested trigger calls. With `WHEN (pg_trigger_depth() = 0)` the trigger only fires for the user's own statement:
+
+```sql
+-- sql/recursion-fix.sql
+DROP TRIGGER products_touch ON products;
+CREATE TRIGGER products_touch AFTER UPDATE ON products
+FOR EACH ROW WHEN (pg_trigger_depth() = 0) EXECUTE FUNCTION touch_again();
+UPDATE products SET price = price WHERE id = 1 RETURNING name, price;
+DROP TRIGGER products_touch ON products;
+```
+
+```text
+DROP TRIGGER
+CREATE TRIGGER
+     name     | price  
+--------------+--------
+ Trail Jacket | 132.00
+(1 row)
+
+UPDATE 1
+DROP TRIGGER
+```
 
 ## How a trigger fires
 
-The flow is always the same: a write statement arrives, PostgreSQL detects it matches a trigger's event, the trigger function runs, and the operation continues with whatever the function returned.
+The flow is always the same: a write statement arrives, PostgreSQL detects it matches a trigger's event, the trigger function runs, and the operation continues with whatever the function returned. `pg_trigger` lists the triggers on a table:
 
 export const triggerDiagram = `flowchart TD
-  W[INSERT or UPDATE on products] --> E{Matches a trigger event}
-  E -->|BEFORE| B[set_updated_at runs, returns NEW]
-  B --> S[(Row written with new timestamp)]
-  E -->|AFTER| A[audit_product_insert runs]
+  W["INSERT or UPDATE on products"] --> E{"Matches a trigger event?"}
+  E -->|BEFORE| B["set_updated_at runs, returns NEW"]
+  B --> S[("Row written with new timestamp")]
+  E -->|AFTER| A["audit_product runs"]
   S --> A
-  A --> L[(Row recorded in product_audit)]`;
+  A --> L[("Row recorded in product_audit")]`;
 
 <Mermaid code={triggerDiagram} title="A write fires its matching trigger, which runs a function" />
 
+```sql
+-- sql/list-triggers.sql
+SELECT tgname AS trigger, tgrelid::regclass AS "table",
+       CASE WHEN tgtype & 2 = 2 THEN 'BEFORE' ELSE 'AFTER' END AS timing,
+       CASE WHEN tgtype & 1 = 1 THEN 'ROW' ELSE 'STATEMENT' END AS level
+FROM pg_trigger
+WHERE NOT tgisinternal AND tgrelid = 'products'::regclass
+ORDER BY tgname;
+```
+
+```text
+         trigger         |  table   | timing | level 
+-------------------------+----------+--------+-------
+ products_audit_insert   | products | AFTER  | ROW
+ products_audit_update   | products | AFTER  | ROW
+ products_positive_price | products | BEFORE | ROW
+ products_set_updated_at | products | BEFORE | ROW
+(4 rows)
+```
+
+## What a trigger costs
+
+A row trigger is a function call per row. Two identical 200 000-row tables, one with a `BEFORE UPDATE` trigger that just stamps a column:
+
+```sql
+-- sql/trigger-cost.sql
+CREATE TABLE t_plain (id int PRIMARY KEY, n int NOT NULL, touched timestamptz);
+CREATE TABLE t_trig  (id int PRIMARY KEY, n int NOT NULL, touched timestamptz);
+INSERT INTO t_plain SELECT g, 0, now() FROM generate_series(1, 200000) g;
+INSERT INTO t_trig  SELECT g, 0, now() FROM generate_series(1, 200000) g;
+CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.touched := clock_timestamp(); RETURN NEW; END;
+$$;
+CREATE TRIGGER t_trig_stamp BEFORE UPDATE ON t_trig FOR EACH ROW EXECUTE FUNCTION stamp();
+VACUUM ANALYZE t_plain;
+VACUUM ANALYZE t_trig;
+\timing on
+UPDATE t_plain SET n = n + 1;
+UPDATE t_trig  SET n = n + 1;
+\timing off
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 200000
+INSERT 0 200000
+CREATE FUNCTION
+CREATE TRIGGER
+VACUUM
+VACUUM
+Timing is on.
+UPDATE 200000
+Time: 436.775 ms
+UPDATE 200000
+Time: 635.656 ms
+Timing is off.
+```
+
+437 ms without the trigger, 636 ms with it: about 45 % more time for a trigger that does almost nothing. That is fine for an audit log on OLTP tables; it is a lot for a bulk load. A statement-level trigger with a transition table pays once per statement instead of once per row.
+
+## SECURITY DEFINER
+
+A function normally runs with the privileges of its caller. `SECURITY DEFINER` makes it run with the **owner's** privileges: a controlled doorway to data the caller cannot touch. Here `app_user` has no rights on `secrets`, but may call a function that counts its rows:
+
+```sql
+-- sql/security-definer.sql
+CREATE TABLE secrets (id int PRIMARY KEY, note text NOT NULL);
+INSERT INTO secrets VALUES (1, 'a'), (2, 'b'), (3, 'c');
+CREATE ROLE app_user NOLOGIN;
+GRANT USAGE ON SCHEMA public TO app_user;
+
+-- runs with the OWNER's rights, so app_user can count rows it cannot SELECT
+CREATE FUNCTION secret_count() RETURNS bigint LANGUAGE sql SECURITY DEFINER
+AS 'SELECT count(*) FROM secrets';
+GRANT EXECUTE ON FUNCTION secret_count() TO app_user;
+```
+
+That doorway has a well-known trap, which the next section uses.
+
+## Reading AI-generated code
+
+An assistant is asked for a helper that lets the application count rows without table access. It writes exactly the function above, `SECURITY DEFINER`, with a comment saying it is safe because the caller has no table rights:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "helper so the app can count rows without table access"
+CREATE FUNCTION secret_count() RETURNS bigint
+LANGUAGE sql
+SECURITY DEFINER
+AS 'SELECT count(*) FROM secrets';
+
+GRANT EXECUTE ON FUNCTION secret_count() TO app_user;`}>
+
+The function resolves `secrets` using the **caller's** `search_path`. Every session has a temporary schema `pg_temp` that is searched *first* for tables. A caller can create a temporary table with the same name, and the definer function, running with the owner's rights, reads the caller's table instead. The honest answer is 3; the hijacked answer is whatever the caller wants (here 42):
+
+```sql
+-- sql/security-definer-attack.sql
+SET ROLE app_user;
+SELECT secret_count() AS honest;
+-- app_user makes a temporary table with the same name: pg_temp comes first in the search path
+CREATE TEMP TABLE secrets (id int, note text);
+INSERT INTO secrets SELECT g, 'fake' FROM generate_series(1, 42) g;
+SELECT secret_count() AS hijacked;
+RESET ROLE;
+```
+
+```text
+SET
+ honest 
+--------
+      3
+(1 row)
+
+CREATE TABLE
+INSERT 0 42
+ hijacked 
+----------
+       42
+(1 row)
+
+RESET
+```
+
+In real attacks the substituted object is a function or operator, and the definer's privileges make it a privilege escalation. The remedy is documented in the PostgreSQL reference for `CREATE FUNCTION`: give every `SECURITY DEFINER` function its own `search_path`, with `pg_temp` **last** ([docs](https://www.postgresql.org/docs/18/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY)):
+
+```sql
+-- sql/security-definer-fix.sql
+-- the fix: pin the search path (pg_temp LAST) on every SECURITY DEFINER function
+ALTER FUNCTION secret_count() SET search_path = public, pg_temp;
+SET ROLE app_user;
+SELECT secret_count() AS after_fix;
+RESET ROLE;
+DROP OWNED BY app_user;
+DROP ROLE app_user;
+```
+
+```text
+ALTER FUNCTION
+SET
+ after_fix 
+-----------
+         3
+(1 row)
+
+RESET
+DROP OWNED
+DROP ROLE
+```
+
+The setting is stored with the function, where you can audit it:
+
+```sql
+-- sql/pinned-search-path.sql
+SELECT proname, prosecdef AS security_definer, proconfig AS pinned_settings
+FROM pg_proc WHERE proname = 'secret_count';
+```
+
+```text
+   proname    | security_definer |         pinned_settings         
+--------------+------------------+---------------------------------
+ secret_count | t                | {"search_path=public, pg_temp"}
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A function is code stored next to the data; a trigger is a subscription: "when this event happens to this table, call that function". `BEFORE` triggers are on the write path and can edit or veto the row; `AFTER` triggers see the finished row and are for consequences. Everything a trigger does runs inside the same transaction as the statement, so it commits or rolls back with it, and it runs whether or not the caller knows it exists. That is both the value and the hazard.
+
 ## Tips / gotchas
 
-- Triggers hide logic from anyone reading the application code. Document every trigger — what it does and which table it sits on — so a timestamp that updates "by magic" is never a mystery.
-- Keep functions small and single-purpose. A function that validates input is easy to test and reuse; one that does five unrelated things becomes the same tangle you were trying to avoid.
+- Triggers hide logic from anyone reading the application code. Document every trigger (what it does and which table it sits on) so a timestamp that updates "by magic" is never a mystery.
+- Keep functions small and single-purpose. A function that validates input is easy to test and reuse.
 - Choose `BEFORE` to modify or validate the incoming row (you can change `NEW`), and `AFTER` for side effects like logging that should only happen once the write succeeds.
-- A `BEFORE` row-level trigger function must `RETURN NEW` to let the row through; returning `NULL` silently cancels the operation for that row, which is occasionally useful but surprising.
+- A `BEFORE` row-level trigger function must `RETURN NEW` to let the row through; returning `NULL` silently cancels the row.
+- Use `WHEN (OLD.* IS DISTINCT FROM NEW.*)` or a column test to avoid firing on no-op updates, and `pg_trigger_depth()` to stop recursion.
+- Mark functions honestly: `IMMUTABLE` only if it is; index expressions need it.
+- Every `SECURITY DEFINER` function needs `SET search_path = ..., pg_temp` and a minimal `GRANT EXECUTE`.
+- Prefer a `CHECK` constraint to a validation trigger when it can express the rule.
 
 <Callout title="Logic that always runs">
-The strength of a trigger is that it cannot be skipped — every insert or update goes through it, whatever client made the change. That same strength is its danger: behavior lives somewhere the application code never mentions. Use triggers for invariants you truly want enforced everywhere, and write them down.
+The strength of a trigger is that it cannot be skipped: every insert or update goes through it, whatever client made the change. That same strength is its danger: behavior lives somewhere the application code never mentions. Use triggers for invariants you truly want enforced everywhere, and keep everything else in the application.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Function/trigger in the database | Always enforced, no matter which client or script writes the table | Harder to read, test, and debug than application code; invisible from the app's codebase |
-| Logic in the application | Easy to read, straightforward to test, uses normal version control and tooling | Not enforced if another client or script writes data directly, bypassing that application |
+| Trigger in the database | Runs for every client; cannot be skipped | Hidden logic; a row trigger cost +45 % on 200 000 updates (437 ms to 636 ms) |
+| Same logic in application code | Visible, testable, versionable with the app | Every client must remember it; bypassed by ad-hoc SQL |
+| Statement-level trigger + transition table | One call per statement, sees all rows | More complex; not for per-row edits |
+| `CHECK` constraint | Declarative, cheap, visible in `\d` | Cannot see other tables or customise the message |
+| `SECURITY DEFINER` | Controlled access to data the caller cannot read | Hijackable through the search path unless pinned |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Putting complex business logic in a trigger** — complex logic belongs in application code where anyone reading the codebase can see it, not hidden in a trigger nobody thinks to check.
-- **Forgetting a trigger exists** — and then being confused about why a row changed with no application code that ordered the change. Document every trigger clearly.
-- **Writing a slow trigger** — every insert/update on that table quietly gets slower, because the trigger runs inline on every write, not just on a query that calls it directly.
+- **"A trigger's return value always matters."** Only for `BEFORE` row triggers: `NULL` cancels the row. In an `AFTER` trigger it is ignored.
+- **"Any function can be indexed."** Only `IMMUTABLE` ones (or simple SQL functions that inline to immutable expressions).
+- **"A trigger that updates its own table is fine."** It recursed until `stack depth limit exceeded`; guard with `pg_trigger_depth()`.
+- **"`SECURITY DEFINER` is safe because the caller has no rights."** The caller controls `search_path` and `pg_temp` (42 rows from a table the caller made).
+- **"Triggers are free."** 45 % slower for a trigger that only stamps a column.
 
-> 💡 Real-world example
->
-> **Audit logging** — the classic reason teams reach for a trigger, since every change must be recorded no matter which client or script writes the table. Leaving it to application code alone means writes that bypass the app go unrecorded.
->
-> **Maintaining `updated_at`** — many teams use a `set_updated_at`-style trigger to guarantee the timestamp is always correct, while deliberately keeping the app's real business logic in application code instead, so it stays visible and testable.
-
-export const quizFunctions = [
+export const quizTriggers = [
   {
-    q: 'What type must a function return so it can be used by a trigger?',
-    options: ['void', 'trigger', 'record', 'boolean'],
+    q: 'A BEFORE row-level trigger function must do what for the row to be written?',
+    options: ['RETURN NULL', 'RETURN NEW', 'RETURN OLD only', 'Nothing; the return value is ignored'],
     answer: 1,
+    explain: 'RETURN NEW lets the (possibly modified) row through. RETURN NULL cancels it silently: `DELETE 0` in the lesson.',
   },
   {
-    q: 'Inside a BEFORE trigger function, what does the NEW record hold?',
-    options: [
-      'The previous version of the row only',
-      'The row being inserted or updated',
-      'A count of affected rows',
-      'The trigger definition',
-    ],
+    q: 'Which trigger timing is meant for side effects like an audit log that should only happen once the row is written?',
+    options: ['BEFORE', 'AFTER', 'INSTEAD OF only', 'Neither'],
     answer: 1,
+    explain: 'AFTER triggers see the finished row; their return value is ignored, so RETURN NULL is fine.',
   },
   {
-    q: 'Why is an AFTER trigger the right choice for writing an audit log?',
+    q: '`CREATE INDEX ON items (discounted(price))` fails with `functions in index expression must be marked IMMUTABLE`. What is the fix?',
     options: [
-      'It runs before validation so it is faster',
-      'It can modify the incoming row',
-      'It runs only once the write has succeeded',
-      'It cancels the operation by default',
+      'Use a hash index',
+      'If the function is truly deterministic, declare it IMMUTABLE',
+      'Run ANALYZE first',
+      'Change it to a trigger',
     ],
-    answer: 2,
+    answer: 1,
+    explain: 'The planner needs a guarantee the result never changes for the same input. After ALTER FUNCTION ... IMMUTABLE the index built and the query used it.',
+  },
+  {
+    q: 'What happens to a trigger that updates its own table, with no guard?',
+    options: [
+      'PostgreSQL ignores the nested update',
+      'It fires itself repeatedly until `stack depth limit exceeded`',
+      'The second update is deferred to commit',
+      'It deadlocks',
+    ],
+    answer: 1,
+    explain: '`WHEN (pg_trigger_depth() = 0)` restricts the trigger to the user\'s own statement.',
+  },
+  {
+    q: 'Why is a SECURITY DEFINER function without `SET search_path` dangerous?',
+    options: [
+      'It runs slowly',
+      'The caller can shadow the tables or functions it uses (for example with a temporary table), and the function then acts on them with the owner\'s privileges',
+      'It cannot be granted to roles',
+      'It always fails',
+    ],
+    answer: 1,
+    explain: 'secret_count() returned 42 from the caller\'s temp table instead of 3. Pinning `search_path = public, pg_temp` on the function restored 3.',
   },
 ];
 
-<Quiz client:visible id="advanced-postgres/functions-and-triggers" questions={quizFunctions} />
+<Quiz client:visible id="advanced-postgres/functions-and-triggers" questions={quizTriggers} />
 
 <ProgressTracker client:visible id="advanced-postgres/functions-and-triggers" />

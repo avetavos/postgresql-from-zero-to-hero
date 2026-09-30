@@ -1,6 +1,6 @@
 ---
-title: Functions และ triggers
-description: เขียน PL/pgSQL function เล็ก ๆ ที่คืนค่าด้วย CREATE FUNCTION ... LANGUAGE plpgsql แล้วต่อ trigger เพื่อให้รันเองอัตโนมัติ — เพื่อให้ updated_at เป็นปัจจุบันหรือเพื่อ audit ทุกการ insert
+title: Function และ Trigger
+description: เขียน function PL/pgSQL และ trigger แบบ row และ statement ดูว่า IMMUTABLE เปลี่ยนอะไรกับ index วัดต้นทุนของ trigger บน 200,000 update หลีกเลี่ยง recursion ไม่รู้จบ และป้องกัน function แบบ SECURITY DEFINER จากการแย่ง search_path
 sidebar:
   order: 5
 ---
@@ -10,64 +10,242 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-จนถึงตอนนี้ตรรกะทุกชิ้นอยู่ในแอปพลิเคชันของคุณ PostgreSQL ก็รันตรรกะเองได้เช่นกัน คือ **function** เป็นบล็อกของโค้ดที่มีชื่อและนำกลับมาใช้ซ้ำได้ซึ่งถูกเก็บไว้ในฐานข้อมูล และ **trigger** เป็นกฎที่สั่งให้ function ทำงานอัตโนมัติทุกครั้งที่ row เปลี่ยนแปลง พอรวมสองอย่างเข้าด้วยกัน คุณก็บังคับใช้พฤติกรรมจากที่เดียวได้ ไม่ว่าแอปพลิเคชันหรือคนใดจะมาแตะ table นั้น
+จนถึงตอนนี้ตรรกะทุกชิ้นอยู่ในแอปพลิเคชันของคุณ PostgreSQL รันตรรกะเองได้ด้วย: **function** คือบล็อกโค้ดที่มีชื่อและใช้ซ้ำได้ เก็บในฐานข้อมูล และ **trigger** คือกฎที่เรียก function โดยอัตโนมัติเมื่อ row เปลี่ยน ทั้งสองอย่างรวมกันให้คุณบังคับพฤติกรรมในที่เดียว ไม่ว่าแอปหรือคนไหนแตะ table
 
-เราทำงานกับ table `products` ที่ติดตามว่าแต่ละ row ถูกเปลี่ยนครั้งล่าสุดเมื่อใด
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ผลลัพธ์ (รวมข้อความ `NOTICE`) คัดลอกจาก `psql` ตัวเลขเวลามาจาก Mac เครื่องนี้
+
+## ชุดข้อมูล
+
+table `products` ที่ติดตามว่าแต่ละ row เปลี่ยนล่าสุดเมื่อไร และ table `product_audit` สำหรับบันทึกการเปลี่ยนแปลง:
 
 ```sql
+-- sql/setup.sql
 CREATE TABLE products (
   id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name       text NOT NULL,
   price      numeric(10, 2) NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE product_audit (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  product_id bigint NOT NULL,
+  action     text NOT NULL,
+  old_price  numeric(10, 2),
+  new_price  numeric(10, 2),
+  changed_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO products (name, price) VALUES ('Trail Jacket', 129.50), ('City Backpack', 89.00), ('Camp Stove', 45.00);
 ```
 
-## PL/pgSQL function เล็ก ๆ
+## function PL/pgSQL ขนาดเล็ก
 
-`CREATE FUNCTION` กับ `LANGUAGE plpgsql` นิยาม function ในภาษาเชิงกระบวนการ (procedural language) ของ PostgreSQL PL/pgSQL เพิ่มตัวแปร เงื่อนไข และลูปบนตัว SQL นี่คือ function เล็ก ๆ ที่ทำงานเดียวและคืนค่า คือใช้ส่วนลดเป็นเปอร์เซ็นต์กับราคา
+`CREATE FUNCTION` ด้วย `LANGUAGE plpgsql` นิยาม function ในภาษาโพรซีเดอรัลของ PostgreSQL PL/pgSQL เพิ่มตัวแปร เงื่อนไข และ loop บน SQL ตัวนี้ลดราคาตามเปอร์เซ็นต์ และปฏิเสธ input ที่ไร้สาระด้วย `RAISE EXCEPTION` มันถูกระบุเป็น `IMMUTABLE` (input เดียวกัน ผลเดียวกัน ไม่เข้าถึงฐานข้อมูล) ด้วยเหตุผลที่อธิบายสองหัวข้อถัดไป:
 
 ```sql
-CREATE FUNCTION apply_discount(price numeric, percent numeric)
+-- sql/function.sql
+CREATE FUNCTION apply_discount(price numeric, pct numeric)
 RETURNS numeric
 LANGUAGE plpgsql
+IMMUTABLE
 AS $$
 BEGIN
-  IF percent < 0 OR percent > 100 THEN
-    RAISE EXCEPTION 'percent must be between 0 and 100, got %', percent;
+  IF pct < 0 OR pct > 100 THEN
+    RAISE EXCEPTION 'discount must be between 0 and 100, got %', pct;
   END IF;
-  RETURN round(price - (price * percent / 100), 2);
+  RETURN round(price * (1 - pct / 100), 2);
 END;
 $$;
+
+SELECT name, price, apply_discount(price, 15) AS after_15_percent FROM products ORDER BY id;
 ```
 
 ```text
 CREATE FUNCTION
+     name      | price  | after_15_percent 
+---------------+--------+------------------
+ Trail Jacket  | 129.50 |           110.08
+ City Backpack |  89.00 |            75.65
+ Camp Stove    |  45.00 |            38.25
+(3 rows)
 ```
 
-ตัว `$$` คือ dollar quoting ที่คั่นเนื้อหา (body) ของ function เพื่อให้คุณไม่ต้อง escape เครื่องหมายคำพูดข้างใน เรียก function เหมือนฟังก์ชันในตัวใด ๆ:
+input ที่ผิดล้มด้วยข้อความชัดเจน และ SQLSTATE `P0001` (ค่าเริ่มต้นของ `RAISE EXCEPTION`) บวกบรรทัด `CONTEXT` ที่บอกชื่อ function และบรรทัด:
 
 ```sql
-SELECT name, price, apply_discount(price, 15) AS sale_price
-FROM products;
+-- @expect-error P0001
+SELECT apply_discount(100, 150);
 ```
 
 ```text
-    name     | price  | sale_price
--------------+--------+------------
- Trail Runner| 120.00 |     102.00
- City Loafer |  95.00 |      80.75
-(2 rows)
+ERROR:  discount must be between 0 and 100, got 150
+CONTEXT:  PL/pgSQL function apply_discount(numeric,numeric) line 4 at RAISE
+```
+
+การเรียกจากโค้ดแอปคือ query ธรรมดาที่มี parameter (ส่งเป็น text และ cast ด้วย `::text::numeric` เพื่อให้ทุก driver ส่งได้โดยไม่ต้องใช้ไลบรารี decimal) แต่ละ driver รันหนึ่งครั้ง:
+
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/call-function.sql
+    SELECT apply_discount($1::text::numeric, $2::text::numeric)::float8 AS discounted \bind '80' '15' \g
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'SELECT apply_discount($1::text::numeric, $2::text::numeric)::float8 AS discounted',
+      ['80', '15'],
+    );
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "SELECT apply_discount(%s::text::numeric, %s::text::numeric)::float8 AS discounted",
+        ("80", "15"),
+    )
+    row = cur.fetchone()
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var discounted float64
+    err := conn.QueryRow(ctx,
+        "SELECT apply_discount($1::text::numeric, $2::text::numeric)::float8 AS discounted",
+        "80", "15").Scan(&discounted)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let row = sqlx::query(
+        "SELECT apply_discount($1::text::numeric, $2::text::numeric)::float8 AS discounted",
+    )
+    .bind("80")
+    .bind("15")
+    .fetch_one(&pool)
+    .await?;
+    ```
+  </TabItem>
+</Tabs>
+
+```text
+ discounted 
+------------
+         68
+(1 row)
+```
+
+```text
+$ (each snippet run once against the dataset above; every driver inserts its own new product, so the ids differ)
+[apply_discount 80, 15]  Node.js (pg 8.23.0):       { discounted: 68 }
+[apply_discount 80, 15]  Python (psycopg 3.3.6):    (68.0,)
+[apply_discount 80, 15]  Go (pgx v5.11.0):          68
+[apply_discount 80, 15]  Rust (sqlx 0.9.0):         68
+[insert + audit rows]    Node.js:                   id 7, audit rows 1
+[insert + audit rows]    Python:                    id 8, audit rows 1
+[insert + audit rows]    Go:                        id 9, audit rows 1
+[insert + audit rows]    Rust:                      id 10, audit rows 1
+```
+
+### IMMUTABLE, STABLE, VOLATILE
+
+ทุก function มีป้าย **volatility** ที่บอก planner ว่าสมมติอะไรได้ `IMMUTABLE`: argument เดียวกัน ผลเดียวกัน ตลอดไป (`lower`, เลขคณิต) `STABLE`: ผลเดียวกันภายใน statement เดียว (`now()` หรือการอ่าน table) `VOLATILE` (ค่าเริ่มต้น): อะไรก็ได้ รวมถึง side effect (`random()`) มันสำคัญกับ index: expression index ต้องการ function ที่ planner เชื่อได้ว่าไม่เปลี่ยนคำตอบ function ใหม่เป็น `VOLATILE` โดยค่าเริ่มต้น:
+
+```sql
+-- sql/volatility.sql
+CREATE TABLE items (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, price numeric(10, 2) NOT NULL);
+INSERT INTO items (price) SELECT (g % 1000) + 0.5 FROM generate_series(1, 100000) g;
+-- a function is VOLATILE unless you say otherwise
+CREATE FUNCTION discounted(p numeric) RETURNS numeric LANGUAGE plpgsql
+AS $$ BEGIN RETURN round(p * 0.9, 2); END; $$;
+SELECT proname, provolatile FROM pg_proc WHERE proname = 'discounted';
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+CREATE FUNCTION
+  proname   | provolatile 
+------------+-------------
+ discounted | v
+(1 row)
+```
+
+```sql
+-- @expect-error 42P17
+CREATE INDEX items_discounted_idx ON items (discounted(price));
+```
+
+```text
+ERROR:  functions in index expression must be marked IMMUTABLE
+```
+
+ประกาศเป็น `IMMUTABLE` (เฉพาะเมื่อเป็นจริง: index ที่สร้างบน function ที่โกหกจะคืนคำตอบผิดทีหลัง) แล้ว index ทำงานและถูกใช้โดย query ที่เขียน expression ซ้ำ:
+
+```sql
+-- sql/volatility-immutable.sql
+ALTER FUNCTION discounted(numeric) IMMUTABLE;
+CREATE INDEX items_discounted_idx ON items (discounted(price));
+ANALYZE items;
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM items WHERE discounted(price) = 450.45;
+```
+
+```text
+ALTER FUNCTION
+CREATE INDEX
+ANALYZE
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on items (actual time=0.062..0.195 rows=100.00 loops=1)
+   Recheck Cond: (discounted(price) = 450.45)
+   Heap Blocks: exact=100
+   ->  Bitmap Index Scan on items_discounted_idx (actual time=0.047..0.047 rows=100.00 loops=1)
+         Index Cond: (discounted(price) = 450.45)
+         Index Searches: 1
+ Planning Time: 0.157 ms
+ Execution Time: 0.216 ms
+(8 rows)
+```
+
+มีข้อละเอียดอ่อนหนึ่งข้อ function แบบ `LANGUAGE sql` ง่าย ๆ ถูก *inline* เข้าไปใน expression ที่เรียกก่อนการตรวจนั้น PostgreSQL จึงยอมรับ index แม้ป้ายยังเป็น `VOLATILE` และ plan แสดงเนื้อที่ถูก inline:
+
+```sql
+-- sql/volatility-inlined.sql
+-- a simple LANGUAGE sql function is inlined into the expression before the volatility check
+CREATE FUNCTION discounted_sql(p numeric) RETURNS numeric LANGUAGE sql AS 'SELECT round(p * 0.9, 2)';
+SELECT proname, provolatile FROM pg_proc WHERE proname = 'discounted_sql';
+CREATE INDEX items_discounted_sql_idx ON items (discounted_sql(price));
+ANALYZE items;
+EXPLAIN (COSTS OFF) SELECT * FROM items WHERE discounted_sql(price) = 450.45;
+```
+
+```text
+CREATE FUNCTION
+    proname     | provolatile 
+----------------+-------------
+ discounted_sql | v
+(1 row)
+
+CREATE INDEX
+ANALYZE
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Bitmap Heap Scan on items
+   Recheck Cond: (round((price * 0.9), 2) = 450.45)
+   ->  Bitmap Index Scan on items_discounted_sql_idx
+         Index Cond: (round((price * 0.9), 2) = 450.45)
+(4 rows)
 ```
 
 ## trigger function
 
-trigger ต้องการ function ที่คืนชนิดพิเศษ `trigger` ภายใน function นั้น record โดยปริยายชื่อ `NEW` จะถือ row ที่กำลัง insert หรือ update อยู่ ส่วน `OLD` ถือเวอร์ชันก่อนหน้าเมื่อเป็นการ update ตัวอย่างนี้ประทับเวลาปัจจุบันลงบน `updated_at` ก่อนที่ row จะถูกเขียนจริง
+trigger function ไม่รับ argument และคืน `trigger` ข้างใน `NEW` คือ row ที่กำลังเขียนและ `OLD` คือ row ที่มันแทนที่; `TG_OP` บอกการดำเนินการ `BEFORE` row trigger เปลี่ยน `NEW` ได้และ **ต้อง return มัน** เพื่อให้ row ถูกเขียน ตัวนี้ทำให้ `updated_at` ตรงเสมอไม่ว่า client ไหนจะ update row:
 
 ```sql
-CREATE FUNCTION set_updated_at()
-RETURNS trigger
+-- sql/before-trigger.sql
+CREATE FUNCTION set_updated_at() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -75,150 +253,545 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+
+CREATE TRIGGER products_set_updated_at
+BEFORE UPDATE ON products
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- the caller never mentions updated_at, yet it changes
+UPDATE products SET price = 132.00 WHERE name = 'Trail Jacket'
+RETURNING name, price, old.updated_at < new.updated_at AS timestamp_bumped;
 ```
 
 ```text
 CREATE FUNCTION
-```
-
-trigger แบบ `BEFORE` ต้อง `RETURN NEW` — row ที่ function คืนกลับมาคือ row ที่ถูกเก็บจริง ดังนั้นนี่คือวิธีที่ trigger แก้ไขข้อมูลขาเข้าได้
-
-## การต่อ trigger
-
-`CREATE TRIGGER` เชื่อม function เข้ากับ table และเหตุการณ์ ตัวนี้จุดชนวน `BEFORE UPDATE` สำหรับแต่ละ row ที่ได้รับผลกระทบ
-
-```sql
-CREATE TRIGGER trg_set_updated_at
-BEFORE UPDATE ON products
-FOR EACH ROW
-EXECUTE FUNCTION set_updated_at();
-```
-
-```text
 CREATE TRIGGER
-```
-
-ตอนนี้การ update ใด ๆ จะรีเฟรช timestamp โดยที่แอปพลิเคชันไม่ต้องคอยจำ:
-
-```sql
-UPDATE products SET price = 110.00 WHERE name = 'Trail Runner'
-RETURNING name, price, updated_at;
-```
-
-```text
-    name     | price  |          updated_at
--------------+--------+-------------------------------
- Trail Runner| 110.00 | 2026-06-25 09:14:02.118+00
+     name     | price  | timestamp_bumped 
+--------------+--------+------------------
+ Trail Jacket | 132.00 | t
 (1 row)
+
+UPDATE 1
 ```
 
-## การ audit ตอน insert
+`RETURNING old.updated_at < new.updated_at` (`old`/`new` ใน `RETURNING` ของ PostgreSQL 18) พิสูจน์ว่า timestamp ถูก trigger ยก statement ไม่เคยพูดถึง `updated_at`
 
-แพตเทิร์นเดียวกันใช้ audit การเปลี่ยนแปลงได้ สร้าง table audit, trigger function ที่บันทึก row ใหม่ และ trigger แบบ `AFTER INSERT` เพื่อให้ log ถูกเขียนเมื่อการ insert สำเร็จ
+## Audit ด้วย AFTER trigger และ WHEN
+
+`AFTER` row trigger ทำงานเมื่อ row ถูกเขียนแล้ว ค่าที่คืนถูกละเลย `RETURN NULL` จึงใช้ได้ clause `WHEN` กรองที่ระดับ trigger: trigger สำหรับ update ด้านล่างทำงานเมื่อราคาเปลี่ยนจริงเท่านั้น และ update เหมือนเดิมครั้งที่สองไม่ทิ้ง audit row:
 
 ```sql
-CREATE TABLE product_audit (
-  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  product_id bigint NOT NULL,
-  action     text NOT NULL,
-  logged_at  timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE FUNCTION audit_product_insert()
-RETURNS trigger
+-- sql/after-trigger.sql
+CREATE FUNCTION audit_product() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  INSERT INTO product_audit (product_id, action)
-  VALUES (NEW.id, 'INSERT');
-  RETURN NEW;
+  IF TG_OP = 'INSERT' THEN
+    INSERT INTO product_audit (product_id, action, new_price) VALUES (NEW.id, 'insert', NEW.price);
+  ELSE
+    INSERT INTO product_audit (product_id, action, old_price, new_price) VALUES (NEW.id, 'update', OLD.price, NEW.price);
+  END IF;
+  RETURN NULL;   -- the return value of an AFTER row trigger is ignored
 END;
 $$;
 
-CREATE TRIGGER trg_audit_product_insert
-AFTER INSERT ON products
-FOR EACH ROW
-EXECUTE FUNCTION audit_product_insert();
+CREATE TRIGGER products_audit_insert AFTER INSERT ON products
+FOR EACH ROW EXECUTE FUNCTION audit_product();
+
+-- WHEN: fire only if the price really changed
+CREATE TRIGGER products_audit_update AFTER UPDATE ON products
+FOR EACH ROW WHEN (OLD.price IS DISTINCT FROM NEW.price)
+EXECUTE FUNCTION audit_product();
+
+INSERT INTO products (name, price) VALUES ('Wool Socks', 12.50);
+UPDATE products SET price = 14.00 WHERE name = 'Wool Socks';
+UPDATE products SET price = 14.00 WHERE name = 'Wool Socks';   -- same price: the audit trigger does not fire
+SELECT product_id, action, old_price, new_price FROM product_audit ORDER BY id;
 ```
 
 ```text
+CREATE FUNCTION
 CREATE TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+UPDATE 1
+UPDATE 1
+ product_id | action | old_price | new_price 
+------------+--------+-----------+-----------
+          4 | insert |           |     12.50
+          4 | update |     12.50 |     14.00
+(2 rows)
 ```
 
-trigger แบบ `AFTER` ทำงานเมื่อ row ถูกเขียนอย่างปลอดภัยแล้ว ซึ่งเหมาะกับการ logging — คุณต้องการรายการ audit เฉพาะสำหรับการ insert ที่เกิดขึ้นจริงเท่านั้น
+สอง audit row (การ insert และ update ครั้งแรก) ไม่ใช่สาม การ insert จากโค้ดทำให้ trigger ทำงานแบบเดียวกัน แต่ละ driver insert หนึ่งสินค้าและตรวจ table audit:
 
-## trigger จุดชนวนอย่างไร
+<Tabs syncKey="lang">
+  <TabItem label="psql">
+    ```sql
+    -- sql/insert-fires-trigger.sql
+    INSERT INTO products (name, price) VALUES ($1, $2::text::numeric) RETURNING id \bind 'Rain Poncho' '19.00' \g
+    SELECT count(*) AS audit_rows_for_it FROM product_audit WHERE product_id = 5;
+    ```
+  </TabItem>
+  <TabItem label="Node.js">
+    ```js
+    const res = await pool.query(
+      'INSERT INTO products (name, price) VALUES ($1, $2::text::numeric) RETURNING id',
+      ['Rain Poncho', '19.00'],
+    );
+    const audit = await pool.query('SELECT count(*) FROM product_audit WHERE product_id = $1', [res.rows[0].id]);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    cur.execute(
+        "INSERT INTO products (name, price) VALUES (%s, %s::text::numeric) RETURNING id",
+        ("Rain Poncho", "19.00"),
+    )
+    new_id = cur.fetchone()[0]
+    cur.execute("SELECT count(*) FROM product_audit WHERE product_id = %s", (new_id,))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    var newID int64
+    err := conn.QueryRow(ctx,
+        "INSERT INTO products (name, price) VALUES ($1, $2::text::numeric) RETURNING id",
+        "Rain Poncho", "19.00").Scan(&newID)
+    var audits int64
+    err2 := conn.QueryRow(ctx, "SELECT count(*) FROM product_audit WHERE product_id = $1", newID).Scan(&audits)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let new_id: i64 = sqlx::query_scalar(
+        "INSERT INTO products (name, price) VALUES ($1, $2::text::numeric) RETURNING id",
+    )
+    .bind("Rain Poncho")
+    .bind("19.00")
+    .fetch_one(&pool)
+    .await?;
+    let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM product_audit WHERE product_id = $1")
+        .bind(new_id)
+        .fetch_one(&pool)
+        .await?;
+    ```
+  </TabItem>
+</Tabs>
 
-ลำดับเป็นแบบเดียวกันเสมอ: คำสั่งเขียนมาถึง PostgreSQL ตรวจพบว่าตรงกับเหตุการณ์ของ trigger, trigger function จึงทำงาน และ operation เดินหน้าต่อด้วยสิ่งที่ function คืนกลับมา
+```text
+ id 
+----
+  5
+(1 row)
+
+INSERT 0 1
+ audit_rows_for_it 
+-------------------
+                 1
+(1 row)
+```
+
+## พฤติกรรม trigger อื่น ๆ
+
+**`BEFORE` trigger ที่คืน `NULL` ยกเลิกการดำเนินการสำหรับ row นั้น** อย่างเงียบ ๆ (statement รายงาน `DELETE 0` และไม่มี error) บางครั้งมีประโยชน์ มักทำให้แปลกใจ:
+
+```sql
+-- sql/cancel-row.sql
+CREATE FUNCTION forbid_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE NOTICE 'not deleting %', OLD.name;
+  RETURN NULL;   -- NULL from a BEFORE row trigger silently skips this row
+END;
+$$;
+CREATE TRIGGER products_no_delete BEFORE DELETE ON products FOR EACH ROW EXECUTE FUNCTION forbid_delete();
+DELETE FROM products WHERE name = 'Camp Stove';
+SELECT count(*) AS products_left FROM products;
+DROP TRIGGER products_no_delete ON products;
+```
+
+```text
+CREATE FUNCTION
+CREATE TRIGGER
+NOTICE:  not deleting Camp Stove
+DELETE 0
+ products_left 
+---------------
+             5
+(1 row)
+
+DROP TRIGGER
+```
+
+**trigger ระดับ statement** ทำงานครั้งเดียวต่อ statement ไม่ใช่ต่อ row และเห็น row ที่เปลี่ยนทั้งหมดผ่าน *transition table* (`REFERENCING NEW TABLE AS new_rows`) ตรงนี้ `UPDATE` หนึ่งครั้งของห้า row สร้าง notice หนึ่งข้อความ:
+
+```sql
+-- sql/statement-trigger.sql
+CREATE FUNCTION log_bulk() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE NOTICE 'statement changed % rows, average new price %',
+    (SELECT count(*) FROM new_rows), (SELECT round(avg(price), 2) FROM new_rows);
+  RETURN NULL;
+END;
+$$;
+CREATE TRIGGER products_bulk AFTER UPDATE ON products
+REFERENCING NEW TABLE AS new_rows
+FOR EACH STATEMENT EXECUTE FUNCTION log_bulk();
+BEGIN;
+UPDATE products SET price = price * 1.1;
+ROLLBACK;
+DROP TRIGGER products_bulk ON products;
+```
+
+```text
+CREATE FUNCTION
+CREATE TRIGGER
+BEGIN
+NOTICE:  statement changed 5 rows, average new price 65.78
+UPDATE 5
+ROLLBACK
+DROP TRIGGER
+```
+
+**การตรวจสอบ** ควรอยู่ใน constraint `CHECK` เมื่อเขียนเป็นแบบนั้นได้ เมื่อทำไม่ได้ (ต้องดู table อื่น หรือต้องการข้อความเอง) `BEFORE` trigger ส่ง error class เดียวกันได้ด้วย `USING ERRCODE = 'check_violation'` (SQLSTATE `23514`):
+
+```sql
+-- sql/raise-in-trigger.sql
+CREATE FUNCTION require_positive_price() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.price <= 0 THEN
+    RAISE EXCEPTION 'price must be positive, got %', NEW.price USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER products_positive_price BEFORE INSERT OR UPDATE ON products
+FOR EACH ROW EXECUTE FUNCTION require_positive_price();
+```
+
+```sql
+-- @expect-error 23514
+INSERT INTO products (name, price) VALUES ('Free Thing', 0);
+```
+
+```text
+ERROR:  price must be positive, got 0.00
+CONTEXT:  PL/pgSQL function require_positive_price() line 4 at RAISE
+```
+
+## trigger วนซ้ำได้
+
+trigger ที่เขียนลง table ของตัวเองจะทำให้ตัวเองทำงาน trigger `AFTER UPDATE` นี้ update row เดิมอีกครั้ง ซึ่งทำให้ trigger ทำงานอีก จนกระทั่ง PostgreSQL ยอมแพ้:
+
+```sql
+-- sql/recursion-setup.sql
+CREATE FUNCTION touch_again() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE products SET updated_at = now() WHERE id = NEW.id;   -- fires this trigger again
+  RETURN NULL;
+END;
+$$;
+CREATE TRIGGER products_touch AFTER UPDATE ON products FOR EACH ROW EXECUTE FUNCTION touch_again();
+```
+
+```sql
+-- @expect-error stack depth limit exceeded
+\set VERBOSITY terse
+UPDATE products SET price = price WHERE id = 1;
+\set VERBOSITY verbose
+```
+
+```text
+ERROR:  stack depth limit exceeded
+```
+
+(`\set VERBOSITY terse` ซ่อน `CONTEXT` ราว 100 บรรทัดที่แต่ละระดับพิมพ์ซ้ำ ข้อความเต็มยังมี `HINT: Increase the configuration parameter "max_stack_depth" (currently 2048kB)` ซึ่งเป็นวิธีแก้ที่ผิด: recursion ไม่มีจุดจบ) ตัวป้องกันคือ `pg_trigger_depth()` ที่นับการเรียก trigger ซ้อน ด้วย `WHEN (pg_trigger_depth() = 0)` trigger ทำงานเฉพาะ statement ของผู้ใช้เอง:
+
+```sql
+-- sql/recursion-fix.sql
+DROP TRIGGER products_touch ON products;
+CREATE TRIGGER products_touch AFTER UPDATE ON products
+FOR EACH ROW WHEN (pg_trigger_depth() = 0) EXECUTE FUNCTION touch_again();
+UPDATE products SET price = price WHERE id = 1 RETURNING name, price;
+DROP TRIGGER products_touch ON products;
+```
+
+```text
+DROP TRIGGER
+CREATE TRIGGER
+     name     | price  
+--------------+--------
+ Trail Jacket | 132.00
+(1 row)
+
+UPDATE 1
+DROP TRIGGER
+```
+
+## trigger ทำงานอย่างไร
+
+การไหลเหมือนกันเสมอ: statement เขียนมาถึง PostgreSQL ตรวจพบว่าตรงกับ event ของ trigger, trigger function ทำงาน และการดำเนินการดำเนินต่อด้วยสิ่งที่ function คืน `pg_trigger` ลิสต์ trigger บน table:
 
 export const triggerDiagram = `flowchart TD
-  W[INSERT or UPDATE on products] --> E{Matches a trigger event}
-  E -->|BEFORE| B[set_updated_at runs, returns NEW]
-  B --> S[(Row written with new timestamp)]
-  E -->|AFTER| A[audit_product_insert runs]
+  W["INSERT or UPDATE on products"] --> E{"Matches a trigger event?"}
+  E -->|BEFORE| B["set_updated_at runs, returns NEW"]
+  B --> S[("Row written with new timestamp")]
+  E -->|AFTER| A["audit_product runs"]
   S --> A
-  A --> L[(Row recorded in product_audit)]`;
+  A --> L[("Row recorded in product_audit")]`;
 
-<Mermaid code={triggerDiagram} title="การเขียนจุดชนวน trigger ที่ตรงกัน ซึ่งรัน function" />
+<Mermaid code={triggerDiagram} title="การเขียนทำให้ trigger ที่ตรงกันทำงาน และมันรัน function" />
+
+```sql
+-- sql/list-triggers.sql
+SELECT tgname AS trigger, tgrelid::regclass AS "table",
+       CASE WHEN tgtype & 2 = 2 THEN 'BEFORE' ELSE 'AFTER' END AS timing,
+       CASE WHEN tgtype & 1 = 1 THEN 'ROW' ELSE 'STATEMENT' END AS level
+FROM pg_trigger
+WHERE NOT tgisinternal AND tgrelid = 'products'::regclass
+ORDER BY tgname;
+```
+
+```text
+         trigger         |  table   | timing | level 
+-------------------------+----------+--------+-------
+ products_audit_insert   | products | AFTER  | ROW
+ products_audit_update   | products | AFTER  | ROW
+ products_positive_price | products | BEFORE | ROW
+ products_set_updated_at | products | BEFORE | ROW
+(4 rows)
+```
+
+## trigger มีต้นทุนเท่าไร
+
+row trigger คือการเรียก function หนึ่งครั้งต่อ row สอง table เหมือนกัน 200 000 row อันหนึ่งมี `BEFORE UPDATE` trigger ที่แค่ประทับ column:
+
+```sql
+-- sql/trigger-cost.sql
+CREATE TABLE t_plain (id int PRIMARY KEY, n int NOT NULL, touched timestamptz);
+CREATE TABLE t_trig  (id int PRIMARY KEY, n int NOT NULL, touched timestamptz);
+INSERT INTO t_plain SELECT g, 0, now() FROM generate_series(1, 200000) g;
+INSERT INTO t_trig  SELECT g, 0, now() FROM generate_series(1, 200000) g;
+CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.touched := clock_timestamp(); RETURN NEW; END;
+$$;
+CREATE TRIGGER t_trig_stamp BEFORE UPDATE ON t_trig FOR EACH ROW EXECUTE FUNCTION stamp();
+VACUUM ANALYZE t_plain;
+VACUUM ANALYZE t_trig;
+\timing on
+UPDATE t_plain SET n = n + 1;
+UPDATE t_trig  SET n = n + 1;
+\timing off
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 200000
+INSERT 0 200000
+CREATE FUNCTION
+CREATE TRIGGER
+VACUUM
+VACUUM
+Timing is on.
+UPDATE 200000
+Time: 436.775 ms
+UPDATE 200000
+Time: 635.656 ms
+Timing is off.
+```
+
+437 ms เมื่อไม่มี trigger, 636 ms เมื่อมี: ใช้เวลามากขึ้นราว 45 % สำหรับ trigger ที่แทบไม่ทำอะไร ซึ่งไม่เป็นไรสำหรับ audit log บน table แบบ OLTP แต่มากสำหรับ bulk load trigger ระดับ statement ที่ใช้ transition table จ่ายครั้งเดียวต่อ statement แทนต่อ row
+
+## SECURITY DEFINER
+
+function ปกติรันด้วยสิทธิ์ของผู้เรียก `SECURITY DEFINER` ทำให้มันรันด้วยสิทธิ์ของ **เจ้าของ**: ประตูที่ควบคุมได้ไปสู่ข้อมูลที่ผู้เรียกแตะไม่ได้ ตรงนี้ `app_user` ไม่มีสิทธิ์บน `secrets` แต่เรียก function ที่นับ row ของมันได้:
+
+```sql
+-- sql/security-definer.sql
+CREATE TABLE secrets (id int PRIMARY KEY, note text NOT NULL);
+INSERT INTO secrets VALUES (1, 'a'), (2, 'b'), (3, 'c');
+CREATE ROLE app_user NOLOGIN;
+GRANT USAGE ON SCHEMA public TO app_user;
+
+-- runs with the OWNER's rights, so app_user can count rows it cannot SELECT
+CREATE FUNCTION secret_count() RETURNS bigint LANGUAGE sql SECURITY DEFINER
+AS 'SELECT count(*) FROM secrets';
+GRANT EXECUTE ON FUNCTION secret_count() TO app_user;
+```
+
+ประตูนั้นมีกับดักที่รู้จักกันดี ซึ่งหัวข้อถัดไปใช้
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอตัวช่วยที่ให้แอปนับ row โดยไม่ต้องเข้าถึง table มันเขียน function ข้างบนเป๊ะ ๆ เป็น `SECURITY DEFINER` พร้อมคอมเมนต์ว่าปลอดภัยเพราะผู้เรียกไม่มีสิทธิ์บน table:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "helper so the app can count rows without table access"
+CREATE FUNCTION secret_count() RETURNS bigint
+LANGUAGE sql
+SECURITY DEFINER
+AS 'SELECT count(*) FROM secrets';
+
+GRANT EXECUTE ON FUNCTION secret_count() TO app_user;`}>
+
+function หา `secrets` ด้วย `search_path` ของ **ผู้เรียก** ทุก session มี schema ชั่วคราว `pg_temp` ที่ถูกค้นหา *ก่อน* สำหรับ table ผู้เรียกสร้าง temporary table ชื่อเดียวกันได้ และ function แบบ definer ที่รันด้วยสิทธิ์เจ้าของ อ่าน table ของผู้เรียกแทน คำตอบที่ซื่อสัตย์คือ 3; คำตอบที่ถูกแย่งคือสิ่งที่ผู้เรียกต้องการ (ที่นี่ 42):
+
+```sql
+-- sql/security-definer-attack.sql
+SET ROLE app_user;
+SELECT secret_count() AS honest;
+-- app_user makes a temporary table with the same name: pg_temp comes first in the search path
+CREATE TEMP TABLE secrets (id int, note text);
+INSERT INTO secrets SELECT g, 'fake' FROM generate_series(1, 42) g;
+SELECT secret_count() AS hijacked;
+RESET ROLE;
+```
+
+```text
+SET
+ honest 
+--------
+      3
+(1 row)
+
+CREATE TABLE
+INSERT 0 42
+ hijacked 
+----------
+       42
+(1 row)
+
+RESET
+```
+
+ในการโจมตีจริง วัตถุที่ถูกสลับคือ function หรือ operator และสิทธิ์ของ definer ทำให้เป็นการยกระดับสิทธิ์ ทางแก้มีในเอกสารอ้างอิง `CREATE FUNCTION` ของ PostgreSQL: ให้ทุก function แบบ `SECURITY DEFINER` มี `search_path` ของตัวเอง โดยให้ `pg_temp` อยู่ **ท้ายสุด** ([docs](https://www.postgresql.org/docs/18/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY)):
+
+```sql
+-- sql/security-definer-fix.sql
+-- the fix: pin the search path (pg_temp LAST) on every SECURITY DEFINER function
+ALTER FUNCTION secret_count() SET search_path = public, pg_temp;
+SET ROLE app_user;
+SELECT secret_count() AS after_fix;
+RESET ROLE;
+DROP OWNED BY app_user;
+DROP ROLE app_user;
+```
+
+```text
+ALTER FUNCTION
+SET
+ after_fix 
+-----------
+         3
+(1 row)
+
+RESET
+DROP OWNED
+DROP ROLE
+```
+
+การตั้งค่าถูกเก็บพร้อม function ตรวจสอบได้:
+
+```sql
+-- sql/pinned-search-path.sql
+SELECT proname, prosecdef AS security_definer, proconfig AS pinned_settings
+FROM pg_proc WHERE proname = 'secret_count';
+```
+
+```text
+   proname    | security_definer |         pinned_settings         
+--------------+------------------+---------------------------------
+ secret_count | t                | {"search_path=public, pg_temp"}
+(1 row)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+function คือโค้ดที่เก็บไว้ข้างข้อมูล; trigger คือการสมัครรับ: "เมื่อ event นี้เกิดกับ table นี้ ให้เรียก function นั้น" trigger `BEFORE` อยู่บนเส้นทางการเขียนและแก้หรือ veto row ได้; trigger `AFTER` เห็น row ที่เสร็จแล้วและใช้สำหรับผลที่ตามมา ทุกอย่างที่ trigger ทำรันใน transaction เดียวกับ statement จึง commit หรือ rollback ไปพร้อมกัน และรันไม่ว่าผู้เรียกจะรู้ว่ามันมีอยู่หรือไม่ นั่นคือทั้งคุณค่าและอันตราย
 
 ## เคล็ดลับและข้อควรระวัง
 
-- trigger ซ่อนตรรกะจากใครก็ตามที่อ่านโค้ดแอปพลิเคชัน จงบันทึกเอกสารของทุก trigger — ว่าทำอะไรและอยู่บน table ไหน — เพื่อให้ timestamp ที่อัปเดต "อย่างมหัศจรรย์" ไม่เป็นปริศนา
-- ทำให้ function เล็กและมีหน้าที่เดียว function ที่ตรวจสอบ input นั้นทดสอบและนำกลับมาใช้ซ้ำได้ง่าย ส่วน function ที่ทำห้าอย่างไม่เกี่ยวกันจะกลายเป็นความยุ่งเหยิงแบบเดียวกับที่คุณพยายามหลีกเลี่ยง
-- เลือก `BEFORE` เพื่อแก้ไขหรือตรวจสอบ row ขาเข้า (คุณเปลี่ยน `NEW` ได้) และ `AFTER` สำหรับผลข้างเคียงอย่างการ logging ที่ควรเกิดขึ้นเฉพาะเมื่อการเขียนสำเร็จ
-- trigger function แบบ row-level ของ `BEFORE` ต้อง `RETURN NEW` เพื่อปล่อยให้ row ผ่าน การคืน `NULL` จะยกเลิก operation สำหรับ row นั้นอย่างเงียบ ๆ ซึ่งบางครั้งมีประโยชน์แต่ก็ชวนประหลาดใจ
+- trigger ซ่อนตรรกะจากคนที่อ่านโค้ดแอป บันทึกทุก trigger (ทำอะไรและอยู่บน table ไหน) เพื่อไม่ให้ timestamp ที่อัปเดต "ด้วยเวทมนตร์" เป็นปริศนา
+- เก็บ function ให้เล็กและมีจุดประสงค์เดียว function ที่ตรวจสอบ input ทดสอบและใช้ซ้ำได้ง่าย
+- เลือก `BEFORE` เพื่อแก้หรือตรวจสอบ row ที่เข้ามา (เปลี่ยน `NEW` ได้) และ `AFTER` สำหรับ side effect เช่น logging ที่ควรเกิดเมื่อการเขียนสำเร็จแล้ว
+- function ของ `BEFORE` row-level trigger ต้อง `RETURN NEW` เพื่อให้ row ผ่าน; การคืน `NULL` ยกเลิก row อย่างเงียบ ๆ
+- ใช้ `WHEN (OLD.* IS DISTINCT FROM NEW.*)` หรือการทดสอบ column เพื่อไม่ให้ทำงานกับ update ที่ไม่เปลี่ยนอะไร และ `pg_trigger_depth()` เพื่อหยุด recursion
+- ติดป้าย function อย่างซื่อสัตย์: `IMMUTABLE` เฉพาะเมื่อเป็น; expression ของ index ต้องการมัน
+- ทุก function แบบ `SECURITY DEFINER` ต้องมี `SET search_path = ..., pg_temp` และ `GRANT EXECUTE` น้อยที่สุด
+- เลือก constraint `CHECK` แทน trigger ตรวจสอบเมื่อมันแสดงกฎได้
 
-<Callout title="ตรรกะที่รันเสมอ">
-จุดแข็งของ trigger คือข้ามไม่ได้ ทุกการ insert หรือ update ต้องผ่าน trigger เสมอ ไม่ว่า client ตัวไหนเป็นคนแก้ข้อมูล แต่จุดแข็งเดียวกันนี้ก็เป็นอันตราย เพราะพฤติกรรมไปอยู่ในที่ที่โค้ดแอปพลิเคชันไม่เคยพูดถึง ใช้ trigger กับ invariant ที่คุณต้องการบังคับทุกที่จริง ๆ และเขียนบันทึกไว้เสมอ
+<Callout title="ตรรกะที่ทำงานเสมอ">
+จุดแข็งของ trigger คือข้ามไม่ได้: ทุก insert หรือ update ผ่านมัน ไม่ว่า client ไหนเป็นผู้เปลี่ยน จุดแข็งเดียวกันคืออันตรายของมัน: พฤติกรรมอยู่ในที่ที่โค้ดแอปไม่เคยพูดถึง ใช้ trigger สำหรับ invariant ที่คุณต้องการบังคับทุกที่จริง ๆ และเก็บทุกอย่างอื่นไว้ในแอป
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| function/trigger ในฐานข้อมูล | บังคับใช้เสมอไม่ว่า client หรือ script ไหนจะเขียน table | อ่าน ทดสอบ และ debug ยากกว่าโค้ดแอปพลิเคชัน มองไม่เห็นจาก codebase ของแอป |
-| logic ในแอปพลิเคชัน | อ่านง่าย เขียน test ได้ตรงไปตรงมา ใช้ version control และ tooling ปกติ | ไม่ถูกบังคับใช้ถ้ามี client หรือ script อื่นเขียนข้อมูลตรง ๆ โดยข้ามแอปนั้นไป |
+| trigger ในฐานข้อมูล | ทำงานกับทุก client ข้ามไม่ได้ | ตรรกะซ่อน; row trigger เพิ่ม 45 % บน update 200 000 ครั้ง (437 ms เป็น 636 ms) |
+| ตรรกะเดียวกันในโค้ดแอป | เห็นได้ ทดสอบได้ มีเวอร์ชันไปกับแอป | ทุก client ต้องจำ; ถูกข้ามโดย SQL แบบ ad-hoc |
+| trigger ระดับ statement + transition table | เรียกครั้งเดียวต่อ statement เห็นทุก row | ซับซ้อนกว่า; ไม่เหมาะกับการแก้ต่อ row |
+| constraint `CHECK` | declarative ถูก เห็นใน `\d` | ดู table อื่นหรือปรับข้อความไม่ได้ |
+| `SECURITY DEFINER` | เข้าถึงข้อมูลที่ผู้เรียกอ่านไม่ได้แบบควบคุมได้ | ถูกแย่งผ่าน search path ได้ถ้าไม่ตรึง |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใส่ business logic ที่ซับซ้อนไว้ใน trigger** — logic ที่ซับซ้อนควรอยู่ในแอปพลิเคชันที่คนอ่าน codebase มองเห็นได้ ไม่ใช่ซ่อนอยู่ใน trigger ที่ไม่มีใครนึกถึง
-- **ลืมว่ามี trigger อยู่** — แล้วงงว่าทำไม row เปลี่ยนแปลงโดยที่ไม่มีโค้ดส่วนไหนในแอปสั่งให้เปลี่ยน จงบันทึกเอกสารของทุก trigger ไว้ให้ชัดเจน
-- **เขียน trigger ที่ทำงานช้า** — ทุก insert/update บน table นั้นจะช้าลงตามไปด้วยอย่างเงียบ ๆ เพราะ trigger รันแทรกอยู่ในทุก write ไม่ใช่แค่ query ที่เรียกใช้ตรง ๆ
+- **"ค่าที่ trigger คืนสำคัญเสมอ"** สำคัญเฉพาะ `BEFORE` row trigger: `NULL` ยกเลิก row ใน `AFTER` trigger มันถูกละเลย
+- **"function ใดก็ index ได้"** เฉพาะตัวที่ `IMMUTABLE` (หรือ SQL function ง่าย ๆ ที่ inline เป็น expression แบบ immutable)
+- **"trigger ที่ update table ตัวเองไม่เป็นไร"** มันวนจน `stack depth limit exceeded`; ป้องกันด้วย `pg_trigger_depth()`
+- **"`SECURITY DEFINER` ปลอดภัยเพราะผู้เรียกไม่มีสิทธิ์"** ผู้เรียกควบคุม `search_path` และ `pg_temp` (42 row จาก table ที่ผู้เรียกสร้างเอง)
+- **"trigger ฟรี"** ช้าลง 45 % สำหรับ trigger ที่แค่ประทับ column
 
-> 💡 ตัวอย่างจากของจริง
->
-> **Audit logging** — เป็นเหตุผลคลาสสิกที่ทีมใช้ trigger เพราะต้องบันทึกทุกการเปลี่ยนแปลงไม่ว่า client หรือ script ไหนจะเขียน table นั้น ถ้าฝากไว้ที่โค้ดแอปพลิเคชันอย่างเดียว การเขียนที่ข้ามแอปไปจะไม่ถูกบันทึก
->
-> **การรักษา `updated_at`** — หลายทีมใช้ trigger แบบ `set_updated_at` เพื่อรับประกันว่า timestamp ถูกต้องเสมอ แต่ business logic จริง ๆ ของแอป ส่วนใหญ่ทีมจะจงใจเก็บไว้ในโค้ดแอปพลิเคชันแทน เพื่อให้มองเห็นและทดสอบได้ง่าย
-
-export const quizFunctions = [
+export const quizTriggers = [
   {
-    q: 'function ต้องคืนค่าชนิดใดเพื่อให้ trigger ใช้ได้?',
-    options: ['void', 'trigger', 'record', 'boolean'],
+    q: 'function ของ BEFORE row-level trigger ต้องทำอะไรเพื่อให้ row ถูกเขียน?',
+    options: ['RETURN NULL', 'RETURN NEW', 'RETURN OLD อย่างเดียว', 'ไม่ต้องทำอะไร ค่าที่คืนถูกละเลย'],
     answer: 1,
+    explain: 'RETURN NEW ปล่อย row (ที่อาจถูกแก้) ผ่าน RETURN NULL ยกเลิกอย่างเงียบ ๆ: `DELETE 0` ในบทเรียน',
   },
   {
-    q: 'ภายใน trigger function แบบ BEFORE record NEW ถืออะไรไว้?',
-    options: [
-      'เฉพาะเวอร์ชันก่อนหน้าของ row เท่านั้น',
-      'row ที่กำลังถูก insert หรือ update',
-      'จำนวน row ที่ได้รับผลกระทบ',
-      'นิยามของ trigger',
-    ],
+    q: 'trigger timing ไหนเหมาะกับ side effect เช่น audit log ที่ควรเกิดเมื่อ row ถูกเขียนแล้ว?',
+    options: ['BEFORE', 'AFTER', 'INSTEAD OF อย่างเดียว', 'ไม่มีอันไหน'],
     answer: 1,
+    explain: 'AFTER trigger เห็น row ที่เสร็จแล้ว ค่าที่คืนถูกละเลย RETURN NULL จึงใช้ได้',
   },
   {
-    q: 'ทำไม trigger แบบ AFTER จึงเป็นทางเลือกที่ถูกต้องสำหรับการเขียน audit log?',
+    q: '`CREATE INDEX ON items (discounted(price))` ล้มด้วย `functions in index expression must be marked IMMUTABLE` วิธีแก้คืออะไร?',
     options: [
-      'รันก่อนการตรวจสอบจึงเร็วกว่า',
-      'แก้ไข row ขาเข้าได้',
-      'รันเฉพาะเมื่อการเขียนสำเร็จแล้วเท่านั้น',
-      'ยกเลิก operation โดยค่าตั้งต้น',
+      'ใช้ hash index',
+      'ถ้า function deterministic จริง ให้ประกาศเป็น IMMUTABLE',
+      'รัน ANALYZE ก่อน',
+      'เปลี่ยนเป็น trigger',
     ],
-    answer: 2,
+    answer: 1,
+    explain: 'planner ต้องการหลักประกันว่าผลไม่เปลี่ยนสำหรับ input เดียวกัน หลัง ALTER FUNCTION ... IMMUTABLE index สร้างได้และ query ใช้มัน',
+  },
+  {
+    q: 'จะเกิดอะไรกับ trigger ที่ update table ของตัวเองโดยไม่มีตัวป้องกัน?',
+    options: [
+      'PostgreSQL ละเลย update ซ้อน',
+      'มันทำให้ตัวเองทำงานซ้ำจน `stack depth limit exceeded`',
+      'update ครั้งที่สองถูกเลื่อนไปตอน commit',
+      'เกิด deadlock',
+    ],
+    answer: 1,
+    explain: '`WHEN (pg_trigger_depth() = 0)` จำกัด trigger ให้ทำงานเฉพาะ statement ของผู้ใช้เอง',
+  },
+  {
+    q: 'ทำไม function แบบ SECURITY DEFINER ที่ไม่มี `SET search_path` จึงอันตราย?',
+    options: [
+      'ช้า',
+      'ผู้เรียกบังตา table หรือ function ที่มันใช้ได้ (เช่นด้วย temporary table) แล้ว function ทำงานกับสิ่งนั้นด้วยสิทธิ์ของเจ้าของ',
+      'ให้สิทธิ์กับ role ไม่ได้',
+      'ล้มเสมอ',
+    ],
+    answer: 1,
+    explain: 'secret_count() คืน 42 จาก temp table ของผู้เรียกแทน 3 การตรึง `search_path = public, pg_temp` บน function คืนค่า 3',
   },
 ];
 
-<Quiz client:visible id="advanced-postgres/functions-and-triggers" questions={quizFunctions} />
+<Quiz client:visible id="advanced-postgres/functions-and-triggers" questions={quizTriggers} />
 
 <ProgressTracker client:visible id="advanced-postgres/functions-and-triggers" />
