@@ -62,4 +62,4 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
   </Card>
 </CardGrid>
 
-Every command, query, and output in this course was verified against **PostgreSQL 18** (the `postgres:18` Docker image) as of September 2026.
+Every SQL fence in this course is executed by `npm run verify` against **PostgreSQL 18.6** (`postgres:18.6`), each lesson in its own fresh database; outputs are real psql output, and driver examples were run once with pg 8.23.0, psycopg 3.3.6, pgx 5.11.0 and sqlx 0.9.0 (verified 2026-09-30).
