@@ -1,6 +1,6 @@
 ---
 title: Constraints
-description: Keep data honest with constraints — primary keys, foreign keys with ON DELETE rules, uniqueness, not-null, check expressions, and column defaults.
+description: Enforcing data integrity in the schema — NOT NULL, DEFAULT, PRIMARY KEY, UNIQUE, CHECK, and FOREIGN KEY with ON DELETE — plus adding them from a driver.
 sidebar:
   order: 4
 ---
@@ -10,89 +10,224 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 Types decide what kind of value a column can hold; **constraints** decide which values and combinations are actually allowed. A constraint is a rule the server checks on every insert and update, rejecting anything that breaks it. Because the database enforces them, constraints hold no matter which application or person writes the data — they are the backbone of data integrity.
 
-We will model a tiny store with `customers` and `orders` to see each kind of constraint at work.
+We will model a tiny store with `customers` and `orders` to see each kind of constraint at work, and we will make each one fail on purpose so you see the real error and its SQLSTATE code.
+
+> Every output was produced by running the fences on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026), in one empty database, top to bottom. Timings are from this Mac.
 
 ## NOT NULL and DEFAULT
 
 A `NOT NULL` constraint forbids the absence of a value, so the column must always be filled. A `DEFAULT` supplies a value when an insert leaves the column out. They pair naturally: a sensible default plus `NOT NULL` means the column is always present without forcing every insert to spell it out.
 
 ```sql
+-- sql/customers.sql
 CREATE TABLE customers (
   id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name       text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+INSERT INTO customers (name) VALUES ('Nadia Frost'), ('Kofi Mensah');
+SELECT id, name, created_at IS NOT NULL AS created_at_filled FROM customers;
 ```
 
-Here `name` must always be provided, while `created_at` fills itself with the current moment unless you supply one.
+```text
+CREATE TABLE
+INSERT 0 2
+ id |    name     | created_at_filled 
+----+-------------+-------------------
+  1 | Nadia Frost | t
+  2 | Kofi Mensah | t
+(2 rows)
+```
+
+Here `name` must always be provided, while `created_at` fills itself with the current moment unless you supply one. Violating `NOT NULL` fails with SQLSTATE `23502`, and the `DETAIL` shows the whole failing row:
+
+```sql
+-- @expect-error 23502
+INSERT INTO customers (name) VALUES (NULL);
+```
+
+```text
+ERROR:  null value in column "name" of relation "customers" violates not-null constraint
+DETAIL:  Failing row contains (3, null, 2026-09-30 06:07:40.143206+00).
+```
+
+Notice the `3` in that row: the failed insert still consumed an identity value (previous lesson), so the next customer will be 4.
 
 ## PRIMARY KEY
 
-A `PRIMARY KEY` marks the column (or columns) that uniquely identify a row. It is shorthand for `NOT NULL` plus `UNIQUE`, and a table may have only one. The `id` column above is the primary key for `customers`.
+A `PRIMARY KEY` marks the column (or columns) that uniquely identify a row. It is shorthand for `NOT NULL` plus `UNIQUE`, and a table may have only one. The `id` column above is the primary key for `customers`. Forcing a duplicate (with the `OVERRIDING SYSTEM VALUE` escape hatch, since the identity column would never produce one itself) fails with `23505`:
+
+```sql
+-- @expect-error 23505
+INSERT INTO customers (id, name) OVERRIDING SYSTEM VALUE VALUES (1, 'Impostor');
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "customers_pkey"
+DETAIL:  Key (id)=(1) already exists.
+```
 
 ## UNIQUE
 
-A `UNIQUE` constraint forbids duplicate values in a column while still allowing nulls. It is how you express rules like "no two customers may share an email address" without making that column the primary key.
+A `UNIQUE` constraint forbids duplicate values in a column. It is how you express rules like "no two customers may share an email address" without making that column the primary key. Naming the constraint `customers_email_unique` is optional but pays off: error messages and later `ALTER TABLE` statements refer to it by name instead of an auto-generated label. It is enforced by an index, which `\d` lists under `Indexes`, so a unique constraint has the write cost of a B-tree index.
 
 ```sql
+-- sql/unique-email.sql
 ALTER TABLE customers
   ADD COLUMN email text,
   ADD CONSTRAINT customers_email_unique UNIQUE (email);
+UPDATE customers SET email = 'nadia@example.com' WHERE id = 1;
+INSERT INTO customers (name) VALUES ('Ilse Brandt'), ('Tomas Weiss');
+SELECT id, name, email FROM customers ORDER BY id;
+\d customers
 ```
 
-Naming the constraint `customers_email_unique` is optional but pays off: error messages and later `ALTER TABLE` statements can refer to it by name instead of an auto-generated label.
+```text
+ALTER TABLE
+UPDATE 1
+INSERT 0 2
+ id |    name     |       email       
+----+-------------+-------------------
+  1 | Nadia Frost | nadia@example.com
+  2 | Kofi Mensah | 
+  4 | Ilse Brandt | 
+  5 | Tomas Weiss | 
+(4 rows)
+
+                                  Table "public.customers"
+   Column   |           Type           | Collation | Nullable |           Default            
+------------+--------------------------+-----------+----------+------------------------------
+ id         | bigint                   |           | not null | generated always as identity
+ name       | text                     |           | not null | 
+ created_at | timestamp with time zone |           | not null | now()
+ email      | text                     |           |          | 
+Indexes:
+    "customers_pkey" PRIMARY KEY, btree (id)
+    "customers_email_unique" UNIQUE CONSTRAINT, btree (email)
+```
+
+Look at the `email` column: three customers have NULL and there is no error. By default `NULL` values are considered distinct from each other, so `UNIQUE` allows any number of them. A real duplicate fails:
+
+```sql
+-- @expect-error 23505
+UPDATE customers SET email = 'nadia@example.com' WHERE id = 2;
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "customers_email_unique"
+DETAIL:  Key (email)=(nadia@example.com) already exists.
+```
+
+If you want "at most one NULL", PostgreSQL 15 added `UNIQUE NULLS NOT DISTINCT`:
+
+```sql
+-- sql/nulls-not-distinct.sql
+CREATE TABLE members (
+  email text,
+  CONSTRAINT members_email_key UNIQUE NULLS NOT DISTINCT (email)
+);
+INSERT INTO members VALUES (NULL);
+```
+
+```sql
+-- @expect-error 23505
+INSERT INTO members VALUES (NULL);
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "members_email_key"
+DETAIL:  Key (email)=(null) already exists.
+```
 
 ## CHECK
 
-A `CHECK` constraint tests an expression against each row and rejects the write if it evaluates to false. Use it to encode business rules the type alone cannot express, such as a price that must be positive.
+A `CHECK` constraint tests an expression against each row and rejects the write if it evaluates to false. Use it to encode business rules the type alone cannot express, such as a price that must be positive, or a discount that cannot exceed the total (a check may reference several columns of the same row).
 
 ```sql
+-- sql/orders.sql
 CREATE TABLE orders (
   id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   customer_id bigint NOT NULL,
   total       numeric(10, 2) NOT NULL,
-  CONSTRAINT orders_total_positive CHECK (total > 0)
+  discount    numeric(10, 2),
+  CONSTRAINT orders_total_positive CHECK (total > 0),
+  CONSTRAINT orders_discount_valid CHECK (discount >= 0 AND discount <= total)
 );
 ```
 
-Any attempt to insert an order with a zero or negative `total` now fails before the row is stored.
+Any attempt to insert an order with a zero or negative `total` now fails before the row is stored, with `23514`, and so does a discount larger than the total:
+
+```sql
+-- @expect-error 23514
+INSERT INTO orders (customer_id, total) VALUES (1, 0);
+```
+
+```text
+ERROR:  new row for relation "orders" violates check constraint "orders_total_positive"
+DETAIL:  Failing row contains (1, 1, 0.00, null).
+```
+
+```sql
+-- @expect-error 23514
+INSERT INTO orders (customer_id, total, discount) VALUES (1, 10.00, 15.00);
+```
+
+```text
+ERROR:  new row for relation "orders" violates check constraint "orders_discount_valid"
+DETAIL:  Failing row contains (2, 1, 10.00, 15.00).
+```
+
+One subtlety: a `CHECK` only rejects when the expression is **false**. When it evaluates to NULL ("unknown") the row passes. The `discount` column has no `NOT NULL`, so a NULL discount sails through `discount >= 0` (you will see such a row in a later output). If a NULL should be rejected, say so with `NOT NULL`.
 
 ## FOREIGN KEY
 
 A `FOREIGN KEY` ties a column to a key in another table, guaranteeing that every `customer_id` in `orders` points at a real row in `customers`. This is **referential integrity**: the database will not let you create an order for a customer that does not exist, nor leave an order pointing at a customer you delete.
 
+Without the constraint, nothing stops an order for customer 999 (there is no such customer). That row sits there as an orphan until someone trips over it:
+
 ```sql
+-- sql/orders-before-fk.sql
+INSERT INTO orders (customer_id, total) VALUES (999, 20.00);
+SELECT id, customer_id, total FROM orders;
+DELETE FROM orders WHERE customer_id = 999;
+```
+
+```text
+INSERT 0 1
+ id | customer_id | total 
+----+-------------+-------
+  3 |         999 | 20.00
+(1 row)
+
+DELETE 1
+```
+
+Now add the constraint. It also works as a driver migration — the SQL is the same, only the way you hand it over changes:
+
+```sql
+-- sql/orders-fk.sql
 ALTER TABLE orders
   ADD CONSTRAINT orders_customer_fk
   FOREIGN KEY (customer_id) REFERENCES customers (id)
   ON DELETE CASCADE;
+INSERT INTO orders (customer_id, total, discount) VALUES (1, 30.00, 5.00), (1, 12.50, NULL), (2, 99.00, 0);
+SELECT id, customer_id, total, discount FROM orders ORDER BY id;
 ```
 
-The `ON DELETE` clause decides what happens to dependent rows when the referenced row is removed. `CASCADE` deletes the matching orders along with the customer, while `RESTRICT` blocks the deletion as long as any order still references that customer. Choose `CASCADE` when child rows have no meaning without their parent, and `RESTRICT` when you want a deliberate guard against accidental loss.
-
-The two tables now relate like this, with each order pointing back at exactly one customer.
-
-export const fkDiagram = `flowchart LR
-  subgraph customers
-    C1[id PK]
-    C2[name]
-    C3[email UNIQUE]
-  end
-  subgraph orders
-    O1[id PK]
-    O2[customer_id FK]
-    O3[total]
-  end
-  O2 -->|REFERENCES| C1`;
-
-<Mermaid code={fkDiagram} title="orders.customer_id references customers.id" />
-
-## Running it from a driver
-
-Constraints live in DDL, so applications usually add them through a migration. The statement is the same SQL you would type in `psql`, just handed over by the driver.
+```text
+ALTER TABLE
+INSERT 0 3
+ id | customer_id | total | discount 
+----+-------------+-------+----------
+  4 |           1 | 30.00 |     5.00
+  5 |           1 | 12.50 |         
+  6 |           2 | 99.00 |     0.00
+(3 rows)
+```
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -146,14 +281,381 @@ Constraints live in DDL, so applications usually add them through a migration. T
   </TabItem>
 </Tabs>
 
+Each driver snippet was run once against a scratch database that already had the two tables, then asked the catalog what it created (`c` means `ON DELETE CASCADE`):
+
+```text
+$ node app.mjs        # pg 8.23.0 (confdeltype 'c' means ON DELETE CASCADE)
+{ confdeltype: 'c' }
+
+$ python app.py        # psycopg 3.3.6
+('c',)
+
+$ go run .        # pgx v5.11.0
+confdeltype: c
+
+$ cargo run        # sqlx 0.9.0
+confdeltype: c
+```
+
 **In pgAdmin:** a table's constraints appear under its Constraints node in the browser tree, and the Properties dialog has tabs for primary key, foreign key, check, and unique constraints if you prefer a form over SQL.
+
+An order for a missing customer is now refused with `23503`:
+
+```sql
+-- @expect-error 23503
+INSERT INTO orders (customer_id, total) VALUES (999, 20.00);
+```
+
+```text
+ERROR:  insert or update on table "orders" violates foreign key constraint "orders_customer_fk"
+DETAIL:  Key (customer_id)=(999) is not present in table "customers".
+```
+
+The two tables now relate like this, with each order pointing back at exactly one customer.
+
+export const fkDiagram = `flowchart LR
+  subgraph customers
+    C1[id PK]
+    C2[name]
+    C3[email UNIQUE]
+  end
+  subgraph orders
+    O1[id PK]
+    O2[customer_id FK]
+    O3[total]
+  end
+  O2 -->|REFERENCES| C1`;
+
+<Mermaid code={fkDiagram} title="orders.customer_id references customers.id" />
+
+### Adding a constraint to a table that already has data
+
+Adding a constraint validates existing rows first. If one violates it the `ALTER` fails and nothing is added (the 99.00 order is over the limit):
+
+```sql
+-- @expect-error 23514
+ALTER TABLE orders ADD CONSTRAINT orders_small CHECK (total < 50);
+```
+
+```text
+ERROR:  check constraint "orders_small" of relation "orders" is violated by some row
+```
+
+Clean the data first, then add the constraint. On big tables there is a two-step `NOT VALID` / `VALIDATE CONSTRAINT` approach that avoids a long lock; the altering-schema lesson shows it.
+
+## ON DELETE: what happens to the children
+
+The `ON DELETE` clause decides what happens to dependent rows when the referenced row is removed. The `orders_customer_fk` above uses `CASCADE`: deleting customer 1 deletes their orders too (rolled back here so the data stays):
+
+```sql
+-- sql/on-delete-cascade.sql
+BEGIN;
+SELECT count(*) AS orders_before FROM orders;
+DELETE FROM customers WHERE id = 1 RETURNING id, name;
+SELECT count(*) AS orders_left FROM orders;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ orders_before 
+---------------
+             3
+(1 row)
+
+ id |    name     
+----+-------------
+  1 | Nadia Frost
+(1 row)
+
+DELETE 1
+ orders_left 
+-------------
+           1
+(1 row)
+
+ROLLBACK
+```
+
+There are five options: `NO ACTION` (the default), `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT`. Choose `CASCADE` when child rows have no meaning without their parent, `SET NULL` when they should survive unlinked, and `RESTRICT` or `NO ACTION` when you want a deliberate guard against accidental loss. Real behaviour of three of them:
+
+```sql
+-- sql/on-delete-actions.sql
+CREATE TABLE teams (id int PRIMARY KEY, name text NOT NULL);
+CREATE TABLE p_restrict (id int PRIMARY KEY, team_id int REFERENCES teams ON DELETE RESTRICT);
+CREATE TABLE p_noaction (id int PRIMARY KEY, team_id int REFERENCES teams ON DELETE NO ACTION);
+CREATE TABLE p_setnull  (id int PRIMARY KEY, team_id int REFERENCES teams ON DELETE SET NULL);
+INSERT INTO teams VALUES (1, 'Harbor'), (2, 'Orchard'), (3, 'Tide');
+INSERT INTO p_restrict VALUES (1, 1);
+INSERT INTO p_noaction VALUES (1, 2);
+INSERT INTO p_setnull  VALUES (1, 3);
+DELETE FROM teams WHERE id = 3;
+SELECT * FROM p_setnull;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 3
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+DELETE 1
+ id | team_id 
+----+---------
+  1 |        
+(1 row)
+```
+
+`SET NULL` left the child in place with an empty `team_id`. `RESTRICT` and `NO ACTION` both refuse the delete, but with different SQLSTATE codes and wording:
+
+```sql
+-- @expect-error 23001
+DELETE FROM teams WHERE id = 1;
+```
+
+```text
+ERROR:  update or delete on table "teams" violates RESTRICT setting of foreign key constraint "p_restrict_team_id_fkey" on table "p_restrict"
+DETAIL:  Key (id)=(1) is referenced from table "p_restrict".
+```
+
+```sql
+-- @expect-error 23503
+DELETE FROM teams WHERE id = 2;
+```
+
+```text
+ERROR:  update or delete on table "teams" violates foreign key constraint "p_noaction_team_id_fkey" on table "p_noaction"
+DETAIL:  Key (id)=(2) is still referenced from table "p_noaction".
+```
+
+Are they equivalent? Not entirely. The difference appears with `DEFERRABLE` constraints. `NO ACTION` is checked at the end of the statement — or, if the constraint is `DEFERRABLE INITIALLY DEFERRED`, at `COMMIT`, so you may break the reference temporarily and repair it inside the transaction. `RESTRICT` is always checked immediately and cannot be deferred ([docs](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK)). Proof with two identical constraints that differ only in the action:
+
+```sql
+-- sql/deferred-no-action.sql
+CREATE TABLE d_noaction (id int PRIMARY KEY, team_id int,
+  FOREIGN KEY (team_id) REFERENCES teams ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED);
+CREATE TABLE d_restrict (id int PRIMARY KEY, team_id int,
+  FOREIGN KEY (team_id) REFERENCES teams ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED);
+INSERT INTO teams VALUES (10, 'Anchor'), (11, 'Beacon');
+INSERT INTO d_noaction VALUES (1, 10);
+INSERT INTO d_restrict VALUES (1, 11);
+
+BEGIN;
+DELETE FROM teams WHERE id = 10;               -- child still points at 10: no error yet
+INSERT INTO teams VALUES (10, 'Anchor');       -- repaired before COMMIT
+COMMIT;
+SELECT * FROM d_noaction;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 2
+INSERT 0 1
+INSERT 0 1
+BEGIN
+DELETE 1
+INSERT 0 1
+COMMIT
+ id | team_id 
+----+---------
+  1 |      10
+(1 row)
+```
+
+```sql
+-- @expect-error 23001
+BEGIN;
+DELETE FROM teams WHERE id = 11;
+```
+
+```text
+BEGIN
+ERROR:  update or delete on table "teams" violates RESTRICT setting of foreign key constraint "d_restrict_team_id_fkey" on table "d_restrict"
+DETAIL:  Key (id)=(11) is referenced from table "d_restrict".
+```
+
+### Foreign keys need an index on the child column
+
+PostgreSQL indexes the referenced column (it is a primary key or unique), but **not** the referencing column. Deleting a parent row (or changing its key) makes the server look for children, so without an index on the child column it scans the whole child table. Two child tables with 200,000 rows each, one with an index on `parent_id`; delete a parent that has no children and read the trigger time in `EXPLAIN ANALYZE` (rolled back afterwards):
+
+```sql
+-- sql/fk-index-cost.sql
+CREATE TABLE parents (id int PRIMARY KEY);
+CREATE TABLE kids_plain (
+  id        int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  parent_id int NOT NULL REFERENCES parents (id)
+);
+CREATE TABLE kids_indexed (
+  id        int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  parent_id int NOT NULL REFERENCES parents (id)
+);
+CREATE INDEX kids_indexed_parent_idx ON kids_indexed (parent_id);
+INSERT INTO parents SELECT g FROM generate_series(1, 1000) g;
+INSERT INTO kids_plain (parent_id) SELECT 1 + (g % 100) FROM generate_series(1, 200000) g;
+INSERT INTO kids_indexed (parent_id) SELECT parent_id FROM kids_plain;
+ANALYZE kids_plain, kids_indexed;
+```
+
+```sql
+-- sql/fk-index-explain.sql
+BEGIN;
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, SUMMARY OFF) DELETE FROM parents WHERE id = 1000;
+ROLLBACK;
+```
+
+```text
+BEGIN
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Delete on parents (actual time=0.064..0.065 rows=0.00 loops=1)
+   ->  Index Scan using parents_pkey on parents (actual time=0.013..0.013 rows=1.00 loops=1)
+         Index Cond: (id = 1000)
+         Index Searches: 1
+ Trigger for constraint kids_plain_parent_id_fkey: time=6.787 calls=1
+ Trigger for constraint kids_indexed_parent_id_fkey: time=0.154 calls=1
+(6 rows)
+
+ROLLBACK
+```
+
+Measured on this Mac: about 6.8 ms without the index and 0.15 ms with it — roughly 45 times, for a delete that does not even find children. It grows with the child table and applies to every delete and key update of the parent. Add an index on FK columns unless the child table is tiny or the parent is never deleted.
+
+## Reading AI-generated code
+
+An assistant asked to "enforce that orders are only placed for active customers in the schema" writes this and it looks like exactly what you would want:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "orders may only be placed for active customers - enforce it in the schema"
+CREATE FUNCTION customer_is_active(cid bigint) RETURNS boolean
+  LANGUAGE sql STABLE
+  AS $$ SELECT active FROM customers WHERE id = cid $$;
+
+ALTER TABLE orders
+  ADD CONSTRAINT orders_customer_must_be_active
+  CHECK (customer_is_active(customer_id));`}>
+
+PostgreSQL will not let a `CHECK` contain a subquery, so the assistant hid the lookup inside a function, and the server accepts it. That is the trap: the manual states that PostgreSQL does not support CHECK constraints that reference table data other than the new or updated row ([docs](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-CHECK-CONSTRAINTS)). The direct form is refused, but the wrapped form passes:
+
+```sql
+-- @expect-error 0A000
+CREATE TABLE cx (customer_id bigint, CHECK (EXISTS (SELECT 1 FROM customers WHERE id = customer_id)));
+```
+
+```text
+ERROR:  cannot use subquery in check constraint
+LINE 1: CREATE TABLE cx (customer_id bigint, CHECK (EXISTS (SELECT 1...
+                                                    ^
+```
+
+```sql
+-- sql/check-function.sql
+CREATE TABLE ck_customers (id bigint PRIMARY KEY, active boolean NOT NULL DEFAULT true);
+INSERT INTO ck_customers VALUES (1, true), (2, false);
+CREATE FUNCTION customer_is_active(cid bigint) RETURNS boolean
+  LANGUAGE sql STABLE
+  AS $$ SELECT active FROM ck_customers WHERE id = cid $$;
+CREATE TABLE ck_orders (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id bigint NOT NULL REFERENCES ck_customers (id),
+  total       numeric(10, 2) NOT NULL,
+  CONSTRAINT orders_customer_must_be_active CHECK (customer_is_active(customer_id))
+);
+INSERT INTO ck_orders (customer_id, total) VALUES (1, 10.00);
+```
+
+The check runs only when an order row is inserted or updated. New orders for an inactive customer are refused:
+
+```sql
+-- @expect-error 23514
+INSERT INTO ck_orders (customer_id, total) VALUES (2, 10.00);
+```
+
+```text
+ERROR:  new row for relation "ck_orders" violates check constraint "orders_customer_must_be_active"
+DETAIL:  Failing row contains (2, 2, 10.00).
+```
+
+But the customer changes later, and the check is never re-run. The order now violates its own rule, silently:
+
+```sql
+-- sql/check-drift.sql
+UPDATE ck_customers SET active = false WHERE id = 1;
+SELECT o.id, o.customer_id, customer_is_active(o.customer_id) AS rule_holds_now FROM ck_orders o;
+```
+
+```text
+UPDATE 1
+ id | customer_id | rule_holds_now 
+----+-------------+----------------
+  1 |           1 | f
+(1 row)
+```
+
+Worse, the rule now blocks unrelated updates of that row, because any update re-checks the whole row:
+
+```sql
+-- @expect-error 23514
+UPDATE ck_orders SET total = total + 1 WHERE id = 1;
+```
+
+```text
+ERROR:  new row for relation "ck_orders" violates check constraint "orders_customer_must_be_active"
+DETAIL:  Failing row contains (1, 1, 11.00).
+```
+
+The honest implementation of "orders may only be *placed* for active customers" is an insert-time rule, so use a trigger (or the application), and keep the foreign key for what a constraint can guarantee:
+
+```sql
+-- sql/check-trigger.sql
+CREATE TABLE ck_orders2 (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id bigint NOT NULL REFERENCES ck_customers (id),
+  total       numeric(10, 2) NOT NULL
+);
+CREATE FUNCTION require_active_customer() RETURNS trigger
+  LANGUAGE plpgsql
+  AS $$
+BEGIN
+  IF NOT customer_is_active(NEW.customer_id) THEN
+    RAISE EXCEPTION 'customer % is not active', NEW.customer_id;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER ck_orders2_active BEFORE INSERT ON ck_orders2
+  FOR EACH ROW EXECUTE FUNCTION require_active_customer();
+UPDATE ck_customers SET active = true WHERE id = 1;
+INSERT INTO ck_orders2 (customer_id, total) VALUES (1, 10.00);
+UPDATE ck_customers SET active = false WHERE id = 1;
+UPDATE ck_orders2 SET total = total + 1;
+```
+
+```sql
+-- @expect-error P0001
+INSERT INTO ck_orders2 (customer_id, total) VALUES (1, 5.00);
+```
+
+```text
+ERROR:  customer 1 is not active
+CONTEXT:  PL/pgSQL function require_active_customer() line 4 at RAISE
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A constraint is a predicate about one row (NOT NULL, CHECK), a set of rows (PRIMARY KEY, UNIQUE), or two tables (FOREIGN KEY). The server evaluates it when the involved rows are written, never when other rows change — except foreign keys, which the server enforces with internal triggers on both tables. That is why a CHECK cannot express a rule about other tables, why a foreign key has a cost on the child column, and why the timing of the check (immediate or deferred) is a property you can choose.
 
 ## Tips / gotchas
 
 - Foreign keys enforce referential integrity for you, so the database never holds an order for a customer that does not exist. Relying on application code alone to keep references valid eventually fails.
 - Name your constraints explicitly, like `orders_total_positive`, instead of accepting auto-generated names. Clear names make error messages readable and make later `ALTER TABLE` changes straightforward.
-- Choose `ON DELETE` behavior deliberately. `CASCADE` cleans up dependents automatically but can delete more than you expect; `RESTRICT` is the safer default when you are unsure.
-- A `CHECK` constraint can reference several columns of the same row, so you can encode rules like a discount that must not exceed the total, but it cannot look at other rows or tables.
+- Choose `ON DELETE` behavior deliberately. `CASCADE` cleans up dependents automatically but can delete more than you expect; `RESTRICT` or the default `NO ACTION` is the safer choice when you are unsure.
+- A `CHECK` constraint can reference several columns of the same row, but it cannot look at other rows or tables (a function that does so is not enforced when the other data changes).
+- A CHECK passes when it evaluates to NULL; add `NOT NULL` if that is not what you want.
+- Index the referencing column of a foreign key.
 - Adding a constraint to a table that already holds data will fail if existing rows violate it. Clean up the data first, then add the constraint.
 
 <Callout title="Let the database say no">
@@ -166,18 +668,16 @@ Every constraint you add is a rule the database enforces on your behalf, every t
 |---------|---------|------|
 | Enforce invariants with database constraints (`CHECK`, `UNIQUE`, `FOREIGN KEY`) | Always correct, no matter which client or service writes the data | Changing the rule later needs a migration and may affect existing rows |
 | Validate only in application code | Fast to change the rule, no schema to touch | Bad data can slip in easily through a raw script, another service, or a migration that forgot to check |
+| `ON DELETE CASCADE` | No orphans, no cleanup code | One delete can remove many rows (see the count above) |
+| `ON DELETE RESTRICT` / `NO ACTION` | Nothing disappears by accident | The caller must delete children first |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Relying only on application-level validation** — an ad-hoc script, batch job, or other service writing directly to the database can always bypass application validation. A database-level constraint is the last line of defense.
-- **Forgetting to decide a foreign key's `ON DELETE` behavior** — by default a foreign key is `ON DELETE NO ACTION` (equivalent to `RESTRICT`), which blocks deleting a parent row that is still referenced and raises a foreign-key violation instead of leaving an orphan. The real risk is the opposite: accidentally choosing `ON DELETE CASCADE` and deleting more child rows than intended.
-- **Adding a `UNIQUE` constraint on a heavily written table without thinking about the index** — `UNIQUE` automatically creates an index, which adds cost to every insert/update on a table with high write volume. Plan for it ahead of time.
-
-> 💡 Real-world example
->
-> **E-commerce platforms** — commonly use `CHECK (price >= 0)` and a foreign key between orders and customers at the database level, so no web app, batch job, or admin script can ever write inconsistent data.
->
-> **[GitLab's foreign key guidelines](https://docs.gitlab.com/development/database/foreign_keys/)** — require a foreign key on nearly every column that references another table, and even enforce it with an automated schema test, to preserve referential integrity across a very large database over the long term.
+- **"Validation in the application is enough."** An ad-hoc script, batch job, or other service writing directly to the database can always bypass it. A database-level constraint is the last line of defense.
+- **"`NO ACTION` and `RESTRICT` are the same."** They differ when the constraint is deferrable: `NO ACTION` can wait until `COMMIT`, `RESTRICT` cannot (proved above), and the error codes differ (`23503` vs `23001`).
+- **"A unique column can hold only one NULL."** By default it can hold any number; `NULLS NOT DISTINCT` (PostgreSQL 15+) changes that.
+- **"A CHECK can call a function to look at other tables."** It can, but it is only evaluated when this row changes, so the rule silently drifts (proved above).
+- **"PostgreSQL indexes foreign keys."** It indexes the referenced side only; the child column needs your index (about 45 times faster parent deletes in the measurement above).
 
 export const quizConstraints = [
   {
@@ -189,6 +689,7 @@ export const quizConstraints = [
       'That the column is indexed for speed',
     ],
     answer: 1,
+    explain: 'It guarantees referential integrity. It does not make values unique, does not forbid NULL, and PostgreSQL does not create an index on the referencing column.',
   },
   {
     q: 'With ON DELETE CASCADE on orders.customer_id, what happens when a referenced customer is deleted?',
@@ -199,11 +700,35 @@ export const quizConstraints = [
       'Nothing changes',
     ],
     answer: 1,
+    explain: 'CASCADE deletes the dependents: the lesson shows 3 orders before and 1 after deleting customer 1. Blocking is RESTRICT/NO ACTION; setting NULL is SET NULL.',
   },
   {
     q: 'Which constraint rejects a row when a custom expression evaluates to false?',
     options: ['UNIQUE', 'CHECK', 'DEFAULT', 'PRIMARY KEY'],
     answer: 1,
+    explain: '`CHECK (expr)` rejects a row when `expr` is false (SQLSTATE 23514). If `expr` is NULL the row is accepted.',
+  },
+  {
+    q: 'A column has `UNIQUE` and three rows insert NULL. What happens?',
+    options: [
+      'The second insert fails with 23505',
+      'All three succeed, because NULLs are considered distinct by default',
+      'All three fail with 23502',
+      'The table is locked',
+    ],
+    answer: 1,
+    explain: 'NULLs are distinct in a UNIQUE constraint unless you declare `NULLS NOT DISTINCT` (PostgreSQL 15+), which the lesson shows failing on the second NULL.',
+  },
+  {
+    q: 'Which is true of a `DEFERRABLE INITIALLY DEFERRED` foreign key?',
+    options: [
+      'ON DELETE RESTRICT and NO ACTION behave identically',
+      'NO ACTION is checked at COMMIT, RESTRICT is still checked immediately',
+      'Both are only checked at COMMIT',
+      'Deferring disables the constraint',
+    ],
+    answer: 1,
+    explain: 'In the lesson, deleting a parent and re-inserting it in one transaction commits with NO ACTION, while RESTRICT fails immediately with 23001.',
   },
 ];
 

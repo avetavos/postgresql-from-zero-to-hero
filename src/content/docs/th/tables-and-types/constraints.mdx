@@ -1,6 +1,6 @@
 ---
-title: Constraints
-description: รักษาความถูกต้องของข้อมูลด้วย constraints — primary key, foreign key พร้อมกฎ ON DELETE, ความไม่ซ้ำกัน, not-null, นิพจน์ check และ default ของ column
+title: Constraint
+description: บังคับความถูกต้องของข้อมูลใน schema — NOT NULL, DEFAULT, PRIMARY KEY, UNIQUE, CHECK และ FOREIGN KEY พร้อม ON DELETE — และการเพิ่มผ่าน driver
 sidebar:
   order: 4
 ---
@@ -10,89 +10,224 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-ชนิดข้อมูลตัดสินว่า column สามารถเก็บค่าแบบใดได้ ส่วน **constraints** ตัดสินว่าค่าและชุดค่าผสมใดที่ได้รับอนุญาตจริง ๆ constraint คือกฎที่ server ตรวจทุกครั้งที่ insert และ update แล้วปฏิเสธทุกอย่างที่ละเมิดกฎ เพราะฐานข้อมูลเป็นคนบังคับใช้เอง constraint จึงมีผลเสมอไม่ว่าแอปพลิเคชันหรือคนไหนจะเป็นผู้เขียนข้อมูล นี่คือกระดูกสันหลังของความสมบูรณ์ของข้อมูล
+type ตัดสินว่า column เก็บค่าชนิดไหนได้ ส่วน **constraint** ตัดสินว่าค่าและการรวมกันแบบไหนถูกอนุญาตจริง ๆ constraint คือกฎที่เซิร์ฟเวอร์ตรวจทุกครั้งที่ insert และ update และปฏิเสธสิ่งที่ฝ่าฝืน เพราะฐานข้อมูลเป็นผู้บังคับใช้ constraint จึงมีผลไม่ว่าแอปพลิเคชันหรือคนใดจะเขียนข้อมูล — มันคือกระดูกสันหลังของความถูกต้องของข้อมูล
 
-เราจะจำลองร้านค้าจิ๋ว ๆ ที่มี `customers` และ `orders` เพื่อดู constraint แต่ละชนิดทำงาน
+เราจะโมเดลร้านค้าเล็ก ๆ ด้วย `customers` และ `orders` เพื่อดู constraint แต่ละชนิดทำงาน และตั้งใจให้แต่ละอันล้มเหลวเพื่อให้คุณเห็น error จริงและรหัส SQLSTATE
+
+> ทุก output มาจากการรัน fence จริงบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) ในฐานข้อมูลเปล่าหนึ่งตัว จากบนลงล่าง ตัวเลขเวลามาจาก Mac เครื่องนี้
 
 ## NOT NULL และ DEFAULT
 
-constraint แบบ `NOT NULL` ห้ามการไม่มีค่า ดังนั้น column นั้นต้องถูกเติมเสมอ ส่วน `DEFAULT` จัดหาค่าให้เมื่อการ insert ละเว้น column นั้นไป ทั้งคู่จับคู่กันได้อย่างเป็นธรรมชาติ: default ที่สมเหตุสมผลบวกกับ `NOT NULL` หมายความว่า column นั้นมีค่าอยู่เสมอโดยไม่ต้องบังคับให้ทุกการ insert ระบุค่าเอง
+constraint `NOT NULL` ห้ามไม่ให้ไม่มีค่า column จึงต้องถูกเติมเสมอ `DEFAULT` ใส่ค่าให้เมื่อ insert ไม่ระบุ column นั้น สองอย่างนี้เข้าคู่กันโดยธรรมชาติ: default ที่สมเหตุสมผลบวก `NOT NULL` หมายความว่า column มีค่าเสมอโดยไม่ต้องบังคับให้ทุก insert เขียนออกมา
 
 ```sql
+-- sql/customers.sql
 CREATE TABLE customers (
   id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name       text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+INSERT INTO customers (name) VALUES ('Nadia Frost'), ('Kofi Mensah');
+SELECT id, name, created_at IS NOT NULL AS created_at_filled FROM customers;
 ```
 
-ที่นี่ `name` ต้องถูกระบุเสมอ ขณะที่ `created_at` จะเติมตัวเองด้วยช่วงเวลาปัจจุบันเว้นแต่คุณจะจัดหาให้
+```text
+CREATE TABLE
+INSERT 0 2
+ id |    name     | created_at_filled 
+----+-------------+-------------------
+  1 | Nadia Frost | t
+  2 | Kofi Mensah | t
+(2 rows)
+```
+
+ตรงนี้ `name` ต้องถูกระบุเสมอ ส่วน `created_at` เติมตัวเองด้วยเวลาปัจจุบันถ้าคุณไม่ระบุ การฝ่าฝืน `NOT NULL` ล้มเหลวด้วย SQLSTATE `23502` และ `DETAIL` แสดง row ที่ล้มเหลวทั้งแถว:
+
+```sql
+-- @expect-error 23502
+INSERT INTO customers (name) VALUES (NULL);
+```
+
+```text
+ERROR:  null value in column "name" of relation "customers" violates not-null constraint
+DETAIL:  Failing row contains (3, null, 2026-09-30 06:07:40.143206+00).
+```
+
+สังเกตเลข `3` ใน row นั้น: insert ที่ล้มเหลวก็ยังใช้ค่า identity ไปหนึ่งค่า (บทก่อนหน้า) ลูกค้าคนถัดไปจึงเป็น 4
 
 ## PRIMARY KEY
 
-`PRIMARY KEY` ทำเครื่องหมาย column (หรือหลาย column) ที่ระบุ row ได้อย่างไม่ซ้ำกัน ถือเป็นรูปแบบย่อของ `NOT NULL` บวก `UNIQUE` และ table หนึ่งมีได้เพียงตัวเดียว column `id` ข้างบนคือ primary key ของ `customers`
+`PRIMARY KEY` ระบุ column (หรือหลาย column) ที่ระบุ row ได้แบบไม่ซ้ำ เป็นชวเลขของ `NOT NULL` บวก `UNIQUE` และ table มีได้เพียงหนึ่งตัว column `id` ข้างบนคือ primary key ของ `customers` การบังคับให้ซ้ำ (ด้วยทางหนี `OVERRIDING SYSTEM VALUE` เพราะ identity column ไม่มีทางสร้างค่าซ้ำเอง) ล้มเหลวด้วย `23505`:
+
+```sql
+-- @expect-error 23505
+INSERT INTO customers (id, name) OVERRIDING SYSTEM VALUE VALUES (1, 'Impostor');
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "customers_pkey"
+DETAIL:  Key (id)=(1) already exists.
+```
 
 ## UNIQUE
 
-constraint แบบ `UNIQUE` ห้ามค่าที่ซ้ำกันใน column แต่ยังยอมให้มี null ได้ นี่คือวิธีเขียนกฎอย่าง "ลูกค้าสองคนใช้ email ร่วมกันไม่ได้" โดยไม่ทำให้ column นั้นเป็น primary key
+constraint `UNIQUE` ห้ามค่าซ้ำใน column ใช้แสดงกฎอย่าง "ลูกค้าสองคนใช้อีเมลเดียวกันไม่ได้" โดยไม่ต้องทำให้ column นั้นเป็น primary key การตั้งชื่อ constraint `customers_email_unique` เป็นทางเลือกแต่คุ้มค่า: ข้อความ error และ `ALTER TABLE` ภายหลังอ้างถึงมันด้วยชื่อแทน label ที่สร้างอัตโนมัติ มันถูกบังคับด้วย index ซึ่ง `\d` แสดงใต้ `Indexes` unique constraint จึงมีต้นทุนการเขียนของ B-tree index
 
 ```sql
+-- sql/unique-email.sql
 ALTER TABLE customers
   ADD COLUMN email text,
   ADD CONSTRAINT customers_email_unique UNIQUE (email);
+UPDATE customers SET email = 'nadia@example.com' WHERE id = 1;
+INSERT INTO customers (name) VALUES ('Ilse Brandt'), ('Tomas Weiss');
+SELECT id, name, email FROM customers ORDER BY id;
+\d customers
 ```
 
-การตั้งชื่อ constraint ว่า `customers_email_unique` นั้นจะทำหรือไม่ก็ได้ แต่คุ้มมาก เพราะข้อความ error และคำสั่ง `ALTER TABLE` ทีหลังจะอ้างถึงด้วยชื่อนี้ แทนที่จะเป็นป้ายที่ระบบสร้างให้อัตโนมัติ
+```text
+ALTER TABLE
+UPDATE 1
+INSERT 0 2
+ id |    name     |       email       
+----+-------------+-------------------
+  1 | Nadia Frost | nadia@example.com
+  2 | Kofi Mensah | 
+  4 | Ilse Brandt | 
+  5 | Tomas Weiss | 
+(4 rows)
+
+                                  Table "public.customers"
+   Column   |           Type           | Collation | Nullable |           Default            
+------------+--------------------------+-----------+----------+------------------------------
+ id         | bigint                   |           | not null | generated always as identity
+ name       | text                     |           | not null | 
+ created_at | timestamp with time zone |           | not null | now()
+ email      | text                     |           |          | 
+Indexes:
+    "customers_pkey" PRIMARY KEY, btree (id)
+    "customers_email_unique" UNIQUE CONSTRAINT, btree (email)
+```
+
+ดู column `email`: ลูกค้าสามคนเป็น NULL และไม่มี error โดยค่าเริ่มต้นค่า `NULL` ถือว่าแตกต่างกัน `UNIQUE` จึงอนุญาตกี่ตัวก็ได้ ส่วนค่าซ้ำจริงล้มเหลว:
+
+```sql
+-- @expect-error 23505
+UPDATE customers SET email = 'nadia@example.com' WHERE id = 2;
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "customers_email_unique"
+DETAIL:  Key (email)=(nadia@example.com) already exists.
+```
+
+ถ้าต้องการ "NULL ได้อย่างมากหนึ่งตัว" PostgreSQL 15 เพิ่ม `UNIQUE NULLS NOT DISTINCT`:
+
+```sql
+-- sql/nulls-not-distinct.sql
+CREATE TABLE members (
+  email text,
+  CONSTRAINT members_email_key UNIQUE NULLS NOT DISTINCT (email)
+);
+INSERT INTO members VALUES (NULL);
+```
+
+```sql
+-- @expect-error 23505
+INSERT INTO members VALUES (NULL);
+```
+
+```text
+ERROR:  duplicate key value violates unique constraint "members_email_key"
+DETAIL:  Key (email)=(null) already exists.
+```
 
 ## CHECK
 
-constraint แบบ `CHECK` ทดสอบนิพจน์กับแต่ละ row และปฏิเสธการเขียนถ้านิพจน์ประเมินได้เป็น false ใช้เขียนกฎทางธุรกิจที่ชนิดเพียงอย่างเดียวแสดงไม่ได้ เช่น ราคาที่ต้องเป็นบวก
+constraint `CHECK` ทดสอบนิพจน์กับแต่ละ row และปฏิเสธการเขียนถ้าผลเป็นเท็จ ใช้เข้ารหัสกฎทางธุรกิจที่ type อย่างเดียวแสดงไม่ได้ เช่นราคาที่ต้องเป็นบวก หรือส่วนลดที่เกินยอดรวมไม่ได้ (check อ้างถึงหลาย column ใน row เดียวกันได้)
 
 ```sql
+-- sql/orders.sql
 CREATE TABLE orders (
   id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   customer_id bigint NOT NULL,
   total       numeric(10, 2) NOT NULL,
-  CONSTRAINT orders_total_positive CHECK (total > 0)
+  discount    numeric(10, 2),
+  CONSTRAINT orders_total_positive CHECK (total > 0),
+  CONSTRAINT orders_discount_valid CHECK (discount >= 0 AND discount <= total)
 );
 ```
 
-ความพยายามใด ๆ ที่จะ insert order ที่มี `total` เป็นศูนย์หรือค่าลบ จะล้มเหลวก่อนที่ row นั้นจะถูกเก็บ
+การ insert order ที่ `total` เป็นศูนย์หรือติดลบตอนนี้ล้มเหลวก่อนเก็บ row ด้วย `23514` เช่นเดียวกับส่วนลดที่มากกว่ายอดรวม:
+
+```sql
+-- @expect-error 23514
+INSERT INTO orders (customer_id, total) VALUES (1, 0);
+```
+
+```text
+ERROR:  new row for relation "orders" violates check constraint "orders_total_positive"
+DETAIL:  Failing row contains (1, 1, 0.00, null).
+```
+
+```sql
+-- @expect-error 23514
+INSERT INTO orders (customer_id, total, discount) VALUES (1, 10.00, 15.00);
+```
+
+```text
+ERROR:  new row for relation "orders" violates check constraint "orders_discount_valid"
+DETAIL:  Failing row contains (2, 1, 10.00, 15.00).
+```
+
+ข้อละเอียดอ่อนหนึ่งข้อ: `CHECK` ปฏิเสธเมื่อนิพจน์เป็น **เท็จ** เท่านั้น เมื่อผลเป็น NULL ("ไม่ทราบ") row ผ่าน column `discount` ไม่มี `NOT NULL` ส่วนลด NULL จึงผ่าน `discount >= 0` ไปได้ (คุณจะเห็น row แบบนี้ใน output ถัดไป) ถ้า NULL ควรถูกปฏิเสธ ให้บอกด้วย `NOT NULL`
 
 ## FOREIGN KEY
 
-`FOREIGN KEY` ผูก column เข้ากับคีย์ในอีก table หนึ่ง รับประกันว่าทุก `customer_id` ใน `orders` ชี้ไปยัง row จริงใน `customers` นี่คือ **referential integrity**: ฐานข้อมูลจะไม่ยอมให้คุณสร้าง order สำหรับลูกค้าที่ไม่มีอยู่จริง และจะไม่ปล่อยให้ order ชี้ไปยังลูกค้าที่คุณลบไปแล้ว
+`FOREIGN KEY` ผูก column กับ key ในอีก table รับประกันว่าทุก `customer_id` ใน `orders` ชี้ไปที่ row จริงใน `customers` นี่คือ **referential integrity**: ฐานข้อมูลจะไม่ให้คุณสร้าง order ให้ลูกค้าที่ไม่มีอยู่ หรือทิ้ง order ที่ชี้ไปยังลูกค้าที่คุณลบ
+
+ถ้าไม่มี constraint ไม่มีอะไรห้าม order ของลูกค้า 999 (ไม่มีลูกค้าคนนั้น) row นั้นค้างอยู่เป็น orphan จนกว่าจะมีคนสะดุด:
 
 ```sql
+-- sql/orders-before-fk.sql
+INSERT INTO orders (customer_id, total) VALUES (999, 20.00);
+SELECT id, customer_id, total FROM orders;
+DELETE FROM orders WHERE customer_id = 999;
+```
+
+```text
+INSERT 0 1
+ id | customer_id | total 
+----+-------------+-------
+  3 |         999 | 20.00
+(1 row)
+
+DELETE 1
+```
+
+ทีนี้เพิ่ม constraint มันใช้เป็น migration จาก driver ได้ด้วย — SQL เดียวกัน ต่างกันแค่วิธีส่ง:
+
+```sql
+-- sql/orders-fk.sql
 ALTER TABLE orders
   ADD CONSTRAINT orders_customer_fk
   FOREIGN KEY (customer_id) REFERENCES customers (id)
   ON DELETE CASCADE;
+INSERT INTO orders (customer_id, total, discount) VALUES (1, 30.00, 5.00), (1, 12.50, NULL), (2, 99.00, 0);
+SELECT id, customer_id, total, discount FROM orders ORDER BY id;
 ```
 
-clause `ON DELETE` ตัดสินว่าจะเกิดอะไรขึ้นกับ row ที่ขึ้นต่อกันเมื่อ row ที่ถูกอ้างถึงถูกลบ `CASCADE` จะลบ order ที่ตรงกันไปพร้อมกับลูกค้า ขณะที่ `RESTRICT` จะปิดกั้นการลบตราบเท่าที่ยังมี order ใดอ้างถึงลูกค้ารายนั้นอยู่ เลือก `CASCADE` เมื่อ row ลูกไม่มีความหมายหากไม่มี row แม่ และเลือก `RESTRICT` เมื่อคุณต้องการการ์ดที่ตั้งใจไว้เพื่อกันการสูญหายโดยอุบัติเหตุ
-
-ตอนนี้ทั้งสอง table สัมพันธ์กันแบบนี้ โดยแต่ละ order ชี้กลับไปยังลูกค้าหนึ่งรายพอดี
-
-export const fkDiagram = `flowchart LR
-  subgraph customers
-    C1[id PK]
-    C2[name]
-    C3[email UNIQUE]
-  end
-  subgraph orders
-    O1[id PK]
-    O2[customer_id FK]
-    O3[total]
-  end
-  O2 -->|REFERENCES| C1`;
-
-<Mermaid code={fkDiagram} title="orders.customer_id อ้างถึง customers.id" />
-
-## รันจาก driver
-
-constraints อยู่ใน DDL แอปพลิเคชันจึงมักเพิ่มผ่าน migration คำสั่งนี้คือ SQL เดียวกับที่คุณจะพิมพ์ใน `psql` เพียงแต่ส่งผ่าน driver เท่านั้น
+```text
+ALTER TABLE
+INSERT 0 3
+ id | customer_id | total | discount 
+----+-------------+-------+----------
+  4 |           1 | 30.00 |     5.00
+  5 |           1 | 12.50 |         
+  6 |           2 | 99.00 |     0.00
+(3 rows)
+```
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -146,64 +281,454 @@ constraints อยู่ใน DDL แอปพลิเคชันจึงม
   </TabItem>
 </Tabs>
 
-**ใน pgAdmin:** constraints ของ table จะปรากฏใต้โหนด Constraints ของ table นั้นในแผนผัง browser และ dialog Properties มีแท็บสำหรับ primary key, foreign key, check และ unique constraint หากคุณชอบใช้ฟอร์มมากกว่า SQL
+แต่ละ snippet ของ driver รันหนึ่งครั้งกับฐานข้อมูลชั่วคราวที่มีสอง table อยู่แล้ว แล้วถาม catalog ว่าสร้างอะไร (`c` หมายถึง `ON DELETE CASCADE`):
+
+```text
+$ node app.mjs        # pg 8.23.0 (confdeltype 'c' means ON DELETE CASCADE)
+{ confdeltype: 'c' }
+
+$ python app.py        # psycopg 3.3.6
+('c',)
+
+$ go run .        # pgx v5.11.0
+confdeltype: c
+
+$ cargo run        # sqlx 0.9.0
+confdeltype: c
+```
+
+**ใน pgAdmin:** constraint ของ table ปรากฏใต้โหนด Constraints ใน browser tree และกล่อง Properties มีแท็บสำหรับ primary key, foreign key, check และ unique constraint ถ้าคุณชอบฟอร์มมากกว่า SQL
+
+order ของลูกค้าที่ไม่มีอยู่ตอนนี้ถูกปฏิเสธด้วย `23503`:
+
+```sql
+-- @expect-error 23503
+INSERT INTO orders (customer_id, total) VALUES (999, 20.00);
+```
+
+```text
+ERROR:  insert or update on table "orders" violates foreign key constraint "orders_customer_fk"
+DETAIL:  Key (customer_id)=(999) is not present in table "customers".
+```
+
+ตอนนี้สอง table สัมพันธ์กันแบบนี้ โดยแต่ละ order ชี้กลับไปยังลูกค้าหนึ่งคนพอดี
+
+export const fkDiagram = `flowchart LR
+  subgraph customers
+    C1[id PK]
+    C2[name]
+    C3[email UNIQUE]
+  end
+  subgraph orders
+    O1[id PK]
+    O2[customer_id FK]
+    O3[total]
+  end
+  O2 -->|REFERENCES| C1`;
+
+<Mermaid code={fkDiagram} title="orders.customer_id อ้างอิง customers.id" />
+
+### การเพิ่ม constraint ให้ table ที่มีข้อมูลอยู่แล้ว
+
+การเพิ่ม constraint ตรวจ row ที่มีอยู่ก่อน ถ้ามี row ใดฝ่าฝืน `ALTER` ล้มเหลวและไม่มีอะไรถูกเพิ่ม (order 99.00 เกินขีดจำกัด):
+
+```sql
+-- @expect-error 23514
+ALTER TABLE orders ADD CONSTRAINT orders_small CHECK (total < 50);
+```
+
+```text
+ERROR:  check constraint "orders_small" of relation "orders" is violated by some row
+```
+
+ทำความสะอาดข้อมูลก่อน แล้วค่อยเพิ่ม constraint บน table ใหญ่มีวิธีสองขั้น `NOT VALID` / `VALIDATE CONSTRAINT` ที่เลี่ยง lock ยาว บท altering-schema แสดงไว้
+
+## ON DELETE: เกิดอะไรกับ row ลูก
+
+clause `ON DELETE` ตัดสินว่าเกิดอะไรกับ row ที่พึ่งพาเมื่อ row ที่ถูกอ้างอิงถูกลบ `orders_customer_fk` ข้างบนใช้ `CASCADE`: การลบลูกค้า 1 ลบ order ของเขาด้วย (rollback ไว้ที่นี่เพื่อให้ข้อมูลอยู่):
+
+```sql
+-- sql/on-delete-cascade.sql
+BEGIN;
+SELECT count(*) AS orders_before FROM orders;
+DELETE FROM customers WHERE id = 1 RETURNING id, name;
+SELECT count(*) AS orders_left FROM orders;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ orders_before 
+---------------
+             3
+(1 row)
+
+ id |    name     
+----+-------------
+  1 | Nadia Frost
+(1 row)
+
+DELETE 1
+ orders_left 
+-------------
+           1
+(1 row)
+
+ROLLBACK
+```
+
+มีห้าตัวเลือก: `NO ACTION` (ค่าเริ่มต้น), `RESTRICT`, `CASCADE`, `SET NULL`, `SET DEFAULT` เลือก `CASCADE` เมื่อ row ลูกไม่มีความหมายถ้าไม่มี row แม่, `SET NULL` เมื่อลูกควรอยู่รอดแบบไม่เชื่อมโยง และ `RESTRICT` หรือ `NO ACTION` เมื่อต้องการเครื่องกันการสูญหายโดยไม่ตั้งใจ พฤติกรรมจริงของสามตัว:
+
+```sql
+-- sql/on-delete-actions.sql
+CREATE TABLE teams (id int PRIMARY KEY, name text NOT NULL);
+CREATE TABLE p_restrict (id int PRIMARY KEY, team_id int REFERENCES teams ON DELETE RESTRICT);
+CREATE TABLE p_noaction (id int PRIMARY KEY, team_id int REFERENCES teams ON DELETE NO ACTION);
+CREATE TABLE p_setnull  (id int PRIMARY KEY, team_id int REFERENCES teams ON DELETE SET NULL);
+INSERT INTO teams VALUES (1, 'Harbor'), (2, 'Orchard'), (3, 'Tide');
+INSERT INTO p_restrict VALUES (1, 1);
+INSERT INTO p_noaction VALUES (1, 2);
+INSERT INTO p_setnull  VALUES (1, 3);
+DELETE FROM teams WHERE id = 3;
+SELECT * FROM p_setnull;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 3
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+DELETE 1
+ id | team_id 
+----+---------
+  1 |        
+(1 row)
+```
+
+`SET NULL` ทิ้ง row ลูกไว้พร้อม `team_id` ว่าง ส่วน `RESTRICT` และ `NO ACTION` ปฏิเสธการลบทั้งคู่ แต่ด้วยรหัส SQLSTATE และถ้อยคำต่างกัน:
+
+```sql
+-- @expect-error 23001
+DELETE FROM teams WHERE id = 1;
+```
+
+```text
+ERROR:  update or delete on table "teams" violates RESTRICT setting of foreign key constraint "p_restrict_team_id_fkey" on table "p_restrict"
+DETAIL:  Key (id)=(1) is referenced from table "p_restrict".
+```
+
+```sql
+-- @expect-error 23503
+DELETE FROM teams WHERE id = 2;
+```
+
+```text
+ERROR:  update or delete on table "teams" violates foreign key constraint "p_noaction_team_id_fkey" on table "p_noaction"
+DETAIL:  Key (id)=(2) is still referenced from table "p_noaction".
+```
+
+สองตัวนี้เทียบเท่ากันหรือไม่? ไม่ทั้งหมด ความต่างปรากฏกับ constraint แบบ `DEFERRABLE` `NO ACTION` ถูกตรวจตอนท้าย statement — หรือถ้า constraint เป็น `DEFERRABLE INITIALLY DEFERRED` ตอน `COMMIT` คุณจึงทำลายการอ้างอิงชั่วคราวแล้วซ่อมภายใน transaction ได้ ส่วน `RESTRICT` ถูกตรวจทันทีเสมอและ defer ไม่ได้ ([docs](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK)) พิสูจน์ด้วย constraint สองตัวที่เหมือนกันทุกอย่างยกเว้น action:
+
+```sql
+-- sql/deferred-no-action.sql
+CREATE TABLE d_noaction (id int PRIMARY KEY, team_id int,
+  FOREIGN KEY (team_id) REFERENCES teams ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED);
+CREATE TABLE d_restrict (id int PRIMARY KEY, team_id int,
+  FOREIGN KEY (team_id) REFERENCES teams ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED);
+INSERT INTO teams VALUES (10, 'Anchor'), (11, 'Beacon');
+INSERT INTO d_noaction VALUES (1, 10);
+INSERT INTO d_restrict VALUES (1, 11);
+
+BEGIN;
+DELETE FROM teams WHERE id = 10;               -- child still points at 10: no error yet
+INSERT INTO teams VALUES (10, 'Anchor');       -- repaired before COMMIT
+COMMIT;
+SELECT * FROM d_noaction;
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+INSERT 0 2
+INSERT 0 1
+INSERT 0 1
+BEGIN
+DELETE 1
+INSERT 0 1
+COMMIT
+ id | team_id 
+----+---------
+  1 |      10
+(1 row)
+```
+
+```sql
+-- @expect-error 23001
+BEGIN;
+DELETE FROM teams WHERE id = 11;
+```
+
+```text
+BEGIN
+ERROR:  update or delete on table "teams" violates RESTRICT setting of foreign key constraint "d_restrict_team_id_fkey" on table "d_restrict"
+DETAIL:  Key (id)=(11) is referenced from table "d_restrict".
+```
+
+### Foreign key ต้องมี index บน column ลูก
+
+PostgreSQL ทำ index ให้ column ที่ถูกอ้างอิง (เป็น primary key หรือ unique) แต่ **ไม่** ทำให้ column ที่อ้างอิง การลบ row แม่ (หรือเปลี่ยน key ของมัน) ทำให้เซิร์ฟเวอร์ต้องหา row ลูก ถ้าไม่มี index บน column ลูกก็สแกนทั้ง table ลูก สอง table ลูกที่มี 200,000 row เท่ากัน ตัวหนึ่งมี index บน `parent_id` ลบ row แม่ที่ไม่มีลูก แล้วอ่านเวลา trigger ใน `EXPLAIN ANALYZE` (rollback หลังจากนั้น):
+
+```sql
+-- sql/fk-index-cost.sql
+CREATE TABLE parents (id int PRIMARY KEY);
+CREATE TABLE kids_plain (
+  id        int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  parent_id int NOT NULL REFERENCES parents (id)
+);
+CREATE TABLE kids_indexed (
+  id        int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  parent_id int NOT NULL REFERENCES parents (id)
+);
+CREATE INDEX kids_indexed_parent_idx ON kids_indexed (parent_id);
+INSERT INTO parents SELECT g FROM generate_series(1, 1000) g;
+INSERT INTO kids_plain (parent_id) SELECT 1 + (g % 100) FROM generate_series(1, 200000) g;
+INSERT INTO kids_indexed (parent_id) SELECT parent_id FROM kids_plain;
+ANALYZE kids_plain, kids_indexed;
+```
+
+```sql
+-- sql/fk-index-explain.sql
+BEGIN;
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, SUMMARY OFF) DELETE FROM parents WHERE id = 1000;
+ROLLBACK;
+```
+
+```text
+BEGIN
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Delete on parents (actual time=0.064..0.065 rows=0.00 loops=1)
+   ->  Index Scan using parents_pkey on parents (actual time=0.013..0.013 rows=1.00 loops=1)
+         Index Cond: (id = 1000)
+         Index Searches: 1
+ Trigger for constraint kids_plain_parent_id_fkey: time=6.787 calls=1
+ Trigger for constraint kids_indexed_parent_id_fkey: time=0.154 calls=1
+(6 rows)
+
+ROLLBACK
+```
+
+วัดบน Mac เครื่องนี้: ประมาณ 6.8 ms เมื่อไม่มี index และ 0.15 ms เมื่อมี — ราว 45 เท่า สำหรับการลบที่ไม่แม้แต่เจอ row ลูก มันโตตาม table ลูกและมีผลกับทุกการลบและการเปลี่ยน key ของ row แม่ เพิ่ม index บน column FK เว้นแต่ table ลูกเล็กมากหรือ row แม่ไม่เคยถูกลบ
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ที่ถูกขอให้ "บังคับใน schema ว่า order สั่งได้เฉพาะลูกค้าที่ active" เขียนสิ่งนี้ และดูเหมือนสิ่งที่คุณต้องการเป๊ะ:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "orders may only be placed for active customers - enforce it in the schema"
+CREATE FUNCTION customer_is_active(cid bigint) RETURNS boolean
+  LANGUAGE sql STABLE
+  AS $$ SELECT active FROM customers WHERE id = cid $$;
+
+ALTER TABLE orders
+  ADD CONSTRAINT orders_customer_must_be_active
+  CHECK (customer_is_active(customer_id));`}>
+
+PostgreSQL ไม่ยอมให้ `CHECK` มี subquery ผู้ช่วยจึงซ่อนการค้นไว้ในฟังก์ชัน และเซิร์ฟเวอร์ก็รับ นั่นคือกับดัก: คู่มือระบุว่า PostgreSQL ไม่รองรับ CHECK constraint ที่อ้างถึงข้อมูลใน table นอกจาก row ที่ใหม่หรือถูกอัปเดต ([docs](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-CHECK-CONSTRAINTS)) รูปแบบตรง ๆ ถูกปฏิเสธ แต่รูปแบบที่ห่อไว้ผ่าน:
+
+```sql
+-- @expect-error 0A000
+CREATE TABLE cx (customer_id bigint, CHECK (EXISTS (SELECT 1 FROM customers WHERE id = customer_id)));
+```
+
+```text
+ERROR:  cannot use subquery in check constraint
+LINE 1: CREATE TABLE cx (customer_id bigint, CHECK (EXISTS (SELECT 1...
+                                                    ^
+```
+
+```sql
+-- sql/check-function.sql
+CREATE TABLE ck_customers (id bigint PRIMARY KEY, active boolean NOT NULL DEFAULT true);
+INSERT INTO ck_customers VALUES (1, true), (2, false);
+CREATE FUNCTION customer_is_active(cid bigint) RETURNS boolean
+  LANGUAGE sql STABLE
+  AS $$ SELECT active FROM ck_customers WHERE id = cid $$;
+CREATE TABLE ck_orders (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id bigint NOT NULL REFERENCES ck_customers (id),
+  total       numeric(10, 2) NOT NULL,
+  CONSTRAINT orders_customer_must_be_active CHECK (customer_is_active(customer_id))
+);
+INSERT INTO ck_orders (customer_id, total) VALUES (1, 10.00);
+```
+
+check ทำงานเฉพาะตอน insert หรือ update row ของ order order ใหม่ของลูกค้าที่ไม่ active ถูกปฏิเสธ:
+
+```sql
+-- @expect-error 23514
+INSERT INTO ck_orders (customer_id, total) VALUES (2, 10.00);
+```
+
+```text
+ERROR:  new row for relation "ck_orders" violates check constraint "orders_customer_must_be_active"
+DETAIL:  Failing row contains (2, 2, 10.00).
+```
+
+แต่ต่อมาลูกค้าเปลี่ยน และ check ไม่ถูกรันอีก order ฝ่าฝืนกฎของตัวเองแบบเงียบ ๆ:
+
+```sql
+-- sql/check-drift.sql
+UPDATE ck_customers SET active = false WHERE id = 1;
+SELECT o.id, o.customer_id, customer_is_active(o.customer_id) AS rule_holds_now FROM ck_orders o;
+```
+
+```text
+UPDATE 1
+ id | customer_id | rule_holds_now 
+----+-------------+----------------
+  1 |           1 | f
+(1 row)
+```
+
+แย่กว่านั้น กฎนี้ตอนนี้ขวางการ update ที่ไม่เกี่ยวข้องของ row นั้น เพราะทุก update ตรวจ row ทั้งแถวใหม่:
+
+```sql
+-- @expect-error 23514
+UPDATE ck_orders SET total = total + 1 WHERE id = 1;
+```
+
+```text
+ERROR:  new row for relation "ck_orders" violates check constraint "orders_customer_must_be_active"
+DETAIL:  Failing row contains (1, 1, 11.00).
+```
+
+การ implement กฎ "order *สั่ง* ได้เฉพาะลูกค้าที่ active" อย่างซื่อตรงคือกฎ ณ เวลา insert จึงใช้ trigger (หรือแอปพลิเคชัน) และเก็บ foreign key ไว้สำหรับสิ่งที่ constraint รับประกันได้:
+
+```sql
+-- sql/check-trigger.sql
+CREATE TABLE ck_orders2 (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id bigint NOT NULL REFERENCES ck_customers (id),
+  total       numeric(10, 2) NOT NULL
+);
+CREATE FUNCTION require_active_customer() RETURNS trigger
+  LANGUAGE plpgsql
+  AS $$
+BEGIN
+  IF NOT customer_is_active(NEW.customer_id) THEN
+    RAISE EXCEPTION 'customer % is not active', NEW.customer_id;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER ck_orders2_active BEFORE INSERT ON ck_orders2
+  FOR EACH ROW EXECUTE FUNCTION require_active_customer();
+UPDATE ck_customers SET active = true WHERE id = 1;
+INSERT INTO ck_orders2 (customer_id, total) VALUES (1, 10.00);
+UPDATE ck_customers SET active = false WHERE id = 1;
+UPDATE ck_orders2 SET total = total + 1;
+```
+
+```sql
+-- @expect-error P0001
+INSERT INTO ck_orders2 (customer_id, total) VALUES (1, 5.00);
+```
+
+```text
+ERROR:  customer 1 is not active
+CONTEXT:  PL/pgSQL function require_active_customer() line 4 at RAISE
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+constraint คือ predicate เกี่ยวกับ row เดียว (NOT NULL, CHECK) ชุดของ row (PRIMARY KEY, UNIQUE) หรือสอง table (FOREIGN KEY) เซิร์ฟเวอร์ประเมินมันเมื่อ row ที่เกี่ยวข้องถูกเขียน ไม่ใช่เมื่อ row อื่นเปลี่ยน — ยกเว้น foreign key ที่เซิร์ฟเวอร์บังคับด้วย trigger ภายในบนทั้งสอง table นั่นคือเหตุผลที่ CHECK แสดงกฎเกี่ยวกับ table อื่นไม่ได้ ทำไม foreign key มีต้นทุนบน column ลูก และทำไมจังหวะการตรวจ (ทันทีหรือเลื่อน) จึงเป็นคุณสมบัติที่คุณเลือกได้
 
 ## เคล็ดลับและข้อควรระวัง
 
-- foreign key บังคับใช้ referential integrity ให้คุณ ดังนั้นฐานข้อมูลจะไม่มีวันถือ order สำหรับลูกค้าที่ไม่มีอยู่จริง การพึ่งพาโค้ดของแอปพลิเคชันเพียงอย่างเดียวเพื่อรักษาความถูกต้องของการอ้างอิงจะล้มเหลวในที่สุด
-- ตั้งชื่อ constraints ของคุณให้ชัดเจน อย่าง `orders_total_positive` แทนที่จะยอมรับชื่อที่สร้างขึ้นอัตโนมัติ ชื่อที่ชัดเจนทำให้ข้อความ error อ่านได้และทำให้การเปลี่ยนแปลง `ALTER TABLE` ในภายหลังเป็นเรื่องตรงไปตรงมา
-- เลือกพฤติกรรม `ON DELETE` อย่างตั้งใจ `CASCADE` ทำความสะอาด row ที่ขึ้นต่อกันโดยอัตโนมัติแต่อาจลบมากกว่าที่คุณคาด ส่วน `RESTRICT` คือค่าเริ่มต้นที่ปลอดภัยกว่าเมื่อคุณไม่แน่ใจ
-- constraint แบบ `CHECK` สามารถอ้างถึงหลาย column ของ row เดียวกันได้ ดังนั้นคุณสามารถเข้ารหัสกฎอย่างส่วนลดที่ต้องไม่เกิน total แต่มอง row อื่นหรือ table อื่นไม่ได้
-- การเพิ่ม constraint ลงใน table ที่มีข้อมูลอยู่แล้วจะล้มเหลวถ้ามี row เดิมละเมิดกฎอยู่ ทำความสะอาดข้อมูลก่อน แล้วจึงเพิ่ม constraint
+- foreign key บังคับ referential integrity ให้คุณ ฐานข้อมูลจึงไม่เคยมี order ของลูกค้าที่ไม่มีอยู่ การพึ่งโค้ดแอปพลิเคชันอย่างเดียวเพื่อรักษาความถูกต้องของการอ้างอิงท้ายที่สุดจะล้มเหลว
+- ตั้งชื่อ constraint ให้ชัดเจน เช่น `orders_total_positive` แทนที่จะรับชื่อที่สร้างอัตโนมัติ ชื่อที่ชัดทำให้ข้อความ error อ่านง่ายและการ `ALTER TABLE` ภายหลังตรงไปตรงมา
+- เลือกพฤติกรรม `ON DELETE` อย่างตั้งใจ `CASCADE` ทำความสะอาด row ที่พึ่งพาอัตโนมัติ แต่อาจลบมากกว่าที่คิด `RESTRICT` หรือค่าเริ่มต้น `NO ACTION` ปลอดภัยกว่าเมื่อไม่แน่ใจ
+- `CHECK` อ้างถึงหลาย column ใน row เดียวกันได้ แต่ดู row อื่นหรือ table อื่นไม่ได้ (ฟังก์ชันที่ทำเช่นนั้นจะไม่ถูกบังคับเมื่อข้อมูลอื่นเปลี่ยน)
+- CHECK ผ่านเมื่อผลเป็น NULL เพิ่ม `NOT NULL` ถ้านั่นไม่ใช่สิ่งที่คุณต้องการ
+- สร้าง index บน column ที่อ้างอิงของ foreign key
+- การเพิ่ม constraint ให้ table ที่มีข้อมูลอยู่แล้วจะล้มเหลวถ้า row ที่มีอยู่ฝ่าฝืน ทำความสะอาดข้อมูลก่อน แล้วค่อยเพิ่ม constraint
 
-<Callout title="ปล่อยให้ฐานข้อมูลเป็นคนปฏิเสธ">
-ทุก constraint ที่คุณเพิ่มคือกฎที่ฐานข้อมูลบังคับใช้แทนคุณ ทุกครั้ง สำหรับผู้เขียนทุกคน ผลักดันกฎความสมบูรณ์ลงไปใน schema แทนที่จะกระจายไปทั่วโค้ดแอปพลิเคชัน แล้วข้อมูลเสีย ๆ ทั้งจำพวกก็จะกลายเป็นสิ่งที่เก็บไม่ได้เลย
+<Callout title="ให้ฐานข้อมูลเป็นคนปฏิเสธ">
+ทุก constraint ที่คุณเพิ่มคือกฎที่ฐานข้อมูลบังคับแทนคุณ ทุกครั้ง กับทุกผู้เขียน ผลักกฎความถูกต้องลงไปใน schema แทนที่จะกระจายไปทั่วโค้ดแอปพลิเคชัน แล้วข้อมูลเสียทั้งกลุ่มจะกลายเป็นสิ่งที่เก็บไม่ได้เลย
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| บังคับ invariant ด้วย constraint ในฐานข้อมูล (`CHECK`, `UNIQUE`, `FOREIGN KEY`) | ถูกต้องเสมอไม่ว่า client หรือ service ไหนเขียนข้อมูล | เปลี่ยนกฎทีหลังต้องรัน migration และอาจกระทบ row เดิม |
-| validate เฉพาะใน application code | เปลี่ยนกฎได้เร็ว ไม่ต้องแตะ schema | ข้อมูลเสียหลุดเข้ามาได้ง่ายผ่านสคริปต์ตรง ๆ, service อื่น หรือ migration ที่ลืมเช็ค |
+| บังคับ invariant ด้วย constraint ของฐานข้อมูล (`CHECK`, `UNIQUE`, `FOREIGN KEY`) | ถูกต้องเสมอ ไม่ว่า client หรือ service ใดเขียนข้อมูล | การเปลี่ยนกฎภายหลังต้อง migration และอาจกระทบ row ที่มีอยู่ |
+| validate ในโค้ดแอปพลิเคชันอย่างเดียว | เปลี่ยนกฎเร็ว ไม่ต้องแตะ schema | ข้อมูลเสียหลุดเข้ามาง่ายผ่านสคริปต์ดิบ service อื่น หรือ migration ที่ลืมตรวจ |
+| `ON DELETE CASCADE` | ไม่มี orphan ไม่ต้องเขียนโค้ดทำความสะอาด | การลบครั้งเดียวลบได้หลาย row (ดูจำนวนข้างบน) |
+| `ON DELETE RESTRICT` / `NO ACTION` | ไม่มีอะไรหายโดยไม่ตั้งใจ | ผู้เรียกต้องลบ row ลูกก่อน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **พึ่งพา validation ระดับแอปพลิเคชันอย่างเดียว** — สคริปต์ ad-hoc, batch job หรือ service อื่นที่เขียนตรงเข้า database สามารถข้าม validation ของแอปได้เสมอ ต้องมี constraint ระดับฐานข้อมูลเป็นด่านสุดท้าย
-- **ลืมกำหนดพฤติกรรม `ON DELETE` ของ foreign key** — โดย default foreign key จะเป็น `ON DELETE NO ACTION` (เทียบเท่า `RESTRICT`) ซึ่ง block การลบ parent row ที่ยังถูกอ้างถึงอยู่ และ raise foreign-key violation ออกมา ไม่ปล่อยให้เกิด orphaned row ดังนั้นความเสี่ยงจริงคือการเผลอเลือก `ON DELETE CASCADE` แล้วลบข้อมูลลูกเกินคาด ส่วน orphaned row ที่ชี้ไปยังของที่ไม่มีอยู่แล้วจะเกิดได้ก็ต่อเมื่อเผลอใช้ `ON DELETE SET NULL` โดยไม่ได้ตั้งใจ หรือ bypass constraint ไปเท่านั้น
-- **เพิ่ม `UNIQUE` constraint บน table ที่เขียนหนักโดยไม่คิดเรื่อง index** — `UNIQUE` สร้าง index ให้อัตโนมัติ ซึ่งเพิ่มต้นทุนทุกครั้งที่ insert/update บน table ที่มี write volume สูง ต้องวางแผนล่วงหน้า
-
-> 💡 ตัวอย่างจากของจริง
->
-> **แพลตฟอร์ม e-commerce** — มักใช้ `CHECK (price >= 0)` และ foreign key ระหว่าง orders กับ customers ที่ระดับฐานข้อมูล เพื่อไม่ให้ web app, batch job หรือสคริปต์ของแอดมินตัวไหนเขียนข้อมูลที่ไม่สอดคล้องกันเข้าไปได้เลย
->
-> **[แนวทาง foreign key ของ GitLab](https://docs.gitlab.com/development/database/foreign_keys/)** — กำหนดให้ column แบบ relational แทบทุกตัวต้องมี foreign key constraint กำกับ (และมี automated test ตรวจใน schema ด้วย) เพื่อรักษา referential integrity ของฐานข้อมูลขนาดใหญ่ไว้ในระยะยาว
+- **"validate ในแอปก็พอ"** สคริปต์ ad-hoc, batch job หรือ service อื่นที่เขียนตรงเข้าฐานข้อมูลข้ามมันได้เสมอ constraint ระดับฐานข้อมูลคือแนวป้องกันสุดท้าย
+- **"`NO ACTION` กับ `RESTRICT` เหมือนกัน"** ต่างกันเมื่อ constraint เป็น deferrable: `NO ACTION` รอถึง `COMMIT` ได้ `RESTRICT` ไม่ได้ (พิสูจน์ข้างบน) และรหัส error ต่างกัน (`23503` กับ `23001`)
+- **"column unique เก็บ NULL ได้ตัวเดียว"** โดยค่าเริ่มต้นเก็บได้กี่ตัวก็ได้ `NULLS NOT DISTINCT` (PostgreSQL 15+) เปลี่ยนสิ่งนั้น
+- **"CHECK เรียกฟังก์ชันเพื่อดู table อื่นได้"** ทำได้ แต่ประเมินเฉพาะเมื่อ row นี้เปลี่ยน กฎจึงไหลเลื่อนแบบเงียบ ๆ (พิสูจน์ข้างบน)
+- **"PostgreSQL ทำ index ให้ foreign key"** ทำให้เฉพาะฝั่งที่ถูกอ้างอิง column ลูกต้องการ index ของคุณ (การลบ row แม่เร็วขึ้นราว 45 เท่าในการวัดข้างบน)
 
 export const quizConstraints = [
   {
-    q: 'constraint แบบ FOREIGN KEY รับประกันอะไร?',
+    q: 'constraint FOREIGN KEY รับประกันอะไร?',
     options: [
-      'ว่าค่าใน column ไม่ซ้ำกัน',
-      'ว่าทุกค่าชี้ไปยัง row ที่มีอยู่จริงใน table ที่ถูกอ้างถึง',
-      'ว่า column นั้นจะไม่มีวันเป็น null',
-      'ว่า column นั้นถูกทำ index เพื่อความเร็ว',
+      'ค่าใน column ไม่ซ้ำ',
+      'ทุกค่าชี้ไปยัง row ที่มีอยู่ใน table ที่ถูกอ้างอิง',
+      'column ไม่มีทางเป็น null',
+      'column ถูกทำ index เพื่อความเร็ว',
     ],
     answer: 1,
+    explain: 'มันรับประกัน referential integrity ไม่ได้ทำให้ค่าไม่ซ้ำ ไม่ห้าม NULL และ PostgreSQL ไม่สร้าง index บน column ที่อ้างอิงให้',
   },
   {
-    q: 'เมื่อใช้ ON DELETE CASCADE บน orders.customer_id จะเกิดอะไรขึ้นเมื่อลูกค้าที่ถูกอ้างถึงถูกลบ?',
+    q: 'เมื่อ orders.customer_id มี ON DELETE CASCADE จะเกิดอะไรขึ้นเมื่อลูกค้าที่ถูกอ้างอิงถูกลบ?',
     options: [
-      'การลบถูกปิดกั้น',
-      'order ที่ตรงกันถูกลบไปด้วย',
-      'order ยังคงมี customer_id เป็น null',
-      'ไม่มีอะไรเปลี่ยนแปลง',
+      'การลบถูกบล็อก',
+      'order ที่ตรงกันถูกลบด้วย',
+      'order เก็บ customer_id เป็น null',
+      'ไม่มีอะไรเปลี่ยน',
     ],
     answer: 1,
+    explain: 'CASCADE ลบ row ที่พึ่งพา: บทเรียนแสดง 3 order ก่อนและ 1 หลังลบลูกค้า 1 การบล็อกคือ RESTRICT/NO ACTION การตั้ง NULL คือ SET NULL',
   },
   {
-    q: 'constraint ใดปฏิเสธ row เมื่อนิพจน์ที่กำหนดเองประเมินค่าได้เป็น false?',
+    q: 'constraint ใดปฏิเสธ row เมื่อนิพจน์ที่กำหนดเองประเมินเป็นเท็จ?',
     options: ['UNIQUE', 'CHECK', 'DEFAULT', 'PRIMARY KEY'],
     answer: 1,
+    explain: '`CHECK (expr)` ปฏิเสธ row เมื่อ `expr` เป็นเท็จ (SQLSTATE 23514) ถ้า `expr` เป็น NULL row ถูกรับ',
+  },
+  {
+    q: 'column หนึ่งมี `UNIQUE` และ insert NULL สามแถว จะเกิดอะไรขึ้น?',
+    options: [
+      'insert ครั้งที่สองล้มเหลวด้วย 23505',
+      'สำเร็จทั้งสาม เพราะ NULL ถือว่าแตกต่างกันโดยค่าเริ่มต้น',
+      'ล้มเหลวทั้งสามด้วย 23502',
+      'table ถูก lock',
+    ],
+    answer: 1,
+    explain: 'NULL แตกต่างกันใน UNIQUE constraint เว้นแต่ประกาศ `NULLS NOT DISTINCT` (PostgreSQL 15+) ซึ่งบทเรียนแสดงว่าล้มเหลวที่ NULL ตัวที่สอง',
+  },
+  {
+    q: 'ข้อใดจริงกับ foreign key แบบ `DEFERRABLE INITIALLY DEFERRED`?',
+    options: [
+      'ON DELETE RESTRICT และ NO ACTION ทำงานเหมือนกัน',
+      'NO ACTION ตรวจตอน COMMIT ส่วน RESTRICT ยังตรวจทันที',
+      'ทั้งสองตรวจเฉพาะตอน COMMIT',
+      'การ defer ปิด constraint',
+    ],
+    answer: 1,
+    explain: 'ในบทเรียน การลบ row แม่แล้ว insert กลับใน transaction เดียว commit ได้เมื่อเป็น NO ACTION ขณะที่ RESTRICT ล้มเหลวทันทีด้วย 23001',
   },
 ];
 
