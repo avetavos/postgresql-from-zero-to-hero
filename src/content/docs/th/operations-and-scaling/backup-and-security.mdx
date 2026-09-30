@@ -1,6 +1,6 @@
 ---
 title: Backup และ security
-description: ปกป้องข้อมูลของคุณด้วย backup แบบ logical และ physical และ point-in-time recovery แล้วล็อกการเข้าถึงด้วย role, GRANT และ REVOKE, row-level security, TLS, และ pg_hba.conf
+description: backup แบบ logical และ physical, point-in-time recovery จริง, incremental backup และ security เป็นชั้น — pg_hba.conf, TLS, GRANT และ REVOKE, row-level security — แต่ละอย่างพิสูจน์ในแล็บ PostgreSQL 18 จริง
 sidebar:
   order: 5
 ---
@@ -10,51 +10,136 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-หน้าที่ด้าน operations สองอย่างสุดท้ายคือสิ่งที่คุณหวังว่าจะไม่ต้องใช้และไม่อาจมองข้ามได้ **Backup** ให้คุณสร้างใหม่ได้หลังจากดิสก์ล้มเหลว การ deploy ที่ผิดพลาด หรือ `DELETE` ที่พลาดไป **Security** ควบคุมว่าใครอาจเชื่อมต่อได้ ใครอาจเห็นอะไร และข้อมูลเดินทางผ่านเครือข่ายอย่างไร ฐานข้อมูลที่เร็วและพร้อมใช้งานสูงก็ยังเป็นภาระอยู่ดี ถ้า restore กลับมาไม่ได้ หรือใครบนอินเทอร์เน็ตก็อ่านได้
+สองหน้าที่ปฏิบัติการสุดท้ายคือสิ่งที่หวังว่าจะไม่ต้องใช้และข้ามไม่ได้ **Backup** ให้คุณสร้างใหม่หลังดิสก์พัง deploy พลาด หรือ `DELETE` ที่ผิดพลาด **Security** ควบคุมว่าใครเชื่อมต่อได้ ใครเห็นอะไรได้ และข้อมูลเดินทางผ่านเครือข่ายอย่างไร ฐานข้อมูลที่เร็วและพร้อมใช้งานสูงยังเป็นภาระถ้ากู้คืนไม่ได้ หรือถ้าใครบนอินเทอร์เน็ตอ่านมันได้
 
-บทเรียนนี้ครอบคลุม backup ทั้งสองตระกูลที่ PostgreSQL มีให้ จากนั้นเดินลงไปทีละชั้นของการควบคุมการเข้าถึงจากขอบเครือข่ายไปจนถึง row แต่ละ row
+บทเรียนนี้ครอบคลุมทั้งสองตระกูลของ backup ที่ PostgreSQL มี แล้วเดินลงตามชั้นของการควบคุมการเข้าถึงจากขอบเครือข่ายถึงแต่ละ row ทุกอย่างรันจริงบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) ส่วน backup และ network security ใช้คอนเทนเนอร์เดียวที่เริ่มด้วย `--network none` (ไม่มีเครือข่ายเลย; การเชื่อมต่อผ่าน loopback ของมันเอง) และ volume ที่ตั้งชื่อ `postgresql-b3-*` ลบทั้งหมดเมื่อจบ ส่วน role และ row-level security เป็น fence `sql` ที่รันในฐานข้อมูลเปล่าหนึ่งตัว `<your-password>` แทนค่าใดก็ได้ที่คุณเลือก
 
-## backup สองชนิด
+## Backup สองชนิด
 
-Backup ของ PostgreSQL มีสองสไตล์ที่เหมาะกับความต้องการที่ต่างกัน
+backup ของ PostgreSQL มีสองแบบที่เหมาะกับความต้องการต่างกัน
 
-| ชนิด     | เครื่องมือ                     | เก็บอะไรไว้บ้าง                        | เหมาะที่สุดสำหรับ                  |
+| ชนิด     | เครื่องมือ                          | สิ่งที่มันจับ                        | เหมาะกับ                          |
 |----------|-------------------------------|-----------------------------------------|-----------------------------------|
-| Logical  | `pg_dump` / `pg_restore`      | SQL หรือ archive ของฐานข้อมูลหนึ่ง       | ฐานข้อมูลเดี่ยว, การย้ายเวอร์ชัน    |
-| Physical | base backup + WAL archiving   | ไฟล์ทั้ง cluster แบบ byte-for-byte       | cluster ขนาดใหญ่, point-in-time recovery |
+| Logical  | `pg_dump` / `pg_restore`      | SQL หรือ archive ของฐานข้อมูลหนึ่งตัว       | ฐานข้อมูลเดี่ยว การย้าย version   |
+| Physical | base backup + WAL archiving   | ไฟล์ของทั้ง cluster แบบ byte ต่อ byte| cluster ใหญ่ point-in-time recovery |
 
-### logical backup
-
-Logical backup รัน `pg_dump` ซึ่งอ่านฐานข้อมูลและเขียน statement ที่จำเป็นสำหรับสร้างฐานข้อมูลนั้นขึ้นมาใหม่ ไฟล์ที่ได้พกพาข้ามเครื่องและข้าม major version ได้ จึงเหมาะอย่างยิ่งกับการย้ายหรือ clone ฐานข้อมูลเดี่ยว
+แล็บ: ฐานข้อมูลหนึ่งตัวที่เปิด archiving `archive_command` คัดลอก WAL segment ที่เสร็จแล้วแต่ละอันไปยัง volume ที่อยู่รอดกว่าเซิร์ฟเวอร์ `summarize_wal` (จำเป็นสำหรับ incremental backup) เปิดอยู่ด้วย
 
 ```bash
-# Dump one database to a compressed custom-format archive
-pg_dump --format=custom --file=shop.dump --dbname=shop
+# scripts/backup-lab.sh
+docker volume create postgresql-b3-pgdata
+docker volume create postgresql-b3-archive
+docker volume create postgresql-b3-backup
+# the archive and backup volumes must be writable by the postgres user
+docker run --rm --user root -v postgresql-b3-archive:/archive -v postgresql-b3-backup:/backup \
+  postgres:18.6 chown postgres:postgres /archive /backup
 
-# Restore that archive into a fresh database
-createdb shop_restored
-pg_restore --dbname=shop_restored shop.dump
+docker run -d --name postgresql-b3-pg --network none --memory 768m --cpus 4 \
+  -e POSTGRES_PASSWORD=<your-password> \
+  -v postgresql-b3-pgdata:/var/lib/postgresql -v postgresql-b3-archive:/archive -v postgresql-b3-backup:/backup \
+  postgres:18.6 \
+  -c archive_mode=on -c 'archive_command=test ! -f /archive/%f && cp %p /archive/%f' -c summarize_wal=on
 ```
 
-รูปแบบ custom ที่ใช้ในที่นี้ให้ `pg_restore` restore บางส่วนแบบเลือกได้และรันแบบขนานได้ สำหรับฐานข้อมูลขนาดเล็ก ไฟล์ SQL ธรรมดาที่คุณ replay ด้วย `psql` ก็ใช้ได้เช่นกัน
+```text
+# 1. one database container with no network at all (--network none), WAL archiving on, and three volumes: data, archive, backups
 
-### physical backup และ point-in-time recovery
+$ docker run --rm --user root -v postgresql-b3-archive:/archive -v postgresql-b3-backup:/backup postgres:18.6 chown postgres:postgres /archive /backup
 
-สำหรับ cluster ขนาดใหญ่หรือยุ่ง การ dump แบบ logical ช้าเกินไป แทนที่จะทำเช่นนั้น คุณทำ **base backup** — สำเนาระดับ byte ของไฟล์ข้อมูล — และ archive write-ahead log อย่างต่อเนื่อง การ replay WAL ทับ base backup ให้คุณ restore กลับไปยังจังหวะเวลาใด ๆ ก็ได้ ซึ่งรู้จักกันในชื่อ **point-in-time recovery** (PITR)
+$ docker run -d --name postgresql-b3-pg --network none --memory 768m --cpus 4 -e POSTGRES_PASSWORD=<your-password> \
+    -v postgresql-b3-pgdata:/var/lib/postgresql -v postgresql-b3-archive:/archive -v postgresql-b3-backup:/backup postgres:18.6 \
+    -c archive_mode=on -c 'archive_command=test ! -f /archive/%f && cp %p /archive/%f' -c summarize_wal=on
 
-```bash
-# Take a base backup of the whole cluster
-pg_basebackup --pgdata=/backups/base --format=tar --gzip --progress
+-- database: script
+SELECT name, setting FROM pg_settings WHERE name IN ('archive_mode', 'archive_command', 'summarize_wal', 'wal_level') ORDER BY name;
+CREATE DATABASE shop;
+-- database: psql output
+      name       |                  setting                   
+-----------------+--------------------------------------------
+ archive_command | test ! -f /archive/%f && cp %p /archive/%f
+ archive_mode    | on
+ summarize_wal   | on
+ wal_level       | replica
+(4 rows)
+
+CREATE DATABASE
+
+-- database: script
+CREATE TABLE orders (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  item      text NOT NULL,
+  amount    numeric NOT NULL
+);
+INSERT INTO orders (tenant_id, item, amount)
+SELECT g % 5 + 1, 'item-' || g, g % 100 FROM generate_series(1, 200000) g;
+SELECT count(*) AS orders, sum(amount) AS total FROM orders;
+-- database: psql output
+CREATE TABLE
+INSERT 0 200000
+ orders |  total  
+--------+---------
+ 200000 | 9900000
+(1 row)
 ```
 
-```conf
-# postgresql.conf: keep every WAL segment by archiving it
-archive_mode = on
-archive_command = 'test ! -f /archive/%f && cp %p /archive/%f'
+### Logical backup
+
+logical backup รัน `pg_dump` ซึ่งอ่านฐานข้อมูลและเขียนคำสั่งที่จำเป็นเพื่อสร้างมันใหม่ มันพกพาข้ามเครื่องและแม้แต่ข้าม major version จึงเหมาะกับการย้ายหรือ clone ฐานข้อมูลเดี่ยว ([docs](https://www.postgresql.org/docs/18/app-pgdump.html)) มันจับฐานข้อมูลเดียวเท่านั้น; role และวัตถุระดับ cluster อื่นมาจาก `pg_dumpall --globals-only` รูปแบบ custom ถูกบีบอัดและให้ `pg_restore` เลือกส่วนและรันขนานได้; ฐานข้อมูลเดียวกันเป็น SQL ธรรมดาใหญ่กว่าสี่เท่าครึ่งที่นี่
+
+```text
+$ docker exec --user postgres postgresql-b3-pg pg_dump --format=custom --file=/backup/shop.dump shop
+
+$ docker exec --user postgres postgresql-b3-pg sh -c "pg_dump shop | wc -c; ls -l /backup/shop.dump | awk '{print $5, $9}'"    # plain SQL bytes, then the custom-format file
+4559583
+1006636 /backup/shop.dump
+
+$ docker exec --user postgres postgresql-b3-pg pg_restore --list /backup/shop.dump | head -12
+;
+; Archive created at 2026-09-30 08:42:43 UTC
+;     dbname: shop
+;     TOC Entries: 9
+;     Compression: gzip
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 18.6 (Debian 18.6-1.pgdg13+2)
+;     Dumped by pg_dump version: 18.6 (Debian 18.6-1.pgdg13+2)
+;
+
+# --create names the database to CONNECT to first; the database restored is the one in the dump
+
+$ docker exec --user postgres postgresql-b3-pg pg_restore --dbname=shop_restored --create /backup/shop.dump    # shop_restored does not exist yet
+pg_restore: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  database "shop_restored" does not exist
+
+$ docker exec --user postgres postgresql-b3-pg createdb shop_restored
+
+$ docker exec --user postgres postgresql-b3-pg pg_restore --dbname=shop_restored --jobs=2 /backup/shop.dump
+
+$ docker exec --user postgres postgresql-b3-pg psql -d shop -Atc "SELECT count(*), sum(amount) FROM orders"
+200000|9900000
+
+$ docker exec --user postgres postgresql-b3-pg psql -d shop_restored -Atc "SELECT count(*), sum(amount) FROM orders"
+200000|9900000
+
+# restoring INTO the cluster under the dump's own name: drop the original, then --create with a maintenance database
+
+$ docker exec --user postgres postgresql-b3-pg dropdb shop
+
+$ docker exec --user postgres postgresql-b3-pg pg_restore --dbname=postgres --create /backup/shop.dump
+
+$ docker exec --user postgres postgresql-b3-pg psql -d shop -Atc "SELECT count(*), sum(amount) FROM orders"
+200000|9900000
 ```
 
-ด้วย base backup บวกกับ WAL ที่ archive ไว้ การ recovery หมายถึงการ restore ไฟล์ base แล้วบอก PostgreSQL ให้ replay WAL ไปจนถึง timestamp ที่เลือก — คุณจึงสามารถย้อนกลับไปยังวินาทีก่อนที่ migration ที่ผิดพลาดจะรันได้
+สองบทเรียนใน transcript dump กับสำเนาที่กู้คืนตรงกันทั้ง count และ sum ซึ่งคือการตรวจที่การซ้อมกู้คืนควรทำ และ `--create` ไม่ได้แปลว่า "กู้คืนเข้าฐานข้อมูลใหม่ชื่อที่ฉันให้": `--dbname` ระบุฐานข้อมูลที่ *เชื่อมต่อก่อน* (ต้องมีอยู่) และฐานข้อมูลที่ถูกสร้างคือชื่อที่อยู่ใน dump ความพยายามแรกล้มเพราะ `shop_restored` ไม่มีอยู่ รูปแบบที่ใช้ได้คือ `createdb` + กู้คืนโดยไม่มี `--create` หรือ `--dbname=postgres --create` หลัง drop ต้นฉบับ
+
+### Physical backup และ point-in-time recovery
+
+สำหรับ cluster ใหญ่หรือยุ่ง การ dump แบบ logical ช้าเกินไป แทนที่จะทำเช่นนั้น คุณทำ **base backup** — สำเนาระดับ byte ของไฟล์ข้อมูล — และ archive write-ahead log ต่อเนื่อง การ replay WAL บน base backup ให้คุณกู้คืนไปยังช่วงเวลาใดก็ได้ เรียกว่า **point-in-time recovery** (PITR, [docs](https://www.postgresql.org/docs/18/continuous-archiving.html))
 
 export const backupDiagram = `flowchart LR
   PG[(Primary cluster)] -->|pg_basebackup| Base[Base backup]
@@ -63,132 +148,695 @@ export const backupDiagram = `flowchart LR
   WAL -->|replay to a chosen time| Restore
   Restore --> Recovered[(Recovered cluster)]`;
 
-<Mermaid code={backupDiagram} title="base backup บวกกับ WAL ที่ archive ไว้ทำให้ point-in-time recovery เป็นไปได้" />
+<Mermaid code={backupDiagram} title="Base backup บวม WAL ที่ archive ไว้ทำให้ทำ point-in-time recovery ได้" />
 
-## security เป็นชั้น ๆ
+`pg_basebackup` ทำ base backup และ `pg_verifybackup` ตรวจมันกับ manifest ที่มันเขียน PostgreSQL 17 เพิ่ม backup แบบ **incremental**: หลัง full backup อันที่สองคัดลอกเฉพาะ block ที่เปลี่ยน (สิ่งที่ `summarize_wal` บันทึก) และ `pg_combinebackup` รวมสายกลับเป็น full backup ([release notes](https://www.postgresql.org/docs/17/release-17.html), [docs](https://www.postgresql.org/docs/18/app-pgcombinebackup.html))
 
-การควบคุมการเข้าถึงใน PostgreSQL มองภาพได้ดีที่สุดเป็นชุดของประตูที่ request ผ่านไป: ก่อนอื่นคือเครือข่าย จากนั้น authentication แล้วก็ role privilege และสุดท้ายคือกฎระดับ row แต่ละชั้นสามารถหยุด request ที่ชั้นก่อนหน้าปล่อยผ่านมาได้
+```text
+$ docker exec --user postgres postgresql-b3-pg pg_basebackup --pgdata=/backup/full --checkpoint=fast --verbose
+pg_basebackup: initiating base backup, waiting for checkpoint to complete
+pg_basebackup: checkpoint completed
+pg_basebackup: write-ahead log start point: 0/7000028 on timeline 1
+pg_basebackup: starting background WAL receiver
+pg_basebackup: created temporary replication slot "pg_basebackup_227"
+pg_basebackup: write-ahead log end point: 0/7000120
+pg_basebackup: waiting for background process to finish streaming ...
+pg_basebackup: syncing data to disk ...
+pg_basebackup: renaming backup_manifest.tmp to backup_manifest
+pg_basebackup: base backup completed
+
+$ docker exec --user postgres postgresql-b3-pg pg_verifybackup /backup/full
+backup successfully verified
+
+$ docker exec --user postgres postgresql-b3-pg du -sh /backup/full
+88M	/backup/full
+
+-- database: script
+INSERT INTO orders (tenant_id, item, amount) VALUES (1, 'after-backup-1', 10), (2, 'after-backup-2', 20), (3, 'after-backup-3', 30);
+INSERT INTO orders (tenant_id, item, amount) SELECT g % 5 + 1, 'bulk-' || g, g % 100 FROM generate_series(1, 50000) g;
+SELECT count(*) AS orders FROM orders;
+-- database: psql output
+INSERT 0 3
+INSERT 0 50000
+ orders 
+--------
+ 250003
+(1 row)
+
+# an incremental backup: only the blocks changed since the full one (needs summarize_wal = on)
+
+$ docker exec --user postgres postgresql-b3-pg pg_basebackup --pgdata=/backup/incr1 --incremental=/backup/full/backup_manifest --checkpoint=fast
+
+$ docker exec --user postgres postgresql-b3-pg du -sh /backup/full /backup/incr1
+88M	/backup/full
+30M	/backup/incr1
+
+$ docker exec --user postgres postgresql-b3-pg pg_combinebackup /backup/full /backup/incr1 --output=/backup/combined
+
+$ docker exec --user postgres postgresql-b3-pg pg_verifybackup /backup/combined
+backup successfully verified
+```
+
+incremental backup ขนาด 30 MB เทียบกับ 88 MB ของ full หลังเพิ่ม 50 003 row ใน table 200 000 row ผลรวมที่ได้ verify ได้เหมือน base backup ใด ๆ
+
+ทีนี้ภัยพิบัติ มี base backup อยู่ เพิ่มสาม row หลังมัน และมีคนรัน `DELETE FROM orders` โดยไม่มี `WHERE` สองวินาทีก่อนความผิดพลาดเราจดเวลาไว้ `pg_switch_wal()` ปิด WAL segment ปัจจุบันเพื่อให้ถูก archive และ `pg_stat_archiver` กับรายการ archive แสดงว่า archive ได้รับ segment (archive แล้ว 13 ล้ม 0):
+
+```text
+-- database: script
+SELECT pg_sleep(2);
+SELECT to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS.US') || '+00' AS t1 \gset
+SELECT :'t1' AS restore_target_time;
+SELECT pg_sleep(2);
+DELETE FROM orders;   -- the mistake
+SELECT pg_switch_wal() IS NOT NULL AS wal_switched;
+SELECT count(*) AS orders_now FROM orders;
+-- database: psql output
+ pg_sleep 
+----------
+ 
+(1 row)
+
+      restore_target_time      
+-------------------------------
+ 2026-09-30 08:42:49.102022+00
+(1 row)
+
+ pg_sleep 
+----------
+ 
+(1 row)
+
+DELETE 250003
+ wal_switched 
+--------------
+ t
+(1 row)
+
+ orders_now 
+------------
+          0
+(1 row)
+
+-- database: script
+SELECT archived_count, failed_count, last_archived_wal FROM pg_stat_archiver;
+-- database: psql output
+ archived_count | failed_count |    last_archived_wal     
+----------------+--------------+--------------------------
+             13 |            0 | 00000001000000000000000B
+(1 row)
+
+$ docker exec --user postgres postgresql-b3-pg ls /archive | tail -4
+000000010000000000000009
+000000010000000000000009.00000028.backup
+00000001000000000000000A
+00000001000000000000000B
+```
+
+การกู้คืนคือ data directory ใหม่ จึงเกิดห่างจากเซิร์ฟเวอร์ที่เสียหาย คัดลอก base backup เข้า directory ว่าง สร้างไฟล์ `recovery.signal` (ที่บอกเซิร์ฟเวอร์ให้เริ่มใน archive recovery) และให้การตั้งค่าสามอย่าง: `restore_command` (วิธีดึง segment ที่ archive ไว้; `%f` คือชื่อไฟล์ และ `%p` คือ path ที่จะคัดลอกไป) `recovery_target_time` และ `recovery_target_action = 'promote'` (เปิดให้เขียนเมื่อถึงเป้าหมาย) log แสดงสิ่งที่ PostgreSQL ทำ:
+
+```text
+# restore: copy the base backup into an empty data directory, ask for recovery, and say where to fetch WAL and when to stop
+
+$ docker run --rm --user postgres -v postgresql-b3-backup:/backup:ro -v postgresql-b3-restore-data:/var/lib/postgresql postgres:18.6 sh -c \
+    'mkdir -p /var/lib/postgresql/18/docker && cp -a /backup/full/. /var/lib/postgresql/18/docker/ && chmod 700 /var/lib/postgresql/18/docker && touch /var/lib/postgresql/18/docker/recovery.signal'
+
+# appended to postgresql.auto.conf in the restored data directory:
+restore_command = 'cp /archive/%f %p'
+recovery_target_time = '2026-09-30 08:42:49.102022+00'
+recovery_target_action = 'promote'
+
+$ docker run -d --name postgresql-b3-restore --network none --memory 768m -v postgresql-b3-restore-data:/var/lib/postgresql -v postgresql-b3-archive:/archive:ro postgres:18.6
+
+$ docker logs postgresql-b3-restore 2>&1 | grep -E "recovery|restored log file|redo|promot|consistent"   (timestamps and process ids removed)
+LOG:  starting backup recovery with redo LSN 0/7000028, checkpoint LSN 0/7000080, on timeline ID 1
+LOG:  restored log file "000000010000000000000007" from archive
+LOG:  starting point-in-time recovery to 2026-09-30 08:42:49.102022+00
+LOG:  redo starts at 0/7000028
+LOG:  restored log file "000000010000000000000008" from archive
+LOG:  completed backup recovery with redo LSN 0/7000028 and end LSN 0/7000120
+LOG:  consistent recovery state reached at 0/7000120
+LOG:  restored log file "000000010000000000000009" from archive
+LOG:  restored log file "00000001000000000000000A" from archive
+LOG:  restored log file "00000001000000000000000B" from archive
+LOG:  recovery stopping before commit of transaction 773, time 2026-09-30 08:42:51.197887+00
+LOG:  redo done at 0/BC8E170 system usage: CPU: user: 0.09 s, system: 0.01 s, elapsed: 0.17 s
+LOG:  restored log file "00000001000000000000000B" from archive
+LOG:  archive recovery complete
+
+-- restored server: script
+SELECT pg_is_in_recovery() AS still_recovering;
+\c shop
+SELECT count(*) AS orders, count(*) FILTER (WHERE item LIKE 'after-backup%') AS after_backup_rows FROM orders;
+-- restored server: psql output
+ still_recovering 
+------------------
+ f
+(1 row)
+
+You are now connected to database "shop" as user "postgres".
+ orders | after_backup_rows 
+--------+-------------------
+ 250003 |                 3
+(1 row)
+```
+
+มันดึง segment 7 ถึง B จาก archive replay และหยุด *ก่อน commit ของ transaction 773* คือ `DELETE` ที่เวลา commit อยู่หลังเป้าหมายของเรา เซิร์ฟเวอร์ที่กู้คืนไม่อยู่ใน recovery แล้ว และ `orders` มี 250 003 row: 200 000 จาก backup บวม 3 กับ 50 000 ที่เขียนทีหลัง มีแต่ความผิดพลาดที่หายไป นั่นคือประเด็นของ PITR: backup อย่างเดียวจะได้ 200 000 row และเสียงานที่ทำทีหลัง
+
+สามข้อควรระวัง `archive_command` ต้องรายงานความล้มเหลวตรงไปตรงมา (`test ! -f ... && cp ...` ปฏิเสธการเขียนทับไฟล์ที่มีอยู่); ถ้ามันล้มต่อเนื่อง WAL กองบน primary จนดิสก์เต็ม backup และ WAL ของมันต้องเก็บที่ที่ความล้มเหลวของ primary เอาไปด้วยไม่ได้ และทั้งหมดนี้ไม่ใช่ backup จนกว่าจะกู้คืนจากมันสำเร็จ ซึ่งคือสิ่งที่ transcript นี้ทำ
+
+**ใน pgAdmin:** เมนู Tools มี dialog Backup และ Restore ที่รัน `pg_dump` และ `pg_restore` ให้ ส่วน physical backup และ PITR ข้างบนทำจาก command line
+
+## Security เป็นชั้น
+
+การควบคุมการเข้าถึงใน PostgreSQL มองเป็นชุดประตูที่ request ผ่านได้ดีที่สุด: เครือข่ายก่อน แล้ว authentication แล้ว privilege ของ role และสุดท้ายกฎระดับ row แต่ละชั้นหยุด request ที่ชั้นก่อนหน้าปล่อยผ่านมาได้
 
 export const securityDiagram = `flowchart LR
-  Client[Client] -->|encrypted with TLS| HBA[pg_hba.conf - who may connect]
+  Client[Client] -->|encrypted with TLS| HBA["pg_hba.conf - who may connect"]
   HBA --> Auth[Authenticate the role]
-  Auth --> Priv[Role privileges - GRANT and REVOKE]
+  Auth --> Priv["Role privileges - GRANT and REVOKE"]
   Priv --> RLS[Row-level security policy]
   RLS --> Data[(Table rows)]`;
 
-<Mermaid code={securityDiagram} title="connection ผ่านประตูเครือข่าย, auth, privilege, และ row" />
+<Mermaid code={securityDiagram} title="connection ผ่านประตูเครือข่าย, auth, privilege และ row" />
 
 ### ประตูเครือข่าย: pg_hba.conf และ TLS
 
-ประตูแรกคือ `pg_hba.conf` (host-based authentication) แต่ละบรรทัดบอกว่า role ใดอาจเชื่อมต่อกับฐานข้อมูลใดจาก address ใด และต้อง authenticate อย่างไร กฎถูกอ่านจากบนลงล่าง และการ match แรกชนะ
+ประตูแรกคือ `pg_hba.conf` (host-based authentication) แต่ละบรรทัดบอกว่า role ไหนเชื่อมต่อฐานข้อมูลไหนจากที่อยู่ไหนได้ และต้องพิสูจน์ตัวตนอย่างไร กฎอ่านจากบนลงล่างและ **อันแรกที่ตรงชนะ** ([docs](https://www.postgresql.org/docs/18/auth-pg-hba-conf.html)) รหัสผ่านถูกเก็บเป็น SCRAM verifier โดย default (`password_encryption = scram-sha-256`); ค่าที่เก็บขึ้นต้นด้วย `SCRAM-SHA-256$`:
 
-```conf
-# TYPE  DATABASE  USER   ADDRESS         METHOD
-hostssl all       app    10.0.0.0/24     scram-sha-256
-host    all       all    127.0.0.1/32    scram-sha-256
+```text
+-- database: script
+SHOW password_encryption;
+CREATE ROLE app LOGIN PASSWORD '<your-password>';
+SELECT rolname, left(rolpassword, 14) AS stored_as FROM pg_authid WHERE rolname = 'app';
+-- database: psql output
+ password_encryption 
+---------------------
+ scram-sha-256
+(1 row)
+
+CREATE ROLE
+ rolname |   stored_as    
+---------+----------------
+ app     | SCRAM-SHA-256$
+(1 row)
+
+# 1. first match wins: the reject line for app comes before the general rule
+
+# pg_hba.conf (reject before allow):
+local   all   all                    trust
+host    all   app   127.0.0.1/32      reject
+host    all   all   127.0.0.1/32      scram-sha-256
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=app dbname=shop" -Atc "SELECT current_user AS connected_as"
+psql: error: connection to server at "127.0.0.1", port 5432 failed: FATAL:  pg_hba.conf rejects connection for host "127.0.0.1", user "app", database "shop", no encryption
+
+# pg_hba.conf (allow app first):
+local   all   all                    trust
+host    all   app   127.0.0.1/32      scram-sha-256
+host    all   all   127.0.0.1/32      reject
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=app dbname=shop" -Atc "SELECT current_user AS connected_as"
+app
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=postgres dbname=shop" -Atc "SELECT 1"
+psql: error: connection to server at "127.0.0.1", port 5432 failed: FATAL:  pg_hba.conf rejects connection for host "127.0.0.1", user "postgres", database "shop", no encryption
 ```
 
-คีย์เวิร์ด `hostssl` กำหนดให้ connection ต้องเข้ารหัสด้วย **TLS** ซึ่งคุณเปิดใช้ใน `postgresql.conf` ด้วยการชี้ไปที่ certificate และ key
+เมื่อบรรทัด reject มาก่อน `app` ถูกปฏิเสธแม้กฎข้างล่างจะอนุญาต; เมื่อบรรทัด allow มาก่อน `app` เข้าได้ และตอนนี้ *คนอื่นทุกคน* รวม `postgres` ชนบรรทัด reject เพราะมันตรงด้วย ข้อความ error ระบุกฎที่ทำงาน: `pg_hba.conf rejects connection` ผิดลำดับในไฟล์นี้เป็นวิธีที่พบบ่อยที่ล็อกตัวเองออก จึงควรเก็บบรรทัด local socket ไว้สำหรับผู้ดูแล
 
-```conf
-# postgresql.conf
-ssl = on
-ssl_cert_file = '/etc/postgresql/server.crt'
-ssl_key_file  = '/etc/postgresql/server.key'
+คีย์เวิร์ด `hostssl` บังคับให้การเชื่อมต่อเข้ารหัสด้วย **TLS** ซึ่งคุณเปิดโดยชี้ PostgreSQL ไปที่ certificate และ key แล็บสร้าง certificate แบบ self-signed ที่มีอายุหนึ่งวัน เซิร์ฟเวอร์จริงใช้อันจาก certificate authority ของคุณ เมื่อมีเฉพาะบรรทัด `hostssl` สำหรับ `app` ความพยายามที่ไม่เข้ารหัสตกไปที่บรรทัด reject และแบบเข้ารหัสถูกรับ:
+
+```text
+# 2. TLS: a self-signed certificate made for this lab (never use one like it in production)
+
+$ docker exec --user postgres postgresql-b3-pg sh -c "cd /var/lib/postgresql/18/docker && openssl req -new -x509 -nodes -days 1 -subj '/CN=localhost' -keyout server.key -out server.crt && chmod 600 server.key"
+
+-- database: script
+ALTER SYSTEM SET ssl = on;
+SELECT pg_reload_conf();
+-- database: psql output
+ALTER SYSTEM
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+# pg_hba.conf (hostssl only for app):
+local   all   all                    trust
+hostssl all   app   127.0.0.1/32      scram-sha-256
+host    all   all   127.0.0.1/32      reject
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=app dbname=shop sslmode=disable" -Atc "SELECT current_user AS connected_as"
+psql: error: connection to server at "127.0.0.1", port 5432 failed: FATAL:  pg_hba.conf rejects connection for host "127.0.0.1", user "app", database "shop", no encryption
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=app dbname=shop sslmode=require" -Atc "SELECT ssl, version AS tls_version FROM pg_stat_ssl WHERE pid = pg_backend_pid()"
+t|TLSv1.3
 ```
 
-### role และ privilege: GRANT และ REVOKE
-
-เมื่อเชื่อมต่อแล้ว สิ่งที่ role ทำได้จะกำกับด้วย privilege คุณสร้าง role แล้ว `GRANT` สิทธิ์ที่ต้องการ หรือ `REVOKE` คืนก็ได้ หลักการชี้นำคือ **least privilege** คือให้แต่ละ role เท่าที่จำเป็นต้องใช้จริงเท่านั้น
+`pg_stat_ssl` ยืนยันว่า session เข้ารหัสจริง TLS 1.3 ที่นี่ hash รหัสผ่าน MD5 แบบเก่ายังใช้ได้แต่ deprecated: การสร้างวันนี้พิมพ์คำเตือนว่า MD5 password support "will be removed in a future release" จึงอย่าสร้าง role ใหม่บนมัน:
 
 ```sql
--- A read-only reporting role
-CREATE ROLE reporting LOGIN PASSWORD 'set-a-strong-one';
-GRANT CONNECT ON DATABASE shop TO reporting;
-GRANT USAGE ON SCHEMA public TO reporting;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO reporting;
-
--- An application role that may also write to one table
-CREATE ROLE app LOGIN PASSWORD 'set-a-strong-one';
-GRANT SELECT, INSERT, UPDATE ON orders TO app;
-REVOKE DELETE ON orders FROM app;
+-- sql/md5-warning.sql
+SHOW password_encryption;
+SET password_encryption = 'md5';
+CREATE ROLE shop_legacy LOGIN PASSWORD '<your-password>';
+RESET password_encryption;
+DROP ROLE shop_legacy;
 ```
 
-### row-level security
+```text
+ password_encryption 
+---------------------
+ scram-sha-256
+(1 row)
 
-Privilege ควบคุมทั้ง table **Row-level security** (RLS) ลงลึกกว่านั้น โดยให้ policy ตัดสินว่า role อาจเห็นหรือเปลี่ยน *row* ใด — เป็นรากฐานของระบบ multi-tenant ที่แต่ละ tenant ต้องเห็นเฉพาะข้อมูลของตัวเองเท่านั้น
+SET
+WARNING:  setting an MD5-encrypted password
+DETAIL:  MD5 password support is deprecated and will be removed in a future release of PostgreSQL.
+HINT:  Refer to the PostgreSQL documentation for details about migrating to another password type.
+CREATE ROLE
+RESET
+DROP ROLE
+```
+
+### Role และ privilege: GRANT และ REVOKE
+
+เมื่อเชื่อมต่อแล้ว สิ่งที่ role ทำได้ถูกควบคุมด้วย privilege คุณสร้าง role แล้ว `GRANT` สิทธิ์เฉพาะและ `REVOKE` หลักการนำทางคือ **least privilege**: ให้แต่ละ role แค่สิ่งที่ต้องการ fence ด้านล่างใช้สาม role ที่ไม่มี login (จึง switch เข้าได้ด้วย `SET ROLE`): เจ้าของ table, role รายงาน และแอป
 
 ```sql
--- Turn on RLS and add a policy keyed to a session setting
-ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+-- sql/setup.sql
+CREATE ROLE shop_owner NOLOGIN;      -- owns the tables
+CREATE ROLE shop_reporting NOLOGIN;  -- read-only reports
+CREATE ROLE shop_app NOLOGIN;        -- the application
+GRANT CREATE ON SCHEMA public TO shop_owner;
 
+SET ROLE shop_owner;
+CREATE TABLE orders (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  item      text NOT NULL,
+  amount    numeric NOT NULL
+);
+INSERT INTO orders (tenant_id, item, amount) VALUES (1, 'lamp', 30), (1, 'desk', 200), (2, 'chair', 80);
+RESET ROLE;
+```
+
+ตั้งแต่ PostgreSQL 15 role ธรรมดาสร้างวัตถุใน schema `public` โดย default ไม่ได้อีก role ของแอปสร้าง table ไม่ได้แม้แต่ตารางเดียวจนกว่าจะมีคนให้สิทธิ์:
+
+```sql
+-- @expect-error 42501
+SET ROLE shop_app;
+CREATE TABLE sneaky (x int);
+RESET ROLE;
+```
+
+```text
+SET
+ERROR:  permission denied for schema public
+LINE 1: CREATE TABLE sneaky (x int);
+                     ^
+RESET
+```
+
+ทีนี้ role รายงานแบบอ่านอย่างเดียวและ role ของแอปได้สิ่งที่ต้องการพอดี และ role รายงานเปลี่ยนอะไรไม่ได้:
+
+```sql
+-- sql/grants.sql
+GRANT USAGE ON SCHEMA public TO shop_reporting, shop_app;
+GRANT SELECT ON orders TO shop_reporting;
+GRANT SELECT, INSERT, UPDATE ON orders TO shop_app;
+
+SET ROLE shop_reporting;
+SELECT count(*) AS reporting_sees FROM orders;
+RESET ROLE;
+```
+
+```text
+GRANT
+GRANT
+GRANT
+SET
+ reporting_sees 
+----------------
+              3
+(1 row)
+
+RESET
+```
+
+```sql
+-- @expect-error 42501
+SET ROLE shop_reporting;
+DELETE FROM orders WHERE id = 1;
+RESET ROLE;
+```
+
+```text
+SET
+ERROR:  permission denied for table orders
+RESET
+```
+
+หนึ่งกับดัก: `GRANT SELECT ON ALL TABLES` ครอบคลุม table ที่มีอยู่ตอนนี้ ไม่ใช่ที่สร้างทีหลัง table ใหม่อ่านไม่ได้จนกว่าจะ grant; `ALTER DEFAULT PRIVILEGES` แก้อนาคต:
+
+```sql
+-- sql/refunds.sql
+SET ROLE shop_owner;
+CREATE TABLE refunds (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, order_id bigint NOT NULL);
+RESET ROLE;
+```
+
+```sql
+-- @expect-error 42501
+SET ROLE shop_reporting;
+SELECT count(*) FROM refunds;
+RESET ROLE;
+```
+
+```text
+SET
+ERROR:  permission denied for table refunds
+RESET
+```
+
+```sql
+-- sql/default-privileges.sql
+ALTER DEFAULT PRIVILEGES FOR ROLE shop_owner IN SCHEMA public GRANT SELECT ON TABLES TO shop_reporting;
+
+SET ROLE shop_owner;
+CREATE TABLE payouts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, amount numeric NOT NULL);
+RESET ROLE;
+
+SET ROLE shop_reporting;
+SELECT count(*) AS payouts_readable FROM payouts;
+RESET ROLE;
+```
+
+```text
+ALTER DEFAULT PRIVILEGES
+SET
+CREATE TABLE
+RESET
+SET
+ payouts_readable 
+------------------
+                0
+(1 row)
+
+RESET
+```
+
+### Row-level security
+
+privilege ควบคุมทั้ง table **Row-level security** (RLS) ละเอียดกว่า ให้ policy ตัดสินว่า role เห็นหรือเปลี่ยน *row* ไหนได้ — รากฐานของระบบ multi-tenant ที่แต่ละ tenant ต้องเห็นเฉพาะข้อมูลของตัวเอง ([docs](https://www.postgresql.org/docs/18/ddl-rowsecurity.html)) policy ด้านล่างเทียบ `tenant_id` ของแต่ละ row กับค่าที่แอปเลือกสำหรับ session ของมัน
+
+```sql
+-- sql/rls.sql
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;   -- run as the owner in real life; the superuser session here is equivalent
 CREATE POLICY tenant_isolation ON orders
   USING (tenant_id = current_setting('app.tenant_id')::bigint);
 ```
 
-ด้วย policy นี้ query บน `orders` จะคืนค่าเฉพาะ row ที่ `tenant_id` ตรงกับค่าที่แอปพลิเคชันตั้งไว้สำหรับ session ปัจจุบันอย่างเงียบ ๆ `WHERE` ที่ลืมไปหนึ่งครั้งจะไม่ทำให้ข้อมูลของ tenant อื่นรั่วไหลอีกต่อไป
+เมื่อไม่มีค่าตั้ง query แรกไม่ได้คืนว่างเงียบ ๆ แต่ล้ม:
+
+```sql
+-- @expect-error 42704
+SET ROLE shop_app;
+SELECT count(*) FROM orders;
+RESET ROLE;
+```
+
+```text
+SET
+ERROR:  unrecognized configuration parameter "app.tenant_id"
+RESET
+```
+
+เมื่อ `app.tenant_id = 1` role ของแอปเห็นเฉพาะ row ของ tenant 1 และ insert row ของ tenant อื่นไม่ได้ (เงื่อนไขของ policy ใช้กับ row ใหม่ด้วย):
+
+```sql
+-- sql/rls-tenant.sql
+SET app.tenant_id = 1;
+SET ROLE shop_app;
+SELECT id, item FROM orders ORDER BY id;
+RESET ROLE;
+```
+
+```text
+SET
+SET
+ id | item 
+----+------
+  1 | lamp
+  2 | desk
+(2 rows)
+
+RESET
+```
+
+```sql
+-- @expect-error 42501
+SET app.tenant_id = 1;
+SET ROLE shop_app;
+INSERT INTO orders (tenant_id, item, amount) VALUES (2, 'sneaky', 1);
+RESET ROLE;
+```
+
+```text
+SET
+SET
+ERROR:  new row violates row-level security policy for table "orders"
+RESET
+```
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอให้แยก tenant และเขียน policy ที่ถูกต้องพร้อมคอมเมนต์ที่มั่นใจ:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "tenant isolation is enforced by RLS, so even a buggy query cannot leak"
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = current_setting('app.tenant_id')::bigint);
+-- (the application connects as shop_owner, the role that created the table)`}>
+
+policy ถูก และมันไม่ปกป้องใครที่เชื่อมต่อในฐานะเจ้าของ table: **เจ้าของ table ข้าม row-level security** เว้นแต่บังคับ (superuser และ role ที่มี `BYPASSRLS` ข้ามเสมอ) เมื่อ `app.tenant_id = 1` policy อนุญาตสอง row และเจ้าของเห็นทั้งสาม:
+
+```sql
+-- sql/owner-bypass.sql
+SET app.tenant_id = 1;
+SET ROLE shop_owner;
+SELECT count(*) AS owner_sees FROM orders;   -- the policy says tenant 1 only; the owner ignores it
+RESET ROLE;
+```
+
+```text
+SET
+SET
+ owner_sees 
+------------
+          3
+(1 row)
+
+RESET
+```
+
+วิธีแก้คือเชื่อมต่อแอปเป็น role อื่นที่ไม่มีสิทธิ์พิเศษ (ตัวเลือกที่ดีที่สุด) หรือทำให้ policy ใช้กับเจ้าของด้วย `FORCE ROW LEVEL SECURITY`:
+
+```sql
+-- sql/force-rls.sql
+ALTER TABLE orders FORCE ROW LEVEL SECURITY;
+SET app.tenant_id = 1;
+SET ROLE shop_owner;
+SELECT count(*) AS owner_sees_now FROM orders;
+RESET ROLE;
+```
+
+```text
+ALTER TABLE
+SET
+SET
+ owner_sees_now 
+----------------
+              2
+(1 row)
+
+RESET
+```
+
+</SpotTheBug>
+
+อีกสองรายละเอียดของ policy ที่ล้มอย่างปลอดภัย หลังจากค่าตั้งแบบ custom ถูกใช้ใน session `RESET` ทิ้งมันเป็น string ว่าง และ `''::bigint` เป็น error ไม่ใช่ "ไม่มี tenant":
+
+```sql
+-- @expect-error 22P02
+SET app.tenant_id = 1;
+RESET app.tenant_id;   -- the setting now exists, with an empty string as its value
+SET ROLE shop_app;
+SELECT count(*) FROM orders;
+RESET ROLE;
+```
+
+```text
+SET
+RESET
+SET
+ERROR:  invalid input syntax for type bigint: ""
+RESET
+```
+
+ดังนั้นเขียน policy ให้ fail closed: `current_setting(name, true)` คืน NULL เมื่อไม่มีค่าตั้ง `nullif(..., '')` เปลี่ยน string ว่างเป็น NULL และการเทียบกับ NULL ไม่ตรงกับ row ใดเลย role ที่สร้างด้วย `BYPASSRLS` เช่น auditor ยังเห็นทุกอย่าง แม้ภายใต้ `FORCE`:
+
+```sql
+-- sql/fail-closed.sql
+DROP POLICY tenant_isolation ON orders;
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = nullif(current_setting('app.tenant_id', true), '')::bigint);
+
+SET ROLE shop_app;
+SELECT count(*) AS setting_missing FROM orders;
+SET app.tenant_id = 2;
+SELECT count(*) AS tenant_two FROM orders;
+RESET ROLE;
+```
+
+```text
+DROP POLICY
+CREATE POLICY
+SET
+ setting_missing 
+-----------------
+               0
+(1 row)
+
+SET
+ tenant_two 
+------------
+          1
+(1 row)
+
+RESET
+```
+
+```sql
+-- sql/bypassrls.sql
+CREATE ROLE shop_auditor NOLOGIN BYPASSRLS;
+GRANT SELECT ON orders TO shop_auditor;
+SET ROLE shop_auditor;
+SELECT count(*) AS auditor_sees FROM orders;
+RESET ROLE;
+```
+
+```text
+CREATE ROLE
+GRANT
+SET
+ auditor_sees 
+--------------
+            3
+(1 row)
+
+RESET
+```
+
+เมื่อเสร็จกับแล็บ ลบมัน:
+
+```bash
+# scripts/backup-cleanup.sh
+docker rm -f postgresql-b3-pg postgresql-b3-restore
+docker volume rm postgresql-b3-pgdata postgresql-b3-archive postgresql-b3-backup postgresql-b3-restore-data
+```
+
+## Mental Model
+
+backup คือไทม์แมชชีน และ WAL archive คือฟิล์มที่ฉายระหว่าง snapshot dump คือภาพถ่ายของห้องหนึ่ง base backup บวม WAL คือการบันทึกทั้งอาคารที่คุณย้อนไปวินาทีใดก็ได้ security คือชุดประตู แต่ละบานแคบกว่าบานก่อน: เส้นเครือข่ายตัดสินว่าใครเคาะได้ role ตัดสินว่าเข้าห้องไหนได้ และ row-level security ตัดสินว่ามองชั้นวางไหนได้ ประตูถูกตรวจตามลำดับ และกฎแรกที่ตรงตัดสิน
 
 ## เคล็ดลับและข้อควรระวัง
 
-- Backup จะเป็นของจริงก็ต่อเมื่อคุณ restore กลับมาได้สำเร็จแล้วเท่านั้น จัด table ทดสอบ restore เป็นประจำลงในฐานข้อมูลแบบใช้แล้วทิ้ง และยืนยันว่าข้อมูลยังครบถ้วน
-- Logical dump พกพาได้และเยี่ยมสำหรับฐานข้อมูลเดี่ยว; physical base backup บวกกับ WAL archiving คือสิ่งที่คุณต้องการสำหรับ cluster ขนาดใหญ่และ point-in-time recovery
-- ใช้ least privilege ในทุกที่ application role ไม่ควรเป็นเจ้าของ schema หรือสามารถ drop table ได้ และ reporting ควรเป็นแบบอ่านอย่างเดียว
-- อย่าใช้ authentication แบบ `trust` บน address ใดก็ตามที่เข้าถึงได้จากภายนอกเครื่อง — เพราะเปิดให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password
-- กำหนดให้ใช้ TLS สำหรับ connection ที่ข้ามเครือข่ายด้วย `hostssl` และจำไว้ว่ากฎ `pg_hba.conf` ถูก match จากบนลงล่าง การ match แรกชนะ
+- backup จะเป็นจริงก็ต่อเมื่อคุณกู้คืนสำเร็จแล้ว ตั้งเวลาซ้อมกู้คืนเข้าฐานข้อมูลทิ้งขว้างเป็นประจำและเทียบ count เหมือนที่แล็บทำ
+- logical dump พกพาและเหมาะกับฐานข้อมูลเดี่ยว; physical base backup บวม WAL archiving คือสิ่งที่ต้องใช้กับ cluster ใหญ่และ point-in-time recovery `pg_dump` ไม่รวม role; `pg_dumpall --globals-only` รวม
+- จดเวลาเป้าหมายกู้คืนที่แน่นอนก่อนการทำงานเสี่ยง หรือสร้าง restore point ที่มีชื่อด้วย `pg_create_restore_point()`
+- ใช้ least privilege ทุกที่ role ของแอปไม่ควรเป็นเจ้าของ schema หรือ drop table ได้ และรายงานควรอ่านอย่างเดียว
+- อย่าใช้ `trust` authentication บนที่อยู่ใดที่เข้าถึงได้จากนอกโฮสต์ — มันให้ใครก็ได้เชื่อมต่อเป็น role ใดก็ได้โดยไม่ต้องใช้รหัสผ่าน
+- บังคับ TLS สำหรับการเชื่อมต่อที่ข้ามเครือข่ายด้วย `hostssl` และจำว่ากฎ `pg_hba.conf` จับคู่จากบนลงล่าง อันแรกที่ตรงชนะ
+- เชื่อมต่อแอปด้วย role ที่ไม่เป็นเจ้าของ table และไม่มี `BYPASSRLS` ไม่งั้น RLS จะไม่ใช้กับมัน
 
-<Callout title="Defence in depth: ป้องกันหลายชั้น">
-ไม่มีการควบคุมเดียวที่เพียงพอ ประตูเครือข่ายกันคนแปลกหน้าออกไป authentication พิสูจน์ตัวตน role privilege จำกัดการกระทำ และ row-level security จำกัดการมองเห็น Backup อยู่ใต้ทั้งหมดนั้นในฐานะตาข่ายความปลอดภัยสุดท้าย ออกแบบโดยคิดไว้ก่อนว่าแต่ละชั้นจะล้มเหลวได้ และทำให้แน่ใจว่าชั้นถัดไปยังคงปกป้องคุณอยู่
+<Callout title="ป้องกันเป็นชั้นลึก (Defence in depth)">
+ไม่มีการควบคุมเดียวที่พอ ประตูเครือข่ายกันคนแปลกหน้า authentication พิสูจน์ตัวตน privilege ของ role จำกัดการกระทำ และ row-level security จำกัดสิ่งที่มองเห็น backup อยู่ใต้ทั้งหมดเป็นตาข่ายนิรภัยสุดท้าย ปฏิบัติเหมือนแต่ละชั้นจะล้มเป็นบางครั้ง และทำให้แน่ใจว่าชั้นถัดไปยังปกป้องคุณ
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Automated backup ที่ทดสอบ restore เป็นประจำ | กู้คืนได้จริงเมื่อเกิดภัยพิบัติจริง | เสียพื้นที่ storage และต้องมีวินัยด้าน operations |
-| พึ่งพา replication อย่างเดียวเพื่อความทนทานของข้อมูล | failover เร็ว พร้อมใช้งานสูง | replica ไม่ใช่ backup เพราะคัดลอกทั้งความผิดพลาดและการลบข้อมูลตามไปด้วย |
+| Logical backup (`pg_dump`) | พกพา เลือกได้ archive 1 MB สำหรับ table 200 000 row | ทีละฐานข้อมูล กู้คืนด้วยการ replay SQL ไม่มี point-in-time |
+| Physical backup + WAL archive | ช่วงเวลาใดก็ได้ (การกู้คืนหยุดก่อน `DELETE`) ทั้ง cluster | major version เดียวกัน ชิ้นส่วนเคลื่อนไหวมากขึ้น archive ห้ามล้ม |
+| Incremental backup | 30 MB แทน 88 MB | ต้องมี `summarize_wal` และสายที่ต้องรวมก่อนกู้คืน |
+| RLS กับ policy เข้มงวด | การแยกที่ฐานข้อมูลบังคับ | เจ้าของและ role `BYPASSRLS` ข้ามมัน; ค่าตั้งที่หายทำให้ error เว้นแต่เขียน policy ให้ fail closed |
+| พึ่ง replication อย่างเดียวเพื่อความคงทน | failover เร็ว high availability | replica ไม่ใช่ backup — มันคัดลอกความผิดพลาดและการลบด้วย |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ตั้งค่า backup ครั้งเดียวแล้วไม่เคยทดสอบ restore** — ไม่มีใครรู้ว่า backup พังจนกว่าจะต้องใช้จริง จัดตาราง restore drill เป็นประจำ
-- **ถือว่า replica เป็น backup** — replica เป็นสำเนาที่ตามทัน primary แบบเรียลไทม์ ไม่ใช่สำเนาที่ point-in-time recoverable แยกต่างหาก ต้องมี backup จริงควบคู่ไปด้วยเสมอ
-- **ให้ role ของแอปพลิเคชันมีสิทธิ์กว้างเกินจำเป็น (เช่นใช้ superuser role กับแอป)** — ยึดหลัก least privilege ให้แต่ละ role ได้เฉพาะสิทธิ์ที่ต้องใช้จริงเท่านั้น
-
-> 💡 ตัวอย่างจากของจริง
->
-> **แพลตฟอร์มโซเชียลขนาดใหญ่มาก** — เมื่อระบบต้องรองรับผู้ใช้หลายร้อยล้านคน การซ้อม backup และ recovery อย่างสม่ำเสมอกลายเป็นส่วนหนึ่งของ infrastructure practice มาตรฐาน เพราะ backup ที่ไม่เคยทดสอบคือความเสี่ยงที่ยอมรับไม่ได้
->
-> **มาตรฐานทั่วไปในทีม PostgreSQL ระดับโปรดักชัน** — การทดสอบ restore แบบอัตโนมัติเป็นประจำถือเป็น practice มาตรฐาน ไม่ใช่แค่การสร้าง backup อย่างเดียว
+- **"มี backup แล้ว ฉันปลอดภัย"** มีแต่การกู้คืนที่พิสูจน์ แล็บรันหนึ่งครั้งและเทียบ count
+- **"pg_restore --create กู้คืนเข้าฐานข้อมูลที่ฉันระบุด้วย --dbname"** มันเชื่อมต่อที่นั่นและสร้างฐานข้อมูลชื่อที่อยู่ใน dump
+- **"Replication คือ backup"** `DELETE` จะไปถึงทุก replica ภายในมิลลิวินาที
+- **"RLS ปกป้องทุก connection"** ไม่ใช่เจ้าของ ไม่ใช่ superuser ไม่ใช่ role `BYPASSRLS`; เจ้าของเห็น 3 row เทียบ 2 ของ policy
+- **"GRANT SELECT ON ALL TABLES ครอบคลุม table อนาคต"** table `refunds` ใหม่อ่านไม่ได้จน `ALTER DEFAULT PRIVILEGES`
 
 export const quizBackupSecurity = [
   {
-    q: 'แนวทาง backup ใดเหมาะที่สุดสำหรับ point-in-time recovery บน cluster ขนาดใหญ่?',
+    q: 'แนวทาง backup ใดเหมาะกับ point-in-time recovery บน cluster ใหญ่ที่สุด?',
     options: [
-      'การรัน pg_dump ครั้งเดียวต่อสัปดาห์',
-      'physical base backup ผสมกับ WAL ที่ archive อย่างต่อเนื่อง',
-      'การคัดลอกไฟล์ข้อมูลขณะที่ server ยังรันอยู่ โดยไม่มี WAL',
-      'การ export แต่ละ table ไปยัง spreadsheet',
+      'pg_dump ครั้งเดียวต่อสัปดาห์',
+      'physical base backup ร่วมกับ WAL ที่ archive ต่อเนื่อง',
+      'คัดลอกไฟล์ข้อมูลขณะเซิร์ฟเวอร์รันโดยไม่มี WAL',
+      'export แต่ละ table ไป spreadsheet',
     ],
     answer: 1,
+    explain: 'การกู้คืน replay WAL ที่ archive ไว้บน base backup และหยุดก่อน DELETE พอดี dump กู้คืนไปยังช่วงระหว่าง dump ไม่ได้',
   },
   {
-    q: 'row-level security ให้คุณควบคุมอะไรที่ GRANT และ REVOKE ทำไม่ได้?',
+    q: 'row-level security ควบคุมอะไรที่ GRANT และ REVOKE ทำไม่ได้?',
     options: [
-      'network address ใดอาจเชื่อมต่อได้',
-      'row แต่ละ row ใดที่ role อาจเห็นหรือแก้ไขได้',
+      'ที่อยู่เครือข่ายไหนเชื่อมต่อได้',
+      'role เห็นหรือแก้ row รายตัวไหนได้',
       'query รันเร็วแค่ไหน',
-      'connection ถูกเข้ารหัสหรือไม่',
+      'การเชื่อมต่อเข้ารหัสหรือไม่',
     ],
     answer: 1,
+    explain: 'GRANT ทำงานกับทั้ง table เมื่อมี policy role ของแอปเห็นสองจากสาม row',
   },
   {
-    q: 'ทำไมคุณจึงควรหลีกเลี่ยง authentication แบบ trust บน address ที่เข้าถึงได้แบบสาธารณะ?',
+    q: 'ทำไมควรหลีกเลี่ยง trust authentication บนที่อยู่ที่เข้าถึงได้จากสาธารณะ?',
     options: [
-      'เข้ารหัสข้อมูลช้าเกินไป',
-      'เปิดให้ใครก็ได้เชื่อมต่อในฐานะ role ใดก็ได้โดยไม่ต้องใช้ password',
-      'ปิดการทำ backup',
-      'ทำงานได้เฉพาะบน Windows เท่านั้น',
+      'มันเข้ารหัสข้อมูลช้าเกินไป',
+      'มันให้ใครก็ได้เชื่อมต่อเป็น role ใดก็ได้โดยไม่มีรหัสผ่าน',
+      'มันปิด backup',
+      'มันใช้ได้เฉพาะ Windows',
     ],
     answer: 1,
+    explain: '`trust` ข้ามการตรวจรหัสผ่านทั้งหมด บรรทัด pg_hba.conf ยังถูกจับคู่จากบนลงล่าง อันแรกที่ตรงชนะ บรรทัด trust กว้าง ๆ เหนือบรรทัดที่เข้มกว่าจึงตัดสินให้ทุกคน',
+  },
+  {
+    q: 'คุณรัน pg_restore --dbname=shop_restored --create shop.dump และ shop_restored ไม่มีอยู่ จะเกิดอะไร?',
+    options: [
+      'สร้าง shop_restored และกู้คืนเข้าไป',
+      'ล้มที่การเชื่อมต่อ shop_restored; --create สร้างฐานข้อมูลชื่อที่อยู่ใน dump ไม่ใช่ที่ให้ด้วย --dbname',
+      'กู้คืนเข้าฐานข้อมูล postgres',
+      'ไม่ทำอะไรเงียบ ๆ',
+    ],
+    answer: 1,
+    explain: 'แล็บพิมพ์ `database "shop_restored" does not exist` ใช้ createdb แล้วกู้คืนโดยไม่มี --create หรือเชื่อมต่อ postgres ด้วย --create',
+  },
+  {
+    q: 'แอปเชื่อมต่อด้วย role ที่เป็นเจ้าของ table และ RLS เปิดพร้อม policy ที่ถูกต้อง query คืนอะไร?',
+    options: [
+      'เฉพาะ row ของ tenant ปัจจุบัน',
+      'ทุก row: เจ้าของ table ข้าม row-level security เว้นแต่ตั้ง FORCE ROW LEVEL SECURITY',
+      'error',
+      'ไม่มี row',
+    ],
+    answer: 1,
+    explain: 'เจ้าของเห็น 3 row เทียบ 2 ของ policy หลัง FORCE ROW LEVEL SECURITY เจ้าของเห็น 2 role ที่มี BYPASSRLS และ superuser ข้ามไม่ว่าอย่างไร',
   },
 ];
 

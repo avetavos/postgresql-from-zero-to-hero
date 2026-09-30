@@ -1,6 +1,6 @@
 ---
 title: Backup and security
-description: Protect your data with logical and physical backups and point-in-time recovery, and lock it down with roles, GRANT and REVOKE, row-level security, TLS, and pg_hba.conf.
+description: Logical and physical backups, a real point-in-time recovery, incremental backups, and layered security — pg_hba.conf, TLS, GRANT and REVOKE, row-level security — each proven in a real PostgreSQL 18 lab.
 sidebar:
   order: 5
 ---
@@ -10,10 +10,11 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 The last two operational duties are the ones you hope never to need and cannot afford to skip. **Backups** let you rebuild after a disk failure, a bad deploy, or a mistaken `DELETE`. **Security** controls who may connect, who may see what, and how the data travels over the network. A database that is fast and highly available is still a liability if it cannot be restored or if anyone on the internet can read it.
 
-This lesson covers both families of backup PostgreSQL offers, then walks down the layers of access control from the network edge to individual rows.
+This lesson covers both families of backup PostgreSQL offers, then walks down the layers of access control from the network edge to individual rows. Everything was run for real on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). The backup and network-security parts use one container started with `--network none` (it has no network at all; connections go over its own loopback) and named volumes `postgresql-b3-*`, all removed at the end. The role and row-level-security parts are `sql` fences run in one empty database. `<your-password>` stands for any value you choose.
 
 ## Two kinds of backup
 
@@ -24,37 +25,121 @@ PostgreSQL backups come in two styles that suit different needs.
 | Logical  | `pg_dump` / `pg_restore`      | SQL or an archive of one database       | Single databases, version moves   |
 | Physical | base backup + WAL archiving   | The whole cluster's files, byte-for-byte| Large clusters, point-in-time recovery |
 
-### Logical backups
-
-A logical backup runs `pg_dump`, which reads a database and writes out the statements needed to recreate it. It is portable across machines and even across major versions, which makes it ideal for moving or cloning a single database.
+The lab: one database with archiving switched on. `archive_command` copies each finished WAL segment to a volume that outlives the server; `summarize_wal` (needed for incremental backups) is on too.
 
 ```bash
-# Dump one database to a compressed custom-format archive
-pg_dump --format=custom --file=shop.dump --dbname=shop
+# scripts/backup-lab.sh
+docker volume create postgresql-b3-pgdata
+docker volume create postgresql-b3-archive
+docker volume create postgresql-b3-backup
+# the archive and backup volumes must be writable by the postgres user
+docker run --rm --user root -v postgresql-b3-archive:/archive -v postgresql-b3-backup:/backup \
+  postgres:18.6 chown postgres:postgres /archive /backup
 
-# Restore that archive into a fresh database
-createdb shop_restored
-pg_restore --dbname=shop_restored shop.dump
+docker run -d --name postgresql-b3-pg --network none --memory 768m --cpus 4 \
+  -e POSTGRES_PASSWORD=<your-password> \
+  -v postgresql-b3-pgdata:/var/lib/postgresql -v postgresql-b3-archive:/archive -v postgresql-b3-backup:/backup \
+  postgres:18.6 \
+  -c archive_mode=on -c 'archive_command=test ! -f /archive/%f && cp %p /archive/%f' -c summarize_wal=on
 ```
 
-The custom format used here lets `pg_restore` selectively restore parts and run in parallel. For small databases a plain SQL file you replay with `psql` works too.
+```text
+# 1. one database container with no network at all (--network none), WAL archiving on, and three volumes: data, archive, backups
+
+$ docker run --rm --user root -v postgresql-b3-archive:/archive -v postgresql-b3-backup:/backup postgres:18.6 chown postgres:postgres /archive /backup
+
+$ docker run -d --name postgresql-b3-pg --network none --memory 768m --cpus 4 -e POSTGRES_PASSWORD=<your-password> \
+    -v postgresql-b3-pgdata:/var/lib/postgresql -v postgresql-b3-archive:/archive -v postgresql-b3-backup:/backup postgres:18.6 \
+    -c archive_mode=on -c 'archive_command=test ! -f /archive/%f && cp %p /archive/%f' -c summarize_wal=on
+
+-- database: script
+SELECT name, setting FROM pg_settings WHERE name IN ('archive_mode', 'archive_command', 'summarize_wal', 'wal_level') ORDER BY name;
+CREATE DATABASE shop;
+-- database: psql output
+      name       |                  setting                   
+-----------------+--------------------------------------------
+ archive_command | test ! -f /archive/%f && cp %p /archive/%f
+ archive_mode    | on
+ summarize_wal   | on
+ wal_level       | replica
+(4 rows)
+
+CREATE DATABASE
+
+-- database: script
+CREATE TABLE orders (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  item      text NOT NULL,
+  amount    numeric NOT NULL
+);
+INSERT INTO orders (tenant_id, item, amount)
+SELECT g % 5 + 1, 'item-' || g, g % 100 FROM generate_series(1, 200000) g;
+SELECT count(*) AS orders, sum(amount) AS total FROM orders;
+-- database: psql output
+CREATE TABLE
+INSERT 0 200000
+ orders |  total  
+--------+---------
+ 200000 | 9900000
+(1 row)
+```
+
+### Logical backups
+
+A logical backup runs `pg_dump`, which reads a database and writes out the statements needed to recreate it. It is portable across machines and even across major versions, which makes it ideal for moving or cloning a single database ([docs](https://www.postgresql.org/docs/18/app-pgdump.html)). It captures one database only; roles and other cluster-wide objects come from `pg_dumpall --globals-only`. The custom format is compressed and lets `pg_restore` select parts and run in parallel; the same database as plain SQL is four and a half times larger here.
+
+```text
+$ docker exec --user postgres postgresql-b3-pg pg_dump --format=custom --file=/backup/shop.dump shop
+
+$ docker exec --user postgres postgresql-b3-pg sh -c "pg_dump shop | wc -c; ls -l /backup/shop.dump | awk '{print $5, $9}'"    # plain SQL bytes, then the custom-format file
+4559583
+1006636 /backup/shop.dump
+
+$ docker exec --user postgres postgresql-b3-pg pg_restore --list /backup/shop.dump | head -12
+;
+; Archive created at 2026-09-30 08:42:43 UTC
+;     dbname: shop
+;     TOC Entries: 9
+;     Compression: gzip
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 18.6 (Debian 18.6-1.pgdg13+2)
+;     Dumped by pg_dump version: 18.6 (Debian 18.6-1.pgdg13+2)
+;
+
+# --create names the database to CONNECT to first; the database restored is the one in the dump
+
+$ docker exec --user postgres postgresql-b3-pg pg_restore --dbname=shop_restored --create /backup/shop.dump    # shop_restored does not exist yet
+pg_restore: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  database "shop_restored" does not exist
+
+$ docker exec --user postgres postgresql-b3-pg createdb shop_restored
+
+$ docker exec --user postgres postgresql-b3-pg pg_restore --dbname=shop_restored --jobs=2 /backup/shop.dump
+
+$ docker exec --user postgres postgresql-b3-pg psql -d shop -Atc "SELECT count(*), sum(amount) FROM orders"
+200000|9900000
+
+$ docker exec --user postgres postgresql-b3-pg psql -d shop_restored -Atc "SELECT count(*), sum(amount) FROM orders"
+200000|9900000
+
+# restoring INTO the cluster under the dump's own name: drop the original, then --create with a maintenance database
+
+$ docker exec --user postgres postgresql-b3-pg dropdb shop
+
+$ docker exec --user postgres postgresql-b3-pg pg_restore --dbname=postgres --create /backup/shop.dump
+
+$ docker exec --user postgres postgresql-b3-pg psql -d shop -Atc "SELECT count(*), sum(amount) FROM orders"
+200000|9900000
+```
+
+Two lessons in the transcript. The dump and the restored copy agree on count and sum, which is the kind of check a restore drill should run. And `--create` does not mean "restore into a new database of the name I give": `--dbname` names the database to *connect to first* (it must exist), and the database that gets created is the one named in the dump. The first attempt failed because `shop_restored` did not exist; the working forms are either `createdb` + restore without `--create`, or `--dbname=postgres --create` after dropping the original.
 
 ### Physical backups and point-in-time recovery
 
-For a large or busy cluster, dumping logically is too slow. Instead you take a **base backup** — a byte-level copy of the data files — and continuously archive the write-ahead log. Replaying the WAL on top of the base backup lets you restore to any moment in time, known as **point-in-time recovery** (PITR).
-
-```bash
-# Take a base backup of the whole cluster
-pg_basebackup --pgdata=/backups/base --format=tar --gzip --progress
-```
-
-```conf
-# postgresql.conf: keep every WAL segment by archiving it
-archive_mode = on
-archive_command = 'test ! -f /archive/%f && cp %p /archive/%f'
-```
-
-With a base backup plus the archived WAL, recovery means restoring the base files and telling PostgreSQL to replay WAL up to a chosen timestamp — so you can rewind to the second before a bad migration ran.
+For a large or busy cluster, dumping logically is too slow. Instead you take a **base backup** — a byte-level copy of the data files — and continuously archive the write-ahead log. Replaying the WAL on top of the base backup lets you restore to any moment in time, known as **point-in-time recovery** (PITR, [docs](https://www.postgresql.org/docs/18/continuous-archiving.html)).
 
 export const backupDiagram = `flowchart LR
   PG[(Primary cluster)] -->|pg_basebackup| Base[Base backup]
@@ -65,14 +150,170 @@ export const backupDiagram = `flowchart LR
 
 <Mermaid code={backupDiagram} title="Base backup plus archived WAL enables point-in-time recovery" />
 
+`pg_basebackup` takes the base backup, and `pg_verifybackup` checks it against the manifest it wrote. PostgreSQL 17 added **incremental** backups: after a full backup, a second one copies only the blocks that changed (this is what `summarize_wal` records), and `pg_combinebackup` merges the chain back into a full backup ([release notes](https://www.postgresql.org/docs/17/release-17.html), [docs](https://www.postgresql.org/docs/18/app-pgcombinebackup.html)).
+
+```text
+$ docker exec --user postgres postgresql-b3-pg pg_basebackup --pgdata=/backup/full --checkpoint=fast --verbose
+pg_basebackup: initiating base backup, waiting for checkpoint to complete
+pg_basebackup: checkpoint completed
+pg_basebackup: write-ahead log start point: 0/7000028 on timeline 1
+pg_basebackup: starting background WAL receiver
+pg_basebackup: created temporary replication slot "pg_basebackup_227"
+pg_basebackup: write-ahead log end point: 0/7000120
+pg_basebackup: waiting for background process to finish streaming ...
+pg_basebackup: syncing data to disk ...
+pg_basebackup: renaming backup_manifest.tmp to backup_manifest
+pg_basebackup: base backup completed
+
+$ docker exec --user postgres postgresql-b3-pg pg_verifybackup /backup/full
+backup successfully verified
+
+$ docker exec --user postgres postgresql-b3-pg du -sh /backup/full
+88M	/backup/full
+
+-- database: script
+INSERT INTO orders (tenant_id, item, amount) VALUES (1, 'after-backup-1', 10), (2, 'after-backup-2', 20), (3, 'after-backup-3', 30);
+INSERT INTO orders (tenant_id, item, amount) SELECT g % 5 + 1, 'bulk-' || g, g % 100 FROM generate_series(1, 50000) g;
+SELECT count(*) AS orders FROM orders;
+-- database: psql output
+INSERT 0 3
+INSERT 0 50000
+ orders 
+--------
+ 250003
+(1 row)
+
+# an incremental backup: only the blocks changed since the full one (needs summarize_wal = on)
+
+$ docker exec --user postgres postgresql-b3-pg pg_basebackup --pgdata=/backup/incr1 --incremental=/backup/full/backup_manifest --checkpoint=fast
+
+$ docker exec --user postgres postgresql-b3-pg du -sh /backup/full /backup/incr1
+88M	/backup/full
+30M	/backup/incr1
+
+$ docker exec --user postgres postgresql-b3-pg pg_combinebackup /backup/full /backup/incr1 --output=/backup/combined
+
+$ docker exec --user postgres postgresql-b3-pg pg_verifybackup /backup/combined
+backup successfully verified
+```
+
+The incremental backup is 30 MB against 88 MB for the full one, after adding 50 003 rows to a 200 000-row table; the combined result verifies like any base backup.
+
+Now the disaster. A base backup exists, three rows were added after it, and someone runs `DELETE FROM orders` without a `WHERE`. Two seconds before the mistake we noted the time. `pg_switch_wal()` closes the current WAL segment so it is archived, and `pg_stat_archiver` plus the archive listing show that the archive received the segments (13 archived, 0 failed):
+
+```text
+-- database: script
+SELECT pg_sleep(2);
+SELECT to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS.US') || '+00' AS t1 \gset
+SELECT :'t1' AS restore_target_time;
+SELECT pg_sleep(2);
+DELETE FROM orders;   -- the mistake
+SELECT pg_switch_wal() IS NOT NULL AS wal_switched;
+SELECT count(*) AS orders_now FROM orders;
+-- database: psql output
+ pg_sleep 
+----------
+ 
+(1 row)
+
+      restore_target_time      
+-------------------------------
+ 2026-09-30 08:42:49.102022+00
+(1 row)
+
+ pg_sleep 
+----------
+ 
+(1 row)
+
+DELETE 250003
+ wal_switched 
+--------------
+ t
+(1 row)
+
+ orders_now 
+------------
+          0
+(1 row)
+
+-- database: script
+SELECT archived_count, failed_count, last_archived_wal FROM pg_stat_archiver;
+-- database: psql output
+ archived_count | failed_count |    last_archived_wal     
+----------------+--------------+--------------------------
+             13 |            0 | 00000001000000000000000B
+(1 row)
+
+$ docker exec --user postgres postgresql-b3-pg ls /archive | tail -4
+000000010000000000000009
+000000010000000000000009.00000028.backup
+00000001000000000000000A
+00000001000000000000000B
+```
+
+The restore is a new data directory, so it happens away from the damaged server. Copy the base backup into an empty directory, create the file `recovery.signal` (which tells the server to start in archive recovery), and give it three settings: `restore_command` (how to fetch an archived segment; `%f` is the file name and `%p` the path to copy it to), `recovery_target_time`, and `recovery_target_action = 'promote'` (open for writes when the target is reached). The log shows what PostgreSQL did:
+
+```text
+# restore: copy the base backup into an empty data directory, ask for recovery, and say where to fetch WAL and when to stop
+
+$ docker run --rm --user postgres -v postgresql-b3-backup:/backup:ro -v postgresql-b3-restore-data:/var/lib/postgresql postgres:18.6 sh -c \
+    'mkdir -p /var/lib/postgresql/18/docker && cp -a /backup/full/. /var/lib/postgresql/18/docker/ && chmod 700 /var/lib/postgresql/18/docker && touch /var/lib/postgresql/18/docker/recovery.signal'
+
+# appended to postgresql.auto.conf in the restored data directory:
+restore_command = 'cp /archive/%f %p'
+recovery_target_time = '2026-09-30 08:42:49.102022+00'
+recovery_target_action = 'promote'
+
+$ docker run -d --name postgresql-b3-restore --network none --memory 768m -v postgresql-b3-restore-data:/var/lib/postgresql -v postgresql-b3-archive:/archive:ro postgres:18.6
+
+$ docker logs postgresql-b3-restore 2>&1 | grep -E "recovery|restored log file|redo|promot|consistent"   (timestamps and process ids removed)
+LOG:  starting backup recovery with redo LSN 0/7000028, checkpoint LSN 0/7000080, on timeline ID 1
+LOG:  restored log file "000000010000000000000007" from archive
+LOG:  starting point-in-time recovery to 2026-09-30 08:42:49.102022+00
+LOG:  redo starts at 0/7000028
+LOG:  restored log file "000000010000000000000008" from archive
+LOG:  completed backup recovery with redo LSN 0/7000028 and end LSN 0/7000120
+LOG:  consistent recovery state reached at 0/7000120
+LOG:  restored log file "000000010000000000000009" from archive
+LOG:  restored log file "00000001000000000000000A" from archive
+LOG:  restored log file "00000001000000000000000B" from archive
+LOG:  recovery stopping before commit of transaction 773, time 2026-09-30 08:42:51.197887+00
+LOG:  redo done at 0/BC8E170 system usage: CPU: user: 0.09 s, system: 0.01 s, elapsed: 0.17 s
+LOG:  restored log file "00000001000000000000000B" from archive
+LOG:  archive recovery complete
+
+-- restored server: script
+SELECT pg_is_in_recovery() AS still_recovering;
+\c shop
+SELECT count(*) AS orders, count(*) FILTER (WHERE item LIKE 'after-backup%') AS after_backup_rows FROM orders;
+-- restored server: psql output
+ still_recovering 
+------------------
+ f
+(1 row)
+
+You are now connected to database "shop" as user "postgres".
+ orders | after_backup_rows 
+--------+-------------------
+ 250003 |                 3
+(1 row)
+```
+
+It fetched segments 7 through B from the archive, replayed them, and stopped *before the commit of transaction 773*, the `DELETE`, whose commit time was after our target. The restored server is no longer in recovery, and `orders` holds 250 003 rows: the 200 000 from the backup plus the 3 and the 50 000 written afterwards. Only the mistake is missing. That is the point of PITR: a backup alone would have given 200 000 rows and lost the later work.
+
+Three cautions. `archive_command` must report failure honestly (`test ! -f ... && cp ...` refuses to overwrite an existing file); if it keeps failing, WAL piles up on the primary until its disk fills. A backup and its WAL must be stored somewhere the primary's failure cannot take with it. And none of this is a backup until a restore has been done from it, which is what this transcript is.
+
+**In pgAdmin:** the Tools menu has Backup and Restore dialogs that run `pg_dump` and `pg_restore` for you; the physical backup and PITR flow above is done from the command line.
+
 ## Security in layers
 
 Access control in PostgreSQL is best pictured as a series of gates a request passes through: first the network, then authentication, then role privileges, and finally row-level rules. Each layer can stop a request the previous one let through.
 
 export const securityDiagram = `flowchart LR
-  Client[Client] -->|encrypted with TLS| HBA[pg_hba.conf - who may connect]
+  Client[Client] -->|encrypted with TLS| HBA["pg_hba.conf - who may connect"]
   HBA --> Auth[Authenticate the role]
-  Auth --> Priv[Role privileges - GRANT and REVOKE]
+  Auth --> Priv["Role privileges - GRANT and REVOKE"]
   Priv --> RLS[Row-level security policy]
   RLS --> Data[(Table rows)]`;
 
@@ -80,61 +321,444 @@ export const securityDiagram = `flowchart LR
 
 ### The network gate: pg_hba.conf and TLS
 
-The first gate is `pg_hba.conf` (host-based authentication). Each line says which roles may connect to which databases from which addresses, and how they must authenticate. Rules are read top to bottom, and the first match wins.
+The first gate is `pg_hba.conf` (host-based authentication). Each line says which roles may connect to which databases from which addresses, and how they must authenticate. Rules are read top to bottom, and **the first match wins** ([docs](https://www.postgresql.org/docs/18/auth-pg-hba-conf.html)). Passwords are stored as SCRAM verifiers by default (`password_encryption = scram-sha-256`); the stored value starts with `SCRAM-SHA-256$`:
 
-```conf
-# TYPE  DATABASE  USER   ADDRESS         METHOD
-hostssl all       app    10.0.0.0/24     scram-sha-256
-host    all       all    127.0.0.1/32    scram-sha-256
+```text
+-- database: script
+SHOW password_encryption;
+CREATE ROLE app LOGIN PASSWORD '<your-password>';
+SELECT rolname, left(rolpassword, 14) AS stored_as FROM pg_authid WHERE rolname = 'app';
+-- database: psql output
+ password_encryption 
+---------------------
+ scram-sha-256
+(1 row)
+
+CREATE ROLE
+ rolname |   stored_as    
+---------+----------------
+ app     | SCRAM-SHA-256$
+(1 row)
+
+# 1. first match wins: the reject line for app comes before the general rule
+
+# pg_hba.conf (reject before allow):
+local   all   all                    trust
+host    all   app   127.0.0.1/32      reject
+host    all   all   127.0.0.1/32      scram-sha-256
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=app dbname=shop" -Atc "SELECT current_user AS connected_as"
+psql: error: connection to server at "127.0.0.1", port 5432 failed: FATAL:  pg_hba.conf rejects connection for host "127.0.0.1", user "app", database "shop", no encryption
+
+# pg_hba.conf (allow app first):
+local   all   all                    trust
+host    all   app   127.0.0.1/32      scram-sha-256
+host    all   all   127.0.0.1/32      reject
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=app dbname=shop" -Atc "SELECT current_user AS connected_as"
+app
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=postgres dbname=shop" -Atc "SELECT 1"
+psql: error: connection to server at "127.0.0.1", port 5432 failed: FATAL:  pg_hba.conf rejects connection for host "127.0.0.1", user "postgres", database "shop", no encryption
 ```
 
-The `hostssl` keyword requires the connection to be encrypted with **TLS**, which you enable in `postgresql.conf` by pointing at a certificate and key.
+With the reject line first, `app` is refused even though the rule below would have allowed it; with the allow line first, `app` gets in, and now *everyone else*, `postgres` included, hits the reject line, since it also matches. The error text names the rule that fired: `pg_hba.conf rejects connection`. An order mistake in this file is a common way to lock yourself out, so keep a local socket line for the administrator.
 
-```conf
-# postgresql.conf
-ssl = on
-ssl_cert_file = '/etc/postgresql/server.crt'
-ssl_key_file  = '/etc/postgresql/server.key'
+The `hostssl` keyword requires the connection to be encrypted with **TLS**, which you enable by pointing PostgreSQL at a certificate and key. The lab makes a self-signed certificate that lives for a day; a real server uses one from your certificate authority. With only a `hostssl` line for `app`, an unencrypted attempt falls through to the reject line, and an encrypted one is accepted:
+
+```text
+# 2. TLS: a self-signed certificate made for this lab (never use one like it in production)
+
+$ docker exec --user postgres postgresql-b3-pg sh -c "cd /var/lib/postgresql/18/docker && openssl req -new -x509 -nodes -days 1 -subj '/CN=localhost' -keyout server.key -out server.crt && chmod 600 server.key"
+
+-- database: script
+ALTER SYSTEM SET ssl = on;
+SELECT pg_reload_conf();
+-- database: psql output
+ALTER SYSTEM
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+# pg_hba.conf (hostssl only for app):
+local   all   all                    trust
+hostssl all   app   127.0.0.1/32      scram-sha-256
+host    all   all   127.0.0.1/32      reject
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=app dbname=shop sslmode=disable" -Atc "SELECT current_user AS connected_as"
+psql: error: connection to server at "127.0.0.1", port 5432 failed: FATAL:  pg_hba.conf rejects connection for host "127.0.0.1", user "app", database "shop", no encryption
+
+$ docker exec --user postgres postgresql-b3-pg psql "host=127.0.0.1 user=app dbname=shop sslmode=require" -Atc "SELECT ssl, version AS tls_version FROM pg_stat_ssl WHERE pid = pg_backend_pid()"
+t|TLSv1.3
+```
+
+`pg_stat_ssl` confirms the session is really encrypted, TLS 1.3 here. Old MD5 password hashes still work but are deprecated: creating one today prints a warning that MD5 password support "will be removed in a future release", so do not build new roles on them:
+
+```sql
+-- sql/md5-warning.sql
+SHOW password_encryption;
+SET password_encryption = 'md5';
+CREATE ROLE shop_legacy LOGIN PASSWORD '<your-password>';
+RESET password_encryption;
+DROP ROLE shop_legacy;
+```
+
+```text
+ password_encryption 
+---------------------
+ scram-sha-256
+(1 row)
+
+SET
+WARNING:  setting an MD5-encrypted password
+DETAIL:  MD5 password support is deprecated and will be removed in a future release of PostgreSQL.
+HINT:  Refer to the PostgreSQL documentation for details about migrating to another password type.
+CREATE ROLE
+RESET
+DROP ROLE
 ```
 
 ### Roles and privileges: GRANT and REVOKE
 
-Once connected, what a role may do is governed by privileges. You create roles, then `GRANT` specific rights and `REVOKE` them. The guiding principle is **least privilege**: give each role only what it needs.
+Once connected, what a role may do is governed by privileges. You create roles, then `GRANT` specific rights and `REVOKE` them. The guiding principle is **least privilege**: give each role only what it needs. The fences below use three roles without login (so they can be switched into with `SET ROLE`): an owner of the tables, a reporting role and the application.
 
 ```sql
--- A read-only reporting role
-CREATE ROLE reporting LOGIN PASSWORD 'set-a-strong-one';
-GRANT CONNECT ON DATABASE shop TO reporting;
-GRANT USAGE ON SCHEMA public TO reporting;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO reporting;
+-- sql/setup.sql
+CREATE ROLE shop_owner NOLOGIN;      -- owns the tables
+CREATE ROLE shop_reporting NOLOGIN;  -- read-only reports
+CREATE ROLE shop_app NOLOGIN;        -- the application
+GRANT CREATE ON SCHEMA public TO shop_owner;
 
--- An application role that may also write to one table
-CREATE ROLE app LOGIN PASSWORD 'set-a-strong-one';
-GRANT SELECT, INSERT, UPDATE ON orders TO app;
-REVOKE DELETE ON orders FROM app;
+SET ROLE shop_owner;
+CREATE TABLE orders (
+  id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  item      text NOT NULL,
+  amount    numeric NOT NULL
+);
+INSERT INTO orders (tenant_id, item, amount) VALUES (1, 'lamp', 30), (1, 'desk', 200), (2, 'chair', 80);
+RESET ROLE;
+```
+
+Since PostgreSQL 15, ordinary roles can no longer create objects in the `public` schema by default; the application role cannot even create a table until someone grants it the right:
+
+```sql
+-- @expect-error 42501
+SET ROLE shop_app;
+CREATE TABLE sneaky (x int);
+RESET ROLE;
+```
+
+```text
+SET
+ERROR:  permission denied for schema public
+LINE 1: CREATE TABLE sneaky (x int);
+                     ^
+RESET
+```
+
+Now the read-only reporting role and the application role get exactly what they need, and the reporting role cannot change anything:
+
+```sql
+-- sql/grants.sql
+GRANT USAGE ON SCHEMA public TO shop_reporting, shop_app;
+GRANT SELECT ON orders TO shop_reporting;
+GRANT SELECT, INSERT, UPDATE ON orders TO shop_app;
+
+SET ROLE shop_reporting;
+SELECT count(*) AS reporting_sees FROM orders;
+RESET ROLE;
+```
+
+```text
+GRANT
+GRANT
+GRANT
+SET
+ reporting_sees 
+----------------
+              3
+(1 row)
+
+RESET
+```
+
+```sql
+-- @expect-error 42501
+SET ROLE shop_reporting;
+DELETE FROM orders WHERE id = 1;
+RESET ROLE;
+```
+
+```text
+SET
+ERROR:  permission denied for table orders
+RESET
+```
+
+One trap: `GRANT SELECT ON ALL TABLES` covers the tables that exist now, not the ones created later. A new table is unreadable until it is granted; `ALTER DEFAULT PRIVILEGES` fixes the future:
+
+```sql
+-- sql/refunds.sql
+SET ROLE shop_owner;
+CREATE TABLE refunds (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, order_id bigint NOT NULL);
+RESET ROLE;
+```
+
+```sql
+-- @expect-error 42501
+SET ROLE shop_reporting;
+SELECT count(*) FROM refunds;
+RESET ROLE;
+```
+
+```text
+SET
+ERROR:  permission denied for table refunds
+RESET
+```
+
+```sql
+-- sql/default-privileges.sql
+ALTER DEFAULT PRIVILEGES FOR ROLE shop_owner IN SCHEMA public GRANT SELECT ON TABLES TO shop_reporting;
+
+SET ROLE shop_owner;
+CREATE TABLE payouts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, amount numeric NOT NULL);
+RESET ROLE;
+
+SET ROLE shop_reporting;
+SELECT count(*) AS payouts_readable FROM payouts;
+RESET ROLE;
+```
+
+```text
+ALTER DEFAULT PRIVILEGES
+SET
+CREATE TABLE
+RESET
+SET
+ payouts_readable 
+------------------
+                0
+(1 row)
+
+RESET
 ```
 
 ### Row-level security
 
-Privileges control whole tables. **Row-level security** (RLS) goes finer, letting a policy decide which *rows* a role may see or change — the foundation of multi-tenant systems where each tenant must see only its own data.
+Privileges control whole tables. **Row-level security** (RLS) goes finer, letting a policy decide which *rows* a role may see or change — the foundation of multi-tenant systems where each tenant must see only its own data ([docs](https://www.postgresql.org/docs/18/ddl-rowsecurity.html)). The policy below compares each row's `tenant_id` with a setting the application chooses for its session.
 
 ```sql
--- Turn on RLS and add a policy keyed to a session setting
-ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
-
+-- sql/rls.sql
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;   -- run as the owner in real life; the superuser session here is equivalent
 CREATE POLICY tenant_isolation ON orders
   USING (tenant_id = current_setting('app.tenant_id')::bigint);
 ```
 
-With this policy, a query against `orders` silently returns only rows whose `tenant_id` matches the value the application set for the current session. One forgotten `WHERE` no longer leaks another tenant's data.
+With the setting missing, the first query does not silently return nothing, it fails:
+
+```sql
+-- @expect-error 42704
+SET ROLE shop_app;
+SELECT count(*) FROM orders;
+RESET ROLE;
+```
+
+```text
+SET
+ERROR:  unrecognized configuration parameter "app.tenant_id"
+RESET
+```
+
+With `app.tenant_id = 1` the application role sees only tenant 1's rows, and it cannot insert a row for another tenant (the policy's condition also applies to new rows):
+
+```sql
+-- sql/rls-tenant.sql
+SET app.tenant_id = 1;
+SET ROLE shop_app;
+SELECT id, item FROM orders ORDER BY id;
+RESET ROLE;
+```
+
+```text
+SET
+SET
+ id | item 
+----+------
+  1 | lamp
+  2 | desk
+(2 rows)
+
+RESET
+```
+
+```sql
+-- @expect-error 42501
+SET app.tenant_id = 1;
+SET ROLE shop_app;
+INSERT INTO orders (tenant_id, item, amount) VALUES (2, 'sneaky', 1);
+RESET ROLE;
+```
+
+```text
+SET
+SET
+ERROR:  new row violates row-level security policy for table "orders"
+RESET
+```
+
+## Reading AI-generated code
+
+An assistant is asked for tenant isolation and writes a correct policy with a confident comment:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "tenant isolation is enforced by RLS, so even a buggy query cannot leak"
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = current_setting('app.tenant_id')::bigint);
+-- (the application connects as shop_owner, the role that created the table)`}>
+
+The policy is right, and it protects nobody who connects as the table's owner: **table owners bypass row-level security** unless it is forced (superusers and roles with `BYPASSRLS` always bypass it). With `app.tenant_id = 1` the policy allows two rows, and the owner sees all three:
+
+```sql
+-- sql/owner-bypass.sql
+SET app.tenant_id = 1;
+SET ROLE shop_owner;
+SELECT count(*) AS owner_sees FROM orders;   -- the policy says tenant 1 only; the owner ignores it
+RESET ROLE;
+```
+
+```text
+SET
+SET
+ owner_sees 
+------------
+          3
+(1 row)
+
+RESET
+```
+
+The fix is either to connect the application as a different, unprivileged role (the best option) or to make the policy apply to the owner as well with `FORCE ROW LEVEL SECURITY`:
+
+```sql
+-- sql/force-rls.sql
+ALTER TABLE orders FORCE ROW LEVEL SECURITY;
+SET app.tenant_id = 1;
+SET ROLE shop_owner;
+SELECT count(*) AS owner_sees_now FROM orders;
+RESET ROLE;
+```
+
+```text
+ALTER TABLE
+SET
+SET
+ owner_sees_now 
+----------------
+              2
+(1 row)
+
+RESET
+```
+
+</SpotTheBug>
+
+Two more details of a policy that fails safely. After a custom setting has been used in a session, `RESET` leaves it as an empty string, and `''::bigint` is an error rather than "no tenant":
+
+```sql
+-- @expect-error 22P02
+SET app.tenant_id = 1;
+RESET app.tenant_id;   -- the setting now exists, with an empty string as its value
+SET ROLE shop_app;
+SELECT count(*) FROM orders;
+RESET ROLE;
+```
+
+```text
+SET
+RESET
+SET
+ERROR:  invalid input syntax for type bigint: ""
+RESET
+```
+
+So write the policy to fail closed: `current_setting(name, true)` returns NULL when the setting does not exist, `nullif(..., '')` turns the empty string into NULL, and a comparison with NULL matches no row. A role created with `BYPASSRLS`, such as an auditor, still sees everything, even under `FORCE`:
+
+```sql
+-- sql/fail-closed.sql
+DROP POLICY tenant_isolation ON orders;
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = nullif(current_setting('app.tenant_id', true), '')::bigint);
+
+SET ROLE shop_app;
+SELECT count(*) AS setting_missing FROM orders;
+SET app.tenant_id = 2;
+SELECT count(*) AS tenant_two FROM orders;
+RESET ROLE;
+```
+
+```text
+DROP POLICY
+CREATE POLICY
+SET
+ setting_missing 
+-----------------
+               0
+(1 row)
+
+SET
+ tenant_two 
+------------
+          1
+(1 row)
+
+RESET
+```
+
+```sql
+-- sql/bypassrls.sql
+CREATE ROLE shop_auditor NOLOGIN BYPASSRLS;
+GRANT SELECT ON orders TO shop_auditor;
+SET ROLE shop_auditor;
+SELECT count(*) AS auditor_sees FROM orders;
+RESET ROLE;
+```
+
+```text
+CREATE ROLE
+GRANT
+SET
+ auditor_sees 
+--------------
+            3
+(1 row)
+
+RESET
+```
+
+When you are done with the lab, remove it:
+
+```bash
+# scripts/backup-cleanup.sh
+docker rm -f postgresql-b3-pg postgresql-b3-restore
+docker volume rm postgresql-b3-pgdata postgresql-b3-archive postgresql-b3-backup postgresql-b3-restore-data
+```
+
+## Mental Model
+
+A backup is a time machine, and the WAL archive is the film that runs between snapshots. A dump is a photograph of one room; a base backup plus WAL is a recording of the whole building that you can rewind to any second. Security is a series of doors, each one narrower than the last: the network line decides who may knock, the role decides which rooms they may enter, and row-level security decides which shelves they may look at. Doors are checked in order, and the first rule that fits decides.
 
 ## Tips / gotchas
 
-- A backup is only real once you have restored it successfully. Schedule regular test restores into a throwaway database and confirm the data is intact.
-- Logical dumps are portable and great for single databases; physical base backups plus WAL archiving are what you need for large clusters and point-in-time recovery.
+- A backup is only real once you have restored it successfully. Schedule regular test restores into a throwaway database and compare counts, as the lab did.
+- Logical dumps are portable and great for single databases; physical base backups plus WAL archiving are what you need for large clusters and point-in-time recovery. `pg_dump` does not include roles; `pg_dumpall --globals-only` does.
+- Note the exact restore target time before any risky operation, or create a named restore point with `pg_create_restore_point()`.
 - Apply least privilege everywhere. The application role should not own the schema or be able to drop tables, and reporting should be read-only.
 - Never use `trust` authentication on any address reachable from outside the host — it lets anyone connect as any role with no password.
 - Require TLS for connections that cross a network with `hostssl`, and remember that `pg_hba.conf` rules are matched top to bottom, first match wins.
+- Connect the application as a role that does not own the tables and does not have `BYPASSRLS`, or RLS will not apply to it.
 
 <Callout title="Defence in depth">
 No single control is enough. The network gate keeps strangers out, authentication proves identity, role privileges limit actions, and row-level security limits visibility. Backups sit beneath all of it as the final safety net. Operate as though each layer will occasionally fail, and make sure the next one still protects you.
@@ -144,20 +768,19 @@ No single control is enough. The network gate keeps strangers out, authenticatio
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Automated backups with regular restore tests | Actually recoverable when a real disaster happens | Costs storage and requires operational discipline |
+| Logical backup (`pg_dump`) | Portable, selective, a 1 MB archive for a 200 000-row table | One database at a time, restores by replaying SQL, no point-in-time |
+| Physical backup + WAL archive | Any point in time (the restore stopped before the `DELETE`), whole cluster | Same major version, more moving parts, the archive must never fail |
+| Incremental backups | 30 MB instead of 88 MB | Needs `summarize_wal` and a chain to combine before restore |
+| RLS with a strict policy | Isolation enforced by the database | Owners and `BYPASSRLS` roles skip it; missing settings error out unless the policy is written to fail closed |
 | Relying on replication alone for durability | Fast failover, high availability | A replica is not a backup — it copies mistakes and deletions too |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Setting up backups once and never testing a restore** — nobody knows a backup is broken until they actually need it. Schedule regular restore drills.
-- **Treating a replica as a backup** — a replica tracks the primary in near real time; it is not a separate point-in-time-recoverable copy. Always keep real backups alongside it.
-- **Giving an application role broader privileges than it needs (such as using a superuser role for the app)** — follow least privilege, so each role only gets the access it actually needs.
-
-> 💡 Real-world example
->
-> **Large-scale social platforms** — treat regular backup and recovery drills as part of standard infrastructure practice once they operate at a scale where an untested backup is not an acceptable risk.
->
-> **Common practice on production PostgreSQL teams** — regular, automated restore testing is treated as a standard practice, not just taking the backup itself.
+- **"A backup exists, so I am safe."** Only a restore proves it; the lab ran one and compared the counts.
+- **"pg_restore --create restores into the database I name with --dbname."** It connects there and creates the database named in the dump.
+- **"Replication is a backup."** The `DELETE` would have reached every replica within milliseconds.
+- **"RLS protects every connection."** Not the owner, not superusers, not `BYPASSRLS` roles; the owner saw 3 rows against the policy's 2.
+- **"GRANT SELECT ON ALL TABLES covers future tables."** The new `refunds` table was unreadable until `ALTER DEFAULT PRIVILEGES`.
 
 export const quizBackupSecurity = [
   {
@@ -169,6 +792,7 @@ export const quizBackupSecurity = [
       'Exporting each table to a spreadsheet',
     ],
     answer: 1,
+    explain: 'The restore replayed archived WAL on top of the base backup and stopped just before the DELETE. A dump cannot recover to a moment between dumps.',
   },
   {
     q: 'What does row-level security let you control that GRANT and REVOKE do not?',
@@ -179,6 +803,7 @@ export const quizBackupSecurity = [
       'Whether the connection is encrypted',
     ],
     answer: 1,
+    explain: 'GRANT works on whole tables. With the policy in place the application role saw two of three rows.',
   },
   {
     q: 'Why should you avoid trust authentication on a publicly reachable address?',
@@ -189,6 +814,29 @@ export const quizBackupSecurity = [
       'It only works on Windows',
     ],
     answer: 1,
+    explain: '`trust` skips password checks entirely; pg_hba.conf lines are also matched top to bottom, first match wins, so a broad trust line above stricter ones decides for everyone.',
+  },
+  {
+    q: 'You run pg_restore --dbname=shop_restored --create shop.dump and shop_restored does not exist. What happens?',
+    options: [
+      'It creates shop_restored and restores into it',
+      'It fails to connect to shop_restored; --create creates the database named in the dump, not the one given with --dbname',
+      'It restores into the postgres database',
+      'It silently does nothing',
+    ],
+    answer: 1,
+    explain: 'The lab printed `database "shop_restored" does not exist`. Use createdb and restore without --create, or connect to postgres with --create.',
+  },
+  {
+    q: 'The application connects as the role that owns the table, and RLS is enabled with a correct policy. What does a query return?',
+    options: [
+      'Only the current tenant\'s rows',
+      'All rows: table owners bypass row-level security unless FORCE ROW LEVEL SECURITY is set',
+      'An error',
+      'No rows',
+    ],
+    answer: 1,
+    explain: 'The owner saw 3 rows against the policy\'s 2. After FORCE ROW LEVEL SECURITY the owner saw 2. Roles with BYPASSRLS and superusers bypass it regardless.',
   },
 ];
 
