@@ -9,27 +9,61 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 Schemas are never finished. New features need new columns, old ones become obsolete, and rules tighten as you learn what the data really looks like. The `ALTER TABLE` statement changes the shape of an existing table in place, keeping the rows you already have. Like `CREATE TABLE`, it is DDL and is usually applied through a migration step so the change is versioned and repeatable.
 
-We will continue evolving the `products` table from earlier in the module.
+We continue with the `products` table, this time with 1,000 rows so migrations have something to chew on. Everything below is real output from **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026), top to bottom in one empty database. Timings are from this Mac. The important question for every statement is not only "does it work" but "does it rewrite the table, and what lock does it hold?".
+
+```sql
+-- sql/products.sql
+CREATE TABLE products (
+  id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name   text NOT NULL,
+  price  numeric(10, 2) NOT NULL
+);
+INSERT INTO products (name, price)
+SELECT 'product-' || g, (g % 50) + 0.99 FROM generate_series(1, 1000) g;
+SELECT count(*) AS rows, min(price), max(price) FROM products;
+```
+
+```text
+CREATE TABLE
+INSERT 0 1000
+ rows | min  |  max  
+------+------+-------
+ 1000 | 0.99 | 49.99
+(1 row)
+```
 
 ## Adding and dropping columns
 
-`ADD COLUMN` appends a new column to every existing row. If you give it no default, existing rows get null in the new column. `DROP COLUMN` removes a column and its data for good.
+`ADD COLUMN` appends a new column to every existing row. If you give it no default, existing rows get null in the new column. `DROP COLUMN` removes a column and its data for good. You can combine several changes in one statement by separating them with commas, which keeps related edits in a single, atomic step.
 
 ```sql
+-- sql/add-drop-column.sql
 ALTER TABLE products ADD COLUMN description text;
-
+SELECT count(description) AS non_null_descriptions, count(*) AS rows FROM products;
 ALTER TABLE products DROP COLUMN description;
-```
-
-You can combine several changes in one statement by separating them with commas, which keeps related edits in a single, atomic step.
-
-```sql
 ALTER TABLE products
   ADD COLUMN sku text,
   ADD COLUMN in_stock boolean NOT NULL DEFAULT true;
+SELECT count(*) FILTER (WHERE in_stock) AS in_stock_true, count(sku) AS sku_filled FROM products;
+```
+
+```text
+ALTER TABLE
+ non_null_descriptions | rows 
+-----------------------+------
+                     0 | 1000
+(1 row)
+
+ALTER TABLE
+ALTER TABLE
+ in_stock_true | sku_filled 
+---------------+------------
+          1000 |          0
+(1 row)
 ```
 
 **In pgAdmin:** after altering a table, refresh its Columns node in the browser tree to see the change, or use the table's Properties dialog to add and remove columns through a form.
@@ -39,44 +73,361 @@ ALTER TABLE products
 `ALTER COLUMN ... TYPE` converts a column to a new type. PostgreSQL can do many conversions automatically, but when the change is not obvious you supply a `USING` expression that tells it how to transform each existing value.
 
 ```sql
+-- sql/change-type.sql
+UPDATE products SET sku = 'SKU-' || lpad(id::text, 4, '0');
 ALTER TABLE products
   ALTER COLUMN sku TYPE varchar(32);
-
 ALTER TABLE products
   ALTER COLUMN price TYPE numeric(12, 2) USING price::numeric(12, 2);
+\d products
 ```
 
-The conversion runs over every row, so on a large table this can take a while and hold a lock. The final lesson section covers how to keep that safe.
+```text
+UPDATE 1000
+ALTER TABLE
+ALTER TABLE
+                                Table "public.products"
+  Column  |         Type          | Collation | Nullable |           Default            
+----------+-----------------------+-----------+----------+------------------------------
+ id       | bigint                |           | not null | generated always as identity
+ name     | text                  |           | not null | 
+ price    | numeric(12,2)         |           | not null | 
+ sku      | character varying(32) |           |          | 
+ in_stock | boolean               |           | not null | true
+Indexes:
+    "products_pkey" PRIMARY KEY, btree (id)
+```
+
+If a value cannot be converted the whole statement fails and nothing changes:
+
+```sql
+-- @expect-error 22P02
+ALTER TABLE products ALTER COLUMN sku TYPE integer USING sku::integer;
+```
+
+```text
+ERROR:  invalid input syntax for type integer: "SKU-0001"
+```
+
+`USING` is how you say what to do with such values:
+
+```sql
+-- sql/using-ok.sql
+ALTER TABLE products ADD COLUMN sku_num text;
+UPDATE products SET sku_num = sku;
+ALTER TABLE products ALTER COLUMN sku_num TYPE integer USING substr(sku_num, 5)::integer;
+SELECT sku, sku_num FROM products WHERE id IN (1, 1000) ORDER BY id;
+ALTER TABLE products DROP COLUMN sku_num;
+```
+
+```text
+ALTER TABLE
+UPDATE 1000
+ALTER TABLE
+   sku    | sku_num 
+----------+---------
+ SKU-0001 |       1
+ SKU-1000 |    1000
+(2 rows)
+
+ALTER TABLE
+```
+
+### Does it rewrite the table?
+
+The conversion may run over every row, so on a large table it can take a while and hold a lock. But not every `ALTER` rewrites the table, and knowing which ones do is the whole game. A rewrite creates a new copy of the table file, which you can see as a changed `pg_relation_filenode`. Here is the matrix, run statement by statement against the same table (each row applied after the previous one):
+
+```sql
+-- sql/rewrite-matrix.sql
+CREATE TABLE rw (id int, t text, v varchar(32), n numeric(10, 2), i int);
+INSERT INTO rw SELECT g, 'row-' || g, 'v' || g, g, g FROM generate_series(1, 1000) g;
+
+CREATE FUNCTION rewrites(ddl text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE before_node oid := pg_relation_filenode('rw');
+BEGIN
+  EXECUTE ddl;
+  RETURN CASE WHEN pg_relation_filenode('rw') = before_node THEN 'no rewrite' ELSE 'REWRITE' END;
+END $$;
+
+SELECT ddl, rewrites(ddl) AS result
+FROM (VALUES
+  (1,  'ALTER TABLE rw ALTER COLUMN n TYPE numeric(12,2)'),
+  (2,  'ALTER TABLE rw ALTER COLUMN v TYPE varchar(64)'),
+  (3,  'ALTER TABLE rw ALTER COLUMN v TYPE text'),
+  (4,  'ALTER TABLE rw ALTER COLUMN t TYPE varchar(32)'),
+  (5,  'ALTER TABLE rw ALTER COLUMN t TYPE varchar(8)'),
+  (6,  'ALTER TABLE rw ALTER COLUMN n TYPE numeric(12,3)'),
+  (7,  'ALTER TABLE rw ALTER COLUMN i TYPE bigint'),
+  (8,  'ALTER TABLE rw ADD COLUMN c1 int DEFAULT 0'),
+  (9,  'ALTER TABLE rw ADD COLUMN c2 timestamptz DEFAULT now()'),
+  (10, 'ALTER TABLE rw ADD COLUMN c3 uuid DEFAULT gen_random_uuid()'),
+  (11, 'ALTER TABLE rw ADD COLUMN c4 bigint GENERATED ALWAYS AS (i * 2) STORED'),
+  (12, 'ALTER TABLE rw ADD COLUMN c5 bigint GENERATED ALWAYS AS (i * 2)'),
+  (13, 'ALTER TABLE rw DROP COLUMN c1'),
+  (14, 'ALTER TABLE rw ALTER COLUMN id SET NOT NULL')
+) AS t(step, ddl)
+ORDER BY step;
+```
+
+```text
+CREATE TABLE
+INSERT 0 1000
+CREATE FUNCTION
+                                  ddl                                   |   result   
+------------------------------------------------------------------------+------------
+ ALTER TABLE rw ALTER COLUMN n TYPE numeric(12,2)                       | no rewrite
+ ALTER TABLE rw ALTER COLUMN v TYPE varchar(64)                         | no rewrite
+ ALTER TABLE rw ALTER COLUMN v TYPE text                                | no rewrite
+ ALTER TABLE rw ALTER COLUMN t TYPE varchar(32)                         | REWRITE
+ ALTER TABLE rw ALTER COLUMN t TYPE varchar(8)                          | REWRITE
+ ALTER TABLE rw ALTER COLUMN n TYPE numeric(12,3)                       | REWRITE
+ ALTER TABLE rw ALTER COLUMN i TYPE bigint                              | REWRITE
+ ALTER TABLE rw ADD COLUMN c1 int DEFAULT 0                             | no rewrite
+ ALTER TABLE rw ADD COLUMN c2 timestamptz DEFAULT now()                 | no rewrite
+ ALTER TABLE rw ADD COLUMN c3 uuid DEFAULT gen_random_uuid()            | REWRITE
+ ALTER TABLE rw ADD COLUMN c4 bigint GENERATED ALWAYS AS (i * 2) STORED | REWRITE
+ ALTER TABLE rw ADD COLUMN c5 bigint GENERATED ALWAYS AS (i * 2)        | no rewrite
+ ALTER TABLE rw DROP COLUMN c1                                          | no rewrite
+ ALTER TABLE rw ALTER COLUMN id SET NOT NULL                            | no rewrite
+(14 rows)
+```
+
+Read it carefully, because some familiar advice is wrong:
+
+- Growing a `numeric` precision at the same scale, growing `varchar(n)`, and going `varchar` to `text` are metadata-only.
+- Going *to* a length limit (`text` to `varchar(32)`), shrinking `varchar(n)`, changing `numeric` scale, and `integer` to `bigint` rewrite the table.
+- Adding a column with a constant or `now()` default is metadata-only (fast defaults, PostgreSQL 11+); a volatile default such as `gen_random_uuid()` rewrites. A `STORED` generated column rewrites; a virtual one (the PostgreSQL 18 default) does not.
+- `DROP COLUMN` only marks the column dropped. `SET NOT NULL` scans the table to check but does not rewrite it.
+
+The rules are in the [ALTER TABLE notes](https://www.postgresql.org/docs/18/sql-altertable.html#SQL-ALTERTABLE-NOTES); the matrix above is what this server actually did.
+
+### Locks: what "briefly blocks" really means
+
+Every form above takes an `ACCESS EXCLUSIVE` lock on the table, the strongest lock, which conflicts with everything including plain `SELECT`. It is held until the transaction ends, and the rewrite time is spent inside it:
+
+```sql
+-- sql/lock-modes.sql
+BEGIN;
+ALTER TABLE products ALTER COLUMN name TYPE varchar(100);
+SELECT mode FROM pg_locks WHERE relation = 'products'::regclass AND pid = pg_backend_pid() AND mode LIKE '%Exclusive%' ORDER BY mode;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ALTER TABLE
+        mode         
+---------------------
+ AccessExclusiveLock
+(1 row)
+
+ROLLBACK
+```
+
+The hidden problem is the **lock queue**. `ALTER TABLE` needs to wait for every transaction that already touches the table, and while it waits, everything that arrives behind it queues behind *it*. So even an instant `ADD COLUMN` can stall all traffic if a long transaction is open. Real run with three sessions (each one a separate `psql`): session A holds a read inside a transaction for 5 seconds, session B tries `ALTER TABLE`, session C runs a plain `SELECT` two seconds after A started. Session D looks at `pg_stat_activity`:
+
+```text
+-- session A: holds an ordinary read lock inside a transaction for 5 seconds
+BEGIN
+ a_rows 
+--------
+   1000
+(1 row)
+
+COMMIT
+
+-- session B (starts 1 s later): the migration
+Timing is on.
+ALTER TABLE
+Time: 3995.829 ms (00:03.996)
+
+-- session C (starts 2 s later): a plain SELECT, nothing to do with the migration
+Timing is on.
+ c_rows 
+--------
+   1000
+(1 row)
+
+Time: 2993.559 ms (00:02.994)
+
+-- session D (looks at 3.5 s): who is waiting?
+               query                | state  | wait_event_type | wait_event 
+------------------------------------+--------+-----------------+------------
+ ALTER TABLE rw ADD COLUMN x int;   | active | Lock            | relation
+ SELECT count(*) AS c_rows FROM rw; | active | Lock            | relation
+(2 rows)
+```
+
+C did nothing but read, and it was blocked for 3 seconds because it queued behind B, which queued behind A. The protection is `lock_timeout`: give up quickly and retry, rather than blocking the table for everyone:
+
+```text
+-- session B, same as before but with lock_timeout = 500ms
+SET
+Timing is on.
+ERROR:  canceling statement due to lock timeout
+Time: 502.981 ms
+
+-- session C
+Timing is on.
+ c_rows 
+--------
+   1000
+(1 row)
+
+Time: 1.527 ms
+```
+
+The migration failed with `canceling statement due to lock timeout` (SQLSTATE `55P03`) after 0.5 s, and C ran in 1.5 ms. Put `SET lock_timeout` at the top of every migration on a live system, and retry.
 
 ## Adding and dropping constraints
 
 You can attach a constraint to a table after it exists, or drop one by name. Naming constraints when you create them, as the previous lesson recommended, is what makes dropping them clean.
 
 ```sql
+-- sql/add-constraint.sql
 ALTER TABLE products
   ADD CONSTRAINT products_price_positive CHECK (price > 0);
-
 ALTER TABLE products
   DROP CONSTRAINT products_price_positive;
 ```
 
-Adding a constraint scans existing rows to confirm they all satisfy it; if any row fails, the whole statement is rejected and nothing changes.
+Adding a constraint scans existing rows to confirm they all satisfy it; if any row fails, the whole statement is rejected and nothing changes (the previous lesson showed that error). The scan happens under a strong lock. `NOT VALID` splits it into two steps: add the constraint so that *new* writes are checked immediately, and validate the old rows separately under a much weaker lock. First, with a bad row present (`qty = -3`):
+
+```sql
+-- sql/not-valid.sql
+CREATE TABLE stock (id int PRIMARY KEY, qty int);
+INSERT INTO stock VALUES (1, 5), (2, -3);
+ALTER TABLE stock ADD CONSTRAINT stock_qty_nonneg CHECK (qty >= 0) NOT VALID;
+SELECT conname, convalidated FROM pg_constraint WHERE conname = 'stock_qty_nonneg';
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+ALTER TABLE
+     conname      | convalidated 
+------------------+--------------
+ stock_qty_nonneg | f
+(1 row)
+```
+
+`convalidated = f` means old rows are not checked yet, but new ones are:
+
+```sql
+-- @expect-error 23514
+INSERT INTO stock VALUES (3, -1);
+```
+
+```text
+ERROR:  new row for relation "stock" violates check constraint "stock_qty_nonneg"
+DETAIL:  Failing row contains (3, -1).
+```
+
+`VALIDATE CONSTRAINT` refuses while a bad row exists:
+
+```sql
+-- @expect-error 23514
+ALTER TABLE stock VALIDATE CONSTRAINT stock_qty_nonneg;
+```
+
+```text
+ERROR:  check constraint "stock_qty_nonneg" of relation "stock" is violated by some row
+```
+
+Fix the data, then validate. Look at the lock: `ShareUpdateExclusiveLock` does not block reads or writes, unlike the `AccessExclusiveLock` of the plain `ADD CONSTRAINT`:
+
+```sql
+-- sql/validate.sql
+UPDATE stock SET qty = 0 WHERE qty < 0;
+BEGIN;
+ALTER TABLE stock VALIDATE CONSTRAINT stock_qty_nonneg;
+SELECT mode FROM pg_locks WHERE relation = 'stock'::regclass AND pid = pg_backend_pid() AND mode LIKE '%Exclusive%' ORDER BY mode;
+COMMIT;
+SELECT conname, convalidated FROM pg_constraint WHERE conname = 'stock_qty_nonneg';
+```
+
+```text
+UPDATE 1
+BEGIN
+ALTER TABLE
+           mode           
+--------------------------
+ ShareUpdateExclusiveLock
+(1 row)
+
+COMMIT
+     conname      | convalidated 
+------------------+--------------
+ stock_qty_nonneg | t
+(1 row)
+```
 
 ## Renaming
 
-`RENAME` changes the name of a table or a single column without touching the data. It is instant, but anything that referenced the old name — views, application queries, saved reports — must be updated too.
+`RENAME` changes the name of a table or a single column without touching the data. It is instant, but not everything follows a rename. Views are stored by object identity and do follow (below, the view now reads `product_code AS sku FROM catalog_items`); a function body is just text and does not:
 
 ```sql
+-- sql/rename.sql
+CREATE VIEW product_skus AS SELECT id, sku FROM products;
+CREATE FUNCTION sku_of(pid bigint) RETURNS text LANGUAGE sql AS $$ SELECT sku FROM products WHERE id = pid $$;
 ALTER TABLE products RENAME COLUMN sku TO product_code;
-
 ALTER TABLE products RENAME TO catalog_items;
+SELECT pg_get_viewdef('product_skus'::regclass) AS view_follows_the_rename;
+```
+
+```text
+CREATE VIEW
+CREATE FUNCTION
+ALTER TABLE
+ALTER TABLE
+ view_follows_the_rename 
+-------------------------
+  SELECT id,            +
+     product_code AS sku+
+    FROM catalog_items;
+(1 row)
+```
+
+```sql
+-- @expect-error 42P01
+SELECT sku_of(1);
+```
+
+```text
+ERROR:  relation "products" does not exist
+LINE 1:  SELECT sku FROM products WHERE id = pid 
+                         ^
+QUERY:   SELECT sku FROM products WHERE id = pid 
+CONTEXT:  SQL function "sku_of" during inlining
+```
+
+Application queries, saved reports, and function bodies must be updated by hand. Put the names back for the rest of the lesson:
+
+```sql
+-- sql/rename-back.sql
+ALTER TABLE catalog_items RENAME TO products;
+ALTER TABLE products RENAME COLUMN product_code TO sku;
+DROP VIEW product_skus;
+DROP FUNCTION sku_of(bigint);
 ```
 
 ## Safe migrations: the NOT NULL trap
 
-The most common migration accident is adding a `NOT NULL` column to a table that already has rows. Those existing rows have no value for the new column, so the constraint is immediately violated and the statement fails. There are two safe paths: give the column a `DEFAULT` so every existing row is filled at once, or add the column nullable, backfill the values, then tighten it to `NOT NULL`.
+The most common migration accident is adding a `NOT NULL` column to a table that already has rows. Those existing rows have no value for the new column, so the constraint is immediately violated and the statement fails.
 
 ```sql
+-- @expect-error 23502
+ALTER TABLE products ADD COLUMN currency text NOT NULL;
+```
+
+```text
+ERROR:  column "currency" of relation "products" contains null values
+```
+
+There are two safe paths: give the column a `DEFAULT` so every existing row is filled at once (metadata-only for a constant), or add the column nullable, backfill the values, then tighten it to `NOT NULL`. Path two is the standard choice when there is no single sensible default, because it lets you compute each row's value before locking the column down. (When a valid `CHECK (region IS NOT NULL)` constraint already exists, `SET NOT NULL` can skip its table scan, see the [docs](https://www.postgresql.org/docs/18/sql-altertable.html).)
+
+```sql
+-- sql/not-null-paths.sql
 -- Path 1: a default fills every existing row in one step
 ALTER TABLE products
   ADD COLUMN currency text NOT NULL DEFAULT 'USD';
@@ -85,13 +436,75 @@ ALTER TABLE products
 ALTER TABLE products ADD COLUMN region text;
 UPDATE products SET region = 'global' WHERE region IS NULL;
 ALTER TABLE products ALTER COLUMN region SET NOT NULL;
+SELECT currency, region, count(*) FROM products GROUP BY 1, 2;
 ```
 
-Path two is the standard choice when there is no single sensible default, because it lets you compute each row's value before locking the column down.
+```text
+ALTER TABLE
+ALTER TABLE
+UPDATE 1000
+ALTER TABLE
+ currency | region | count 
+----------+--------+-------
+ USD      | global |  1000
+(1 row)
+```
 
 ## Running a migration in a transaction
 
-Most `ALTER TABLE` statements in PostgreSQL are transactional, so you can wrap a multi-step migration in a transaction and have it apply all-or-nothing. If any step fails, a `ROLLBACK` leaves the table exactly as it was.
+Most `ALTER TABLE` statements in PostgreSQL are transactional (DDL is transactional here, unlike some other databases), so you can wrap a multi-step migration in a transaction and have it apply all-or-nothing. If any step fails, a `ROLLBACK` leaves the table exactly as it was:
+
+```sql
+-- sql/transactional-ddl.sql
+BEGIN;
+ALTER TABLE products ADD COLUMN tmp_flag boolean;
+ALTER TABLE products DROP COLUMN region, DROP COLUMN currency;
+SELECT count(*) AS columns_inside_tx FROM information_schema.columns WHERE table_name = 'products';
+ROLLBACK;
+SELECT count(*) AS columns_after_rollback FROM information_schema.columns WHERE table_name = 'products';
+```
+
+```text
+BEGIN
+ALTER TABLE
+ALTER TABLE
+ columns_inside_tx 
+-------------------
+                 6
+(1 row)
+
+ROLLBACK
+ columns_after_rollback 
+------------------------
+                      7
+(1 row)
+```
+
+Inside the transaction the table had a different shape (an added column, two dropped); after `ROLLBACK` it is as if nothing happened. The migration itself:
+
+```sql
+-- sql/migration-in-tx.sql
+BEGIN;
+ALTER TABLE products ADD COLUMN region2 text;
+UPDATE products SET region2 = 'global' WHERE region2 IS NULL;
+ALTER TABLE products ALTER COLUMN region2 SET NOT NULL;
+COMMIT;
+SELECT count(*) AS migrated FROM products WHERE region2 = 'global';
+```
+
+```text
+BEGIN
+ALTER TABLE
+UPDATE 1000
+ALTER TABLE
+COMMIT
+ migrated 
+----------
+     1000
+(1 row)
+```
+
+Here is the same migration from each driver. Each was run once against a scratch database with a 100-row `products` table:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -166,15 +579,102 @@ Most `ALTER TABLE` statements in PostgreSQL are transactional, so you can wrap a
   </TabItem>
 </Tabs>
 
+```text
+$ node app.mjs        # pg 8.23.0 (100 rows in products)
+{ count: '100' }
+
+$ python app.py        # psycopg 3.3.6
+(100,)
+
+$ go run .        # pgx v5.11.0 (the snippet sits inside a func returning error)
+migrated: 100
+
+$ cargo run        # sqlx 0.9.0
+migrated: 100
+```
+
 Because the three steps run inside one transaction, the table is never seen by other sessions in a half-migrated state.
+
+## Reading AI-generated code
+
+An assistant is asked to add a public identifier to a big table. It knows that PostgreSQL 11+ adds columns with defaults "instantly", says so in a comment, and writes this:
+
+<SpotTheBug lang="sql" code={`-- migration 0042_add_public_id.sql
+-- AI comment: "PostgreSQL 11+ adds columns with defaults instantly, so this is safe on a big table"
+ALTER TABLE big ADD COLUMN public_id uuid NOT NULL DEFAULT gen_random_uuid();`}>
+
+The comment is half true, which is why it is convincing. A *constant* default is instant; `gen_random_uuid()` is volatile, so PostgreSQL must compute a different value for every existing row and rewrite the whole table, under `ACCESS EXCLUSIVE` (matrix above, the `gen_random_uuid()` row). On a table of one million rows, measured on this Mac:
+
+```sql
+-- sql/big-table.sql
+CREATE TABLE big (id int, payload text);
+INSERT INTO big SELECT g, md5(g::text) FROM generate_series(1, 1000000) g;
+ANALYZE big;
+```
+
+```sql
+-- sql/big-add-uuid.sql
+\timing on
+ALTER TABLE big ADD COLUMN flag int DEFAULT 0;
+ALTER TABLE big ADD COLUMN created timestamptz DEFAULT now();
+ALTER TABLE big ADD COLUMN public_id uuid NOT NULL DEFAULT gen_random_uuid();
+\timing off
+```
+
+```text
+Timing is on.
+ALTER TABLE
+Time: 276.200 ms
+ALTER TABLE
+Time: 1.043 ms
+ALTER TABLE
+Time: 1080.700 ms (00:01.081)
+Timing is off.
+```
+
+The constant-default and `now()`-default columns took 276 ms and 1 ms (the first figure includes waiting for a lock on the freshly loaded table, probably a background autovacuum/analyze, which is itself the lock queue from earlier); the volatile-default column took 1,081 ms, all of it with the table locked against reads and writes. The multiplication with a real table (indexes, TOAST, replicas replaying the rewrite) is the outage. The safe recipe is to split the change: add the column with no default (instant), set the default for *future* rows (instant, metadata only), then backfill existing rows in batches and only then enforce `NOT NULL`:
+
+```sql
+-- sql/big-add-uuid-safe.sql
+\timing on
+ALTER TABLE big ADD COLUMN public_id2 uuid;
+ALTER TABLE big ALTER COLUMN public_id2 SET DEFAULT gen_random_uuid();
+UPDATE big SET public_id2 = gen_random_uuid() WHERE id BETWEEN 1 AND 100000;
+\timing off
+SELECT count(public_id2) AS backfilled_so_far FROM big;
+```
+
+```text
+Timing is on.
+ALTER TABLE
+Time: 2.091 ms
+ALTER TABLE
+Time: 0.550 ms
+UPDATE 100000
+Time: 233.839 ms
+Timing is off.
+ backfilled_so_far 
+-------------------
+            100000
+(1 row)
+```
+
+Repeat the `UPDATE` for the next id ranges (one transaction per batch keeps locks short and lets autovacuum keep up), then add a `CHECK (public_id2 IS NOT NULL) NOT VALID`, `VALIDATE` it, and `SET NOT NULL`.
+
+</SpotTheBug>
+
+## Mental Model
+
+Every `ALTER TABLE` has two costs: **how much work** (metadata only, table scan, or full rewrite) and **how strong a lock, for how long** (including the time spent queueing). Column type or default changes that need a new physical row shape rewrite; changes that only change the catalog or only need to read the rows do not. The safe migration is the one that makes both costs small: use the cheap forms, wait for the lock with a timeout, and split anything expensive into steps whose locks are weak.
 
 ## Tips / gotchas
 
-- `ALTER TABLE` takes a lock on the table. Many forms take a strong lock that briefly blocks reads and writes, so on a busy production table prefer short, targeted statements and run them during quiet periods.
-- Adding a `NOT NULL` column with a constant `DEFAULT` is fast in modern PostgreSQL because it does not rewrite every row, but changing a column's type still scans and rewrites the table.
+- `ALTER TABLE` takes a lock on the table, and the lock queue can turn a millisecond change into an outage. Start every production migration with `SET lock_timeout` and be ready to retry.
+- Adding a column with a constant `DEFAULT` (or `now()`) is fast in modern PostgreSQL because it does not rewrite every row; a volatile default and most type changes do rewrite.
 - Wrap multi-step migrations in a transaction so a failure halfway through rolls back cleanly and never leaves the schema partly changed.
-- Adding a constraint validates every existing row. On a large table this scan can be slow; investigate adding the constraint as `NOT VALID` first and validating it separately when you need to minimize lock time.
+- Add constraints as `NOT VALID` and `VALIDATE CONSTRAINT` separately on big tables; the validation takes a lock that does not block normal traffic.
 - `DROP COLUMN` and `DROP CONSTRAINT` are irreversible once committed. Confirm nothing depends on what you are removing, and lean on a transaction you can roll back while you check.
+- Renames do not update function bodies, application code, or saved reports.
 
 <Callout title="Migrate forward, never blindly">
 Treat every schema change as a migration: a small, named, reversible step you can test before it touches production. Add columns with defaults or backfill them, tighten constraints only after the data is clean, and run multi-step changes in a transaction. A careful migration is invisible to users; a careless one is an outage.
@@ -184,22 +684,19 @@ Treat every schema change as a migration: a small, named, reversible step you ca
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Online/non-blocking migration | Safe even during normal business hours; does not affect traffic | Needs more steps and more planning to write |
+| Online/non-blocking migration (split steps, `NOT VALID`, batches) | Safe even during normal business hours; does not affect traffic | Needs more steps and more planning to write |
 | Straightforward `ALTER TABLE` | Fast to write and run, short code | Can hold a strict lock that blocks production traffic on a large table |
-| Add a column with a constant `DEFAULT` (modern PostgreSQL) | Metadata-only — does not rewrite every row, so it is very fast | Only works for a constant default, not an expression computed per row |
-| Change a column's type with `ALTER COLUMN ... TYPE` | Direct, a single statement | Triggers a full table rewrite, scanning and rewriting every row |
+| Add a column with a constant `DEFAULT` | Metadata-only — does not rewrite every row, so it is very fast | Only a constant or stable default; `gen_random_uuid()` rewrites (measured above) |
+| Change a column's type with `ALTER COLUMN ... TYPE` | Direct, a single statement | Some changes rewrite the table (see the matrix); others do not |
+| `lock_timeout` on migrations | The migration cannot pile traffic up behind it | It may fail and need a retry |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Running `ALTER TABLE ... TYPE` on a large table during peak traffic** — this statement holds an exclusive lock for the whole table rewrite. Running it under load blocks both reads and writes for a long time.
-- **Changing a column's type without checking `USING` carefully** — if the conversion expression does not actually match the existing data, you can get corrupted values or a statement that fails partway through.
-- **Adding a `NOT NULL` column with no default and forgetting to backfill** — existing rows have no value for the new column, so the constraint is violated immediately and the statement fails. Backfill first, then add `NOT NULL`.
-
-> 💡 Real-world example
->
-> **[GitLab's migration style guide](https://docs.gitlab.com/development/database/avoiding_downtime_in_migrations/)** — requires application changes to deploy before a `NOT NULL` constraint is added, and recommends a nullable column plus a separate backfill step, specifically to avoid holding long locks on a large production database during deploys.
->
-> **Teams operating very large schemas** — favor `pg_online_schema_change`-style tooling or splitting a migration into several small steps, especially on large tables, so a schema change does not disrupt real traffic during deploy.
+- **"Every `ALTER COLUMN TYPE` rewrites the table."** Several do not (matrix above); widening `numeric(10,2)` to `numeric(12,2)`, for example, does not.
+- **"An instant `ALTER` cannot hurt production."** It still has to get the lock; queued behind one long transaction it blocked a plain `SELECT` for 3 seconds (above).
+- **"PostgreSQL 11+ made every `ADD COLUMN ... DEFAULT` instant."** Only non-volatile defaults.
+- **"Renaming is safe because views update themselves."** Views follow; function bodies and application queries do not.
+- **"`NOT NULL` needs a rewrite."** It needs a scan, not a rewrite; with a validated CHECK it can skip even the scan.
 
 export const quizAltering = [
   {
@@ -211,6 +708,7 @@ export const quizAltering = [
       'It locks the table forever',
     ],
     answer: 1,
+    explain: 'The lesson shows `column "currency" of relation "products" contains null values` (SQLSTATE 23502). Give it a default, or add it nullable, backfill, then SET NOT NULL.',
   },
   {
     q: 'What is the safe pattern when there is no single sensible default for a new NOT NULL column?',
@@ -221,6 +719,7 @@ export const quizAltering = [
       'Use a CHECK instead',
     ],
     answer: 1,
+    explain: 'Adding it nullable is metadata-only, the backfill computes each row\'s value, and SET NOT NULL only has to scan (no rewrite).',
   },
   {
     q: 'Why wrap a multi-step ALTER TABLE migration in a transaction?',
@@ -231,6 +730,29 @@ export const quizAltering = [
       'To skip validating existing rows',
     ],
     answer: 1,
+    explain: 'PostgreSQL DDL is transactional: the lesson\'s ROLLBACK restores the exact column set. A transaction does not remove locks, it holds them until the end.',
+  },
+  {
+    q: 'Which of these statements rewrites the whole table on PostgreSQL 18?',
+    options: [
+      '`ALTER COLUMN n TYPE numeric(12,2)` when `n` was `numeric(10,2)`',
+      '`ADD COLUMN c timestamptz DEFAULT now()`',
+      '`ADD COLUMN c uuid DEFAULT gen_random_uuid()`',
+      '`DROP COLUMN c`',
+    ],
+    answer: 2,
+    explain: 'A volatile default needs a different value per row, so the table is rewritten (filenode changed in the matrix). The other three were "no rewrite".',
+  },
+  {
+    q: 'A migration runs `ALTER TABLE t ADD COLUMN x int` while another session has a long open transaction that read `t`. What happens to other sessions that then SELECT from `t`?',
+    options: [
+      'They read normally, the ALTER is invisible',
+      'They queue behind the waiting ALTER until the long transaction ends',
+      'They fail with a syntax error',
+      'They read the new column as NULL',
+    ],
+    answer: 1,
+    explain: 'The waiting ALTER holds a place in the lock queue that conflicts with everything. Set `lock_timeout` so the ALTER fails fast instead (the lesson: C waited 3 s without it, 1.5 ms with it).',
   },
 ];
 

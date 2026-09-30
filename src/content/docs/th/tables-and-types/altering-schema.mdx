@@ -1,6 +1,6 @@
 ---
 title: การแก้ไข schema
-description: พัฒนา table ที่ใช้งานอยู่ด้วย ALTER TABLE — เพิ่มและ drop column, เปลี่ยนชนิด, เพิ่มและ drop constraint, เปลี่ยนชื่อ และรัน migration อย่างปลอดภัยโดยไม่สูญเสียข้อมูล
+description: พัฒนา table ที่ใช้งานอยู่ด้วย ALTER TABLE — เพิ่มและลบ column, เปลี่ยน type, เพิ่มและลบ constraint, เปลี่ยนชื่อ และรัน migration อย่างปลอดภัยโดยไม่สูญเสียข้อมูล
 sidebar:
   order: 5
 ---
@@ -9,74 +9,425 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-schema ไม่มีวันเสร็จสมบูรณ์ ฟีเจอร์ใหม่ต้องการ column ใหม่ ฟีเจอร์เก่าล้าสมัย และกฎเข้มงวดขึ้นเมื่อคุณเรียนรู้ว่าข้อมูลมีหน้าตาอย่างไรจริง ๆ คำสั่ง `ALTER TABLE` เปลี่ยนรูปทรงของ table ที่มีอยู่แบบ in-place โดยเก็บ row เดิมไว้ครบ เช่นเดียวกับ `CREATE TABLE` คำสั่งนี้เป็น DDL และมักใช้ผ่านขั้นตอน migration เพื่อให้การเปลี่ยนแปลงนั้นมีเวอร์ชันกำกับและทำซ้ำได้
+schema ไม่เคยเสร็จสมบูรณ์ ฟีเจอร์ใหม่ต้องการ column ใหม่ ตัวเก่ากลายเป็นของล้าสมัย และกฎเข้มขึ้นเมื่อคุณรู้ว่าข้อมูลจริงหน้าตาเป็นอย่างไร statement `ALTER TABLE` เปลี่ยนรูปร่างของ table ที่มีอยู่ในที่เดิมโดยเก็บ row ที่คุณมีไว้ เช่นเดียวกับ `CREATE TABLE` มันคือ DDL และมักถูกใช้ผ่านขั้นตอน migration เพื่อให้การเปลี่ยนแปลงมี version และทำซ้ำได้
 
-เราจะพัฒนา table `products` ต่อจากช่วงต้นของโมดูล
-
-## เพิ่มและ drop column
-
-`ADD COLUMN` ผนวก column ใหม่เข้ากับทุก row ที่มีอยู่ หากคุณไม่ให้ default row ที่มีอยู่จะได้ null ใน column ใหม่นั้น ส่วน `DROP COLUMN` ลบ column พร้อมข้อมูลข้างในทิ้งถาวร
+เราทำต่อกับ table `products` คราวนี้มี 1,000 row เพื่อให้ migration มีอะไรให้เคี้ยว ทุกอย่างด้านล่างคือ output จริงจาก **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) จากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ตัวเลขเวลามาจาก Mac เครื่องนี้ คำถามสำคัญสำหรับทุก statement ไม่ใช่แค่ "ใช้ได้ไหม" แต่คือ "มัน rewrite table ไหม และถือ lock อะไร?"
 
 ```sql
-ALTER TABLE products ADD COLUMN description text;
-
-ALTER TABLE products DROP COLUMN description;
+-- sql/products.sql
+CREATE TABLE products (
+  id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name   text NOT NULL,
+  price  numeric(10, 2) NOT NULL
+);
+INSERT INTO products (name, price)
+SELECT 'product-' || g, (g % 50) + 0.99 FROM generate_series(1, 1000) g;
+SELECT count(*) AS rows, min(price), max(price) FROM products;
 ```
 
-คุณสามารถรวมการเปลี่ยนแปลงหลายอย่างไว้ในคำสั่งเดียวได้โดยคั่นด้วยจุลภาค ซึ่งทำให้การแก้ไขที่เกี่ยวข้องกันอยู่ในขั้นตอนเดียวที่เป็น atomic
+```text
+CREATE TABLE
+INSERT 0 1000
+ rows | min  |  max  
+------+------+-------
+ 1000 | 0.99 | 49.99
+(1 row)
+```
+
+## การเพิ่มและลบ column
+
+`ADD COLUMN` ต่อ column ใหม่เข้าไปในทุก row ที่มีอยู่ ถ้าไม่ให้ default row ที่มีอยู่จะได้ null ใน column ใหม่ `DROP COLUMN` ลบ column และข้อมูลของมันถาวร คุณรวมหลายการเปลี่ยนแปลงใน statement เดียวโดยคั่นด้วยจุลภาคได้ ซึ่งเก็บการแก้ไขที่เกี่ยวข้องไว้ในขั้นเดียวแบบ atomic
 
 ```sql
+-- sql/add-drop-column.sql
+ALTER TABLE products ADD COLUMN description text;
+SELECT count(description) AS non_null_descriptions, count(*) AS rows FROM products;
+ALTER TABLE products DROP COLUMN description;
 ALTER TABLE products
   ADD COLUMN sku text,
   ADD COLUMN in_stock boolean NOT NULL DEFAULT true;
+SELECT count(*) FILTER (WHERE in_stock) AS in_stock_true, count(sku) AS sku_filled FROM products;
 ```
 
-**ใน pgAdmin:** หลังจากแก้ไข table ให้ refresh โหนด Columns ของ table นั้นในแผนผัง browser เพื่อดูการเปลี่ยนแปลง หรือใช้ dialog Properties ของ table เพื่อเพิ่มและลบ column ผ่านฟอร์ม
+```text
+ALTER TABLE
+ non_null_descriptions | rows 
+-----------------------+------
+                     0 | 1000
+(1 row)
 
-## เปลี่ยนชนิดของ column
+ALTER TABLE
+ALTER TABLE
+ in_stock_true | sku_filled 
+---------------+------------
+          1000 |          0
+(1 row)
+```
 
-`ALTER COLUMN ... TYPE` แปลง column ไปเป็นชนิดใหม่ PostgreSQL สามารถแปลงได้หลายอย่างโดยอัตโนมัติ แต่เมื่อการเปลี่ยนแปลงไม่ชัดเจน คุณต้องใส่นิพจน์ `USING` เพื่อบอก PostgreSQL ว่าจะแปลงค่าเดิมแต่ละค่าอย่างไร
+**ใน pgAdmin:** หลังแก้ไข table ให้ refresh โหนด Columns ใน browser tree เพื่อดูการเปลี่ยนแปลง หรือใช้กล่อง Properties ของ table เพื่อเพิ่มและลบ column ผ่านฟอร์ม
+
+## การเปลี่ยน type ของ column
+
+`ALTER COLUMN ... TYPE` แปลง column เป็น type ใหม่ PostgreSQL แปลงหลายกรณีได้อัตโนมัติ แต่เมื่อการเปลี่ยนไม่ชัดเจน คุณต้องใส่นิพจน์ `USING` ที่บอกว่าจะแปลงแต่ละค่าที่มีอยู่อย่างไร
 
 ```sql
+-- sql/change-type.sql
+UPDATE products SET sku = 'SKU-' || lpad(id::text, 4, '0');
 ALTER TABLE products
   ALTER COLUMN sku TYPE varchar(32);
-
 ALTER TABLE products
   ALTER COLUMN price TYPE numeric(12, 2) USING price::numeric(12, 2);
+\d products
 ```
 
-การแปลงจะรันผ่านทุก row ดังนั้นบน table ขนาดใหญ่สิ่งนี้อาจใช้เวลาสักพักและถือ lock ไว้ ส่วนบทเรียนสุดท้ายครอบคลุมวิธีทำให้ปลอดภัย
+```text
+UPDATE 1000
+ALTER TABLE
+ALTER TABLE
+                                Table "public.products"
+  Column  |         Type          | Collation | Nullable |           Default            
+----------+-----------------------+-----------+----------+------------------------------
+ id       | bigint                |           | not null | generated always as identity
+ name     | text                  |           | not null | 
+ price    | numeric(12,2)         |           | not null | 
+ sku      | character varying(32) |           |          | 
+ in_stock | boolean               |           | not null | true
+Indexes:
+    "products_pkey" PRIMARY KEY, btree (id)
+```
 
-## เพิ่มและ drop constraint
-
-คุณเพิ่ม constraint เข้า table ที่มีอยู่แล้วได้ และ drop ออกด้วยชื่อก็ได้ การตั้งชื่อ constraint ตั้งแต่ตอนสร้าง อย่างที่บทเรียนก่อนแนะนำ คือสิ่งที่ทำให้ drop ทีหลังได้สะอาด
+ถ้าค่าใดแปลงไม่ได้ ทั้ง statement ล้มเหลวและไม่มีอะไรเปลี่ยน:
 
 ```sql
+-- @expect-error 22P02
+ALTER TABLE products ALTER COLUMN sku TYPE integer USING sku::integer;
+```
+
+```text
+ERROR:  invalid input syntax for type integer: "SKU-0001"
+```
+
+`USING` คือวิธีบอกว่าจะทำอย่างไรกับค่าเหล่านั้น:
+
+```sql
+-- sql/using-ok.sql
+ALTER TABLE products ADD COLUMN sku_num text;
+UPDATE products SET sku_num = sku;
+ALTER TABLE products ALTER COLUMN sku_num TYPE integer USING substr(sku_num, 5)::integer;
+SELECT sku, sku_num FROM products WHERE id IN (1, 1000) ORDER BY id;
+ALTER TABLE products DROP COLUMN sku_num;
+```
+
+```text
+ALTER TABLE
+UPDATE 1000
+ALTER TABLE
+   sku    | sku_num 
+----------+---------
+ SKU-0001 |       1
+ SKU-1000 |    1000
+(2 rows)
+
+ALTER TABLE
+```
+
+### มัน rewrite table ไหม?
+
+การแปลงอาจรันทุก row ดังนั้นบน table ใหญ่อาจใช้เวลาและถือ lock แต่ไม่ใช่ทุก `ALTER` ที่ rewrite table และการรู้ว่าตัวไหนทำคือหัวใจทั้งหมด การ rewrite สร้างสำเนาใหม่ของไฟล์ table ซึ่งเห็นได้จาก `pg_relation_filenode` ที่เปลี่ยน นี่คือ matrix รันทีละ statement กับ table เดียวกัน (แต่ละแถวใช้หลังแถวก่อนหน้า):
+
+```sql
+-- sql/rewrite-matrix.sql
+CREATE TABLE rw (id int, t text, v varchar(32), n numeric(10, 2), i int);
+INSERT INTO rw SELECT g, 'row-' || g, 'v' || g, g, g FROM generate_series(1, 1000) g;
+
+CREATE FUNCTION rewrites(ddl text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE before_node oid := pg_relation_filenode('rw');
+BEGIN
+  EXECUTE ddl;
+  RETURN CASE WHEN pg_relation_filenode('rw') = before_node THEN 'no rewrite' ELSE 'REWRITE' END;
+END $$;
+
+SELECT ddl, rewrites(ddl) AS result
+FROM (VALUES
+  (1,  'ALTER TABLE rw ALTER COLUMN n TYPE numeric(12,2)'),
+  (2,  'ALTER TABLE rw ALTER COLUMN v TYPE varchar(64)'),
+  (3,  'ALTER TABLE rw ALTER COLUMN v TYPE text'),
+  (4,  'ALTER TABLE rw ALTER COLUMN t TYPE varchar(32)'),
+  (5,  'ALTER TABLE rw ALTER COLUMN t TYPE varchar(8)'),
+  (6,  'ALTER TABLE rw ALTER COLUMN n TYPE numeric(12,3)'),
+  (7,  'ALTER TABLE rw ALTER COLUMN i TYPE bigint'),
+  (8,  'ALTER TABLE rw ADD COLUMN c1 int DEFAULT 0'),
+  (9,  'ALTER TABLE rw ADD COLUMN c2 timestamptz DEFAULT now()'),
+  (10, 'ALTER TABLE rw ADD COLUMN c3 uuid DEFAULT gen_random_uuid()'),
+  (11, 'ALTER TABLE rw ADD COLUMN c4 bigint GENERATED ALWAYS AS (i * 2) STORED'),
+  (12, 'ALTER TABLE rw ADD COLUMN c5 bigint GENERATED ALWAYS AS (i * 2)'),
+  (13, 'ALTER TABLE rw DROP COLUMN c1'),
+  (14, 'ALTER TABLE rw ALTER COLUMN id SET NOT NULL')
+) AS t(step, ddl)
+ORDER BY step;
+```
+
+```text
+CREATE TABLE
+INSERT 0 1000
+CREATE FUNCTION
+                                  ddl                                   |   result   
+------------------------------------------------------------------------+------------
+ ALTER TABLE rw ALTER COLUMN n TYPE numeric(12,2)                       | no rewrite
+ ALTER TABLE rw ALTER COLUMN v TYPE varchar(64)                         | no rewrite
+ ALTER TABLE rw ALTER COLUMN v TYPE text                                | no rewrite
+ ALTER TABLE rw ALTER COLUMN t TYPE varchar(32)                         | REWRITE
+ ALTER TABLE rw ALTER COLUMN t TYPE varchar(8)                          | REWRITE
+ ALTER TABLE rw ALTER COLUMN n TYPE numeric(12,3)                       | REWRITE
+ ALTER TABLE rw ALTER COLUMN i TYPE bigint                              | REWRITE
+ ALTER TABLE rw ADD COLUMN c1 int DEFAULT 0                             | no rewrite
+ ALTER TABLE rw ADD COLUMN c2 timestamptz DEFAULT now()                 | no rewrite
+ ALTER TABLE rw ADD COLUMN c3 uuid DEFAULT gen_random_uuid()            | REWRITE
+ ALTER TABLE rw ADD COLUMN c4 bigint GENERATED ALWAYS AS (i * 2) STORED | REWRITE
+ ALTER TABLE rw ADD COLUMN c5 bigint GENERATED ALWAYS AS (i * 2)        | no rewrite
+ ALTER TABLE rw DROP COLUMN c1                                          | no rewrite
+ ALTER TABLE rw ALTER COLUMN id SET NOT NULL                            | no rewrite
+(14 rows)
+```
+
+อ่านให้ละเอียด เพราะคำแนะนำที่คุ้นเคยบางข้อผิด:
+
+- การเพิ่ม precision ของ `numeric` ที่ scale เท่าเดิม การขยาย `varchar(n)` และการเปลี่ยน `varchar` เป็น `text` เป็นแค่ metadata
+- การเปลี่ยน *ไปเป็น* ขีดจำกัดความยาว (`text` เป็น `varchar(32)`) การลด `varchar(n)` การเปลี่ยน scale ของ `numeric` และ `integer` เป็น `bigint` rewrite table
+- การเพิ่ม column ที่มี default เป็นค่าคงที่หรือ `now()` เป็นแค่ metadata (fast default, PostgreSQL 11+) ส่วน default แบบ volatile เช่น `gen_random_uuid()` rewrite generated column แบบ `STORED` rewrite ส่วนแบบ virtual (ค่าเริ่มต้นของ PostgreSQL 18) ไม่ rewrite
+- `DROP COLUMN` แค่ทำเครื่องหมายว่า column ถูก drop `SET NOT NULL` สแกน table เพื่อตรวจแต่ไม่ rewrite
+
+กฎอยู่ใน [หมายเหตุของ ALTER TABLE](https://www.postgresql.org/docs/18/sql-altertable.html#SQL-ALTERTABLE-NOTES) matrix ข้างบนคือสิ่งที่เซิร์ฟเวอร์นี้ทำจริง
+
+### Lock: "บล็อกชั่วครู่" จริง ๆ แล้วหมายถึงอะไร
+
+ทุกรูปแบบข้างบนถือ lock `ACCESS EXCLUSIVE` บน table ซึ่งเป็น lock ที่แรงที่สุด ขัดแย้งกับทุกอย่างรวมถึง `SELECT` ธรรมดา ถือจนจบ transaction และเวลา rewrite ถูกใช้ไปภายในนั้น:
+
+```sql
+-- sql/lock-modes.sql
+BEGIN;
+ALTER TABLE products ALTER COLUMN name TYPE varchar(100);
+SELECT mode FROM pg_locks WHERE relation = 'products'::regclass AND pid = pg_backend_pid() AND mode LIKE '%Exclusive%' ORDER BY mode;
+ROLLBACK;
+```
+
+```text
+BEGIN
+ALTER TABLE
+        mode         
+---------------------
+ AccessExclusiveLock
+(1 row)
+
+ROLLBACK
+```
+
+ปัญหาที่ซ่อนอยู่คือ **lock queue** `ALTER TABLE` ต้องรอทุก transaction ที่แตะ table อยู่แล้ว และระหว่างที่มันรอ ทุกอย่างที่มาถึงทีหลังจะต่อคิวอยู่ข้างหลัง *มัน* แม้แต่ `ADD COLUMN` ที่เสร็จทันทีก็หยุดทราฟฟิกทั้งหมดได้ถ้ามี transaction ยาวเปิดอยู่ รันจริงด้วยสาม session (แต่ละตัวเป็น `psql` แยก): session A ถือการอ่านใน transaction 5 วินาที session B ลอง `ALTER TABLE` session C รัน `SELECT` ธรรมดาสองวินาทีหลัง A เริ่ม session D ดู `pg_stat_activity`:
+
+```text
+-- session A: holds an ordinary read lock inside a transaction for 5 seconds
+BEGIN
+ a_rows 
+--------
+   1000
+(1 row)
+
+COMMIT
+
+-- session B (starts 1 s later): the migration
+Timing is on.
+ALTER TABLE
+Time: 3995.829 ms (00:03.996)
+
+-- session C (starts 2 s later): a plain SELECT, nothing to do with the migration
+Timing is on.
+ c_rows 
+--------
+   1000
+(1 row)
+
+Time: 2993.559 ms (00:02.994)
+
+-- session D (looks at 3.5 s): who is waiting?
+               query                | state  | wait_event_type | wait_event 
+------------------------------------+--------+-----------------+------------
+ ALTER TABLE rw ADD COLUMN x int;   | active | Lock            | relation
+ SELECT count(*) AS c_rows FROM rw; | active | Lock            | relation
+(2 rows)
+```
+
+C แค่อ่านอย่างเดียวและถูกบล็อก 3 วินาทีเพราะต่อคิวหลัง B ซึ่งต่อคิวหลัง A ตัวป้องกันคือ `lock_timeout`: ยอมแพ้เร็วแล้วลองใหม่ แทนที่จะบล็อก table ของทุกคน:
+
+```text
+-- session B, same as before but with lock_timeout = 500ms
+SET
+Timing is on.
+ERROR:  canceling statement due to lock timeout
+Time: 502.981 ms
+
+-- session C
+Timing is on.
+ c_rows 
+--------
+   1000
+(1 row)
+
+Time: 1.527 ms
+```
+
+migration ล้มเหลวด้วย `canceling statement due to lock timeout` (SQLSTATE `55P03`) หลัง 0.5 วินาที และ C รันใน 1.5 ms ใส่ `SET lock_timeout` ที่หัวของทุก migration บนระบบที่ใช้งานอยู่ แล้วลองใหม่
+
+## การเพิ่มและลบ constraint
+
+คุณผูก constraint กับ table หลังจากมันมีอยู่แล้วได้ หรือลบตามชื่อ การตั้งชื่อ constraint ตอนสร้าง ตามที่บทก่อนแนะนำ คือสิ่งที่ทำให้การลบสะอาด
+
+```sql
+-- sql/add-constraint.sql
 ALTER TABLE products
   ADD CONSTRAINT products_price_positive CHECK (price > 0);
-
 ALTER TABLE products
   DROP CONSTRAINT products_price_positive;
 ```
 
-การเพิ่ม constraint จะสแกน row ที่มีอยู่เพื่อยืนยันว่าทุก row ผ่านเงื่อนไข ถ้ามี row ไหนไม่ผ่าน PostgreSQL จะปฏิเสธทั้งคำสั่งและไม่มีอะไรเปลี่ยนแปลง
+การเพิ่ม constraint สแกน row ที่มีอยู่เพื่อยืนยันว่าทุกตัวผ่าน ถ้า row ใดไม่ผ่าน ทั้ง statement ถูกปฏิเสธและไม่มีอะไรเปลี่ยน (บทก่อนแสดง error นั้น) การสแกนเกิดภายใต้ lock ที่แรง `NOT VALID` แยกเป็นสองขั้น: เพิ่ม constraint เพื่อให้การเขียน *ใหม่* ถูกตรวจทันที แล้วตรวจ row เก่าแยกภายใต้ lock ที่อ่อนกว่ามาก ก่อนอื่น เมื่อมี row เสียอยู่ (`qty = -3`):
+
+```sql
+-- sql/not-valid.sql
+CREATE TABLE stock (id int PRIMARY KEY, qty int);
+INSERT INTO stock VALUES (1, 5), (2, -3);
+ALTER TABLE stock ADD CONSTRAINT stock_qty_nonneg CHECK (qty >= 0) NOT VALID;
+SELECT conname, convalidated FROM pg_constraint WHERE conname = 'stock_qty_nonneg';
+```
+
+```text
+CREATE TABLE
+INSERT 0 2
+ALTER TABLE
+     conname      | convalidated 
+------------------+--------------
+ stock_qty_nonneg | f
+(1 row)
+```
+
+`convalidated = f` หมายความว่า row เก่ายังไม่ถูกตรวจ แต่ row ใหม่ถูกตรวจ:
+
+```sql
+-- @expect-error 23514
+INSERT INTO stock VALUES (3, -1);
+```
+
+```text
+ERROR:  new row for relation "stock" violates check constraint "stock_qty_nonneg"
+DETAIL:  Failing row contains (3, -1).
+```
+
+`VALIDATE CONSTRAINT` ปฏิเสธขณะมี row เสียอยู่:
+
+```sql
+-- @expect-error 23514
+ALTER TABLE stock VALIDATE CONSTRAINT stock_qty_nonneg;
+```
+
+```text
+ERROR:  check constraint "stock_qty_nonneg" of relation "stock" is violated by some row
+```
+
+แก้ข้อมูลแล้วค่อย validate ดู lock: `ShareUpdateExclusiveLock` ไม่บล็อกการอ่านหรือเขียน ต่างจาก `AccessExclusiveLock` ของ `ADD CONSTRAINT` ธรรมดา:
+
+```sql
+-- sql/validate.sql
+UPDATE stock SET qty = 0 WHERE qty < 0;
+BEGIN;
+ALTER TABLE stock VALIDATE CONSTRAINT stock_qty_nonneg;
+SELECT mode FROM pg_locks WHERE relation = 'stock'::regclass AND pid = pg_backend_pid() AND mode LIKE '%Exclusive%' ORDER BY mode;
+COMMIT;
+SELECT conname, convalidated FROM pg_constraint WHERE conname = 'stock_qty_nonneg';
+```
+
+```text
+UPDATE 1
+BEGIN
+ALTER TABLE
+           mode           
+--------------------------
+ ShareUpdateExclusiveLock
+(1 row)
+
+COMMIT
+     conname      | convalidated 
+------------------+--------------
+ stock_qty_nonneg | t
+(1 row)
+```
 
 ## การเปลี่ยนชื่อ
 
-`RENAME` เปลี่ยนชื่อของ table หรือ column ตัวเดียวโดยไม่แตะต้องข้อมูล การเปลี่ยนชื่อมีผลทันที แต่ทุกอย่างที่อ้างถึงชื่อเดิม — view, query ของแอปพลิเคชัน, รายงานที่บันทึกไว้ — คุณต้องตามไปแก้เองด้วย
+`RENAME` เปลี่ยนชื่อ table หรือ column เดียวโดยไม่แตะข้อมูล มันทันที แต่ไม่ใช่ทุกอย่างที่ตามการเปลี่ยนชื่อ view ถูกเก็บตามตัวตนของ object จึงตามไป (ด้านล่าง view ตอนนี้อ่านว่า `product_code AS sku FROM catalog_items`) ส่วน body ของฟังก์ชันเป็นแค่ข้อความและไม่ตาม:
 
 ```sql
+-- sql/rename.sql
+CREATE VIEW product_skus AS SELECT id, sku FROM products;
+CREATE FUNCTION sku_of(pid bigint) RETURNS text LANGUAGE sql AS $$ SELECT sku FROM products WHERE id = pid $$;
 ALTER TABLE products RENAME COLUMN sku TO product_code;
-
 ALTER TABLE products RENAME TO catalog_items;
+SELECT pg_get_viewdef('product_skus'::regclass) AS view_follows_the_rename;
 ```
 
-## migration ที่ปลอดภัย: กับดักของ NOT NULL
-
-อุบัติเหตุ migration ที่พบบ่อยที่สุดคือการเพิ่ม column แบบ `NOT NULL` ลงใน table ที่มี row อยู่แล้ว row ที่มีอยู่เหล่านั้นไม่มีค่าสำหรับ column ใหม่ ดังนั้น constraint จึงถูกละเมิดทันทีและคำสั่งล้มเหลว มีเส้นทางที่ปลอดภัยสองทาง: ให้ `DEFAULT` กับ column เพื่อให้ทุก row ที่มีอยู่ถูกเติมในคราวเดียว หรือเพิ่ม column แบบ nullable, backfill ค่า แล้วจึงทำให้เข้มงวดขึ้นเป็น `NOT NULL`
+```text
+CREATE VIEW
+CREATE FUNCTION
+ALTER TABLE
+ALTER TABLE
+ view_follows_the_rename 
+-------------------------
+  SELECT id,            +
+     product_code AS sku+
+    FROM catalog_items;
+(1 row)
+```
 
 ```sql
+-- @expect-error 42P01
+SELECT sku_of(1);
+```
+
+```text
+ERROR:  relation "products" does not exist
+LINE 1:  SELECT sku FROM products WHERE id = pid 
+                         ^
+QUERY:   SELECT sku FROM products WHERE id = pid 
+CONTEXT:  SQL function "sku_of" during inlining
+```
+
+query ของแอปพลิเคชัน รายงานที่บันทึกไว้ และ body ของฟังก์ชันต้องอัปเดตด้วยมือ คืนชื่อกลับสำหรับส่วนที่เหลือของบทเรียน:
+
+```sql
+-- sql/rename-back.sql
+ALTER TABLE catalog_items RENAME TO products;
+ALTER TABLE products RENAME COLUMN product_code TO sku;
+DROP VIEW product_skus;
+DROP FUNCTION sku_of(bigint);
+```
+
+## Migration ที่ปลอดภัย: กับดัก NOT NULL
+
+อุบัติเหตุ migration ที่พบบ่อยที่สุดคือการเพิ่ม column `NOT NULL` ให้ table ที่มี row อยู่แล้ว row เหล่านั้นไม่มีค่าให้ column ใหม่ constraint จึงถูกฝ่าฝืนทันทีและ statement ล้มเหลว
+
+```sql
+-- @expect-error 23502
+ALTER TABLE products ADD COLUMN currency text NOT NULL;
+```
+
+```text
+ERROR:  column "currency" of relation "products" contains null values
+```
+
+มีสองทางที่ปลอดภัย: ให้ column มี `DEFAULT` เพื่อเติมทุก row ที่มีอยู่ในคราวเดียว (แค่ metadata ถ้าเป็นค่าคงที่) หรือเพิ่ม column แบบ nullable, backfill ค่า แล้วเข้มงวดเป็น `NOT NULL` ทางที่สองเป็นตัวเลือกมาตรฐานเมื่อไม่มี default ที่สมเหตุสมผลเพียงค่าเดียว เพราะให้คุณคำนวณค่าของแต่ละ row ก่อนล็อก column (เมื่อมี `CHECK (region IS NOT NULL)` ที่ validate แล้ว `SET NOT NULL` ข้ามการสแกน table ได้ ดู [docs](https://www.postgresql.org/docs/18/sql-altertable.html))
+
+```sql
+-- sql/not-null-paths.sql
 -- Path 1: a default fills every existing row in one step
 ALTER TABLE products
   ADD COLUMN currency text NOT NULL DEFAULT 'USD';
@@ -85,13 +436,75 @@ ALTER TABLE products
 ALTER TABLE products ADD COLUMN region text;
 UPDATE products SET region = 'global' WHERE region IS NULL;
 ALTER TABLE products ALTER COLUMN region SET NOT NULL;
+SELECT currency, region, count(*) FROM products GROUP BY 1, 2;
 ```
 
-เส้นทางที่สองเป็นตัวเลือกมาตรฐานเมื่อไม่มี default เดียวที่สมเหตุสมผล เพราะเปิดให้คุณคำนวณค่าของแต่ละ row ให้เสร็จก่อน แล้วค่อย lock column นั้นไว้
+```text
+ALTER TABLE
+ALTER TABLE
+UPDATE 1000
+ALTER TABLE
+ currency | region | count 
+----------+--------+-------
+ USD      | global |  1000
+(1 row)
+```
 
-## รัน migration ใน transaction
+## การรัน migration ใน transaction
 
-คำสั่ง `ALTER TABLE` ส่วนใหญ่ใน PostgreSQL เป็น transactional ดังนั้นคุณห่อ migration หลายขั้นตอนไว้ใน transaction เดียวได้ ให้ทำงานแบบทั้งหมดหรือไม่ทำเลย หากขั้นตอนใดล้มเหลว `ROLLBACK` จะทิ้ง table ไว้เหมือนเดิมทุกประการ
+statement `ALTER TABLE` ส่วนใหญ่ใน PostgreSQL เป็น transactional (DDL เป็น transactional ที่นี่ ต่างจากฐานข้อมูลอื่นบางตัว) คุณจึงครอบ migration หลายขั้นด้วย transaction ให้ apply แบบทั้งหมดหรือไม่เลยได้ ถ้าขั้นใดล้มเหลว `ROLLBACK` ทำให้ table กลับเหมือนเดิม:
+
+```sql
+-- sql/transactional-ddl.sql
+BEGIN;
+ALTER TABLE products ADD COLUMN tmp_flag boolean;
+ALTER TABLE products DROP COLUMN region, DROP COLUMN currency;
+SELECT count(*) AS columns_inside_tx FROM information_schema.columns WHERE table_name = 'products';
+ROLLBACK;
+SELECT count(*) AS columns_after_rollback FROM information_schema.columns WHERE table_name = 'products';
+```
+
+```text
+BEGIN
+ALTER TABLE
+ALTER TABLE
+ columns_inside_tx 
+-------------------
+                 6
+(1 row)
+
+ROLLBACK
+ columns_after_rollback 
+------------------------
+                      7
+(1 row)
+```
+
+ภายใน transaction table มีรูปร่างต่างออกไป (เพิ่มหนึ่ง column ลบสอง column) หลัง `ROLLBACK` ก็เหมือนไม่มีอะไรเกิดขึ้น ตัว migration เอง:
+
+```sql
+-- sql/migration-in-tx.sql
+BEGIN;
+ALTER TABLE products ADD COLUMN region2 text;
+UPDATE products SET region2 = 'global' WHERE region2 IS NULL;
+ALTER TABLE products ALTER COLUMN region2 SET NOT NULL;
+COMMIT;
+SELECT count(*) AS migrated FROM products WHERE region2 = 'global';
+```
+
+```text
+BEGIN
+ALTER TABLE
+UPDATE 1000
+ALTER TABLE
+COMMIT
+ migrated 
+----------
+     1000
+(1 row)
+```
+
+นี่คือ migration เดียวกันจากแต่ละ driver แต่ละตัวรันหนึ่งครั้งกับฐานข้อมูลชั่วคราวที่มี table `products` 100 row:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
@@ -166,71 +579,180 @@ ALTER TABLE products ALTER COLUMN region SET NOT NULL;
   </TabItem>
 </Tabs>
 
-เนื่องจากสามขั้นตอนนี้รันภายใน transaction เดียว table จึงไม่เคยถูกมองเห็นโดย session อื่นในสถานะที่ migrate ไปได้ครึ่งทาง
+```text
+$ node app.mjs        # pg 8.23.0 (100 rows in products)
+{ count: '100' }
+
+$ python app.py        # psycopg 3.3.6
+(100,)
+
+$ go run .        # pgx v5.11.0 (the snippet sits inside a func returning error)
+migrated: 100
+
+$ cargo run        # sqlx 0.9.0
+migrated: 100
+```
+
+เพราะสามขั้นรันภายใน transaction เดียว session อื่นจะไม่เห็น table ในสภาพ migrate ไปครึ่งเดียว
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอให้เพิ่ม public identifier ให้ table ใหญ่ มันรู้ว่า PostgreSQL 11+ เพิ่ม column ที่มี default "ทันที" เขียนไว้ในคอมเมนต์ และเขียนสิ่งนี้:
+
+<SpotTheBug lang="sql" code={`-- migration 0042_add_public_id.sql
+-- AI comment: "PostgreSQL 11+ adds columns with defaults instantly, so this is safe on a big table"
+ALTER TABLE big ADD COLUMN public_id uuid NOT NULL DEFAULT gen_random_uuid();`}>
+
+คอมเมนต์จริงครึ่งเดียว จึงน่าเชื่อ default ที่เป็น *ค่าคงที่* ทันที ส่วน `gen_random_uuid()` เป็น volatile PostgreSQL จึงต้องคำนวณค่าต่างกันให้ทุก row ที่มีอยู่และ rewrite ทั้ง table ภายใต้ `ACCESS EXCLUSIVE` (matrix ข้างบน แถว `gen_random_uuid()`) บน table หนึ่งล้าน row วัดบน Mac เครื่องนี้:
+
+```sql
+-- sql/big-table.sql
+CREATE TABLE big (id int, payload text);
+INSERT INTO big SELECT g, md5(g::text) FROM generate_series(1, 1000000) g;
+ANALYZE big;
+```
+
+```sql
+-- sql/big-add-uuid.sql
+\timing on
+ALTER TABLE big ADD COLUMN flag int DEFAULT 0;
+ALTER TABLE big ADD COLUMN created timestamptz DEFAULT now();
+ALTER TABLE big ADD COLUMN public_id uuid NOT NULL DEFAULT gen_random_uuid();
+\timing off
+```
+
+```text
+Timing is on.
+ALTER TABLE
+Time: 276.200 ms
+ALTER TABLE
+Time: 1.043 ms
+ALTER TABLE
+Time: 1080.700 ms (00:01.081)
+Timing is off.
+```
+
+column ที่ default เป็นค่าคงที่และ `now()` ใช้ 276 ms และ 1 ms (ตัวเลขแรกรวมการรอ lock บน table ที่เพิ่งโหลด น่าจะเป็น autovacuum/analyze เบื้องหลัง ซึ่งก็คือ lock queue ที่กล่าวถึงก่อนหน้า) ส่วน column ที่ default เป็น volatile ใช้ 1,081 ms ทั้งหมดขณะ table ถูกล็อกจากการอ่านและเขียน เมื่อคูณกับ table จริง (index, TOAST, replica ที่ replay การ rewrite) นั่นคือเหตุขัดข้อง สูตรที่ปลอดภัยคือแยกการเปลี่ยนแปลง: เพิ่ม column โดยไม่มี default (ทันที) ตั้ง default สำหรับ row *อนาคต* (ทันที แค่ metadata) แล้ว backfill row ที่มีอยู่เป็นชุด ๆ และค่อยบังคับ `NOT NULL`:
+
+```sql
+-- sql/big-add-uuid-safe.sql
+\timing on
+ALTER TABLE big ADD COLUMN public_id2 uuid;
+ALTER TABLE big ALTER COLUMN public_id2 SET DEFAULT gen_random_uuid();
+UPDATE big SET public_id2 = gen_random_uuid() WHERE id BETWEEN 1 AND 100000;
+\timing off
+SELECT count(public_id2) AS backfilled_so_far FROM big;
+```
+
+```text
+Timing is on.
+ALTER TABLE
+Time: 2.091 ms
+ALTER TABLE
+Time: 0.550 ms
+UPDATE 100000
+Time: 233.839 ms
+Timing is off.
+ backfilled_so_far 
+-------------------
+            100000
+(1 row)
+```
+
+รัน `UPDATE` ซ้ำสำหรับช่วง id ถัดไป (หนึ่ง transaction ต่อชุดทำให้ lock สั้นและให้ autovacuum ตามทัน) จากนั้นเพิ่ม `CHECK (public_id2 IS NOT NULL) NOT VALID`, `VALIDATE` มัน และ `SET NOT NULL`
+
+</SpotTheBug>
+
+## Mental Model
+
+ทุก `ALTER TABLE` มีสองต้นทุน: **งานมากแค่ไหน** (metadata อย่างเดียว สแกน table หรือ rewrite ทั้งหมด) และ **lock แรงแค่ไหน นานเท่าไร** (รวมเวลาที่ต่อคิว) การเปลี่ยน type หรือ default ที่ต้องการรูปร่าง row กายภาพใหม่จะ rewrite ส่วนการเปลี่ยนที่แค่เปลี่ยน catalog หรือแค่ต้องอ่าน row ไม่ rewrite migration ที่ปลอดภัยคืออันที่ทำให้ทั้งสองต้นทุนเล็ก: ใช้รูปแบบถูก รอ lock ด้วย timeout และแยกทุกอย่างที่แพงเป็นขั้นที่ lock อ่อน
 
 ## เคล็ดลับและข้อควรระวัง
 
-- `ALTER TABLE` ถือ lock บน table เสมอ และหลายรูปแบบถือ lock แรงพอที่จะปิดกั้นการอ่านและการเขียนชั่วครู่ ดังนั้นบน table production ที่ใช้งานหนัก ให้เลือกคำสั่งที่สั้นและตรงเป้า แล้วรันในช่วงที่ traffic เงียบ
-- การเพิ่ม column แบบ `NOT NULL` ที่มี `DEFAULT` เป็นค่าคงที่นั้นเร็วใน PostgreSQL สมัยใหม่ เพราะไม่ได้เขียนทุก row ใหม่ แต่การเปลี่ยนชนิดของ column ยังคงสแกนและเขียน table ใหม่
-- ห่อ migration หลายขั้นตอนไว้ใน transaction เพื่อให้ความล้มเหลวกลางคันถูก roll back อย่างสะอาดและไม่ทิ้ง schema ไว้ในสภาพเปลี่ยนไปบางส่วน
-- การเพิ่ม constraint จะตรวจสอบทุก row ที่มีอยู่ บน table ขนาดใหญ่การสแกนนี้อาจช้า ลองพิจารณาเพิ่ม constraint แบบ `NOT VALID` ก่อน แล้วค่อย validate แยกต่างหากเมื่อคุณต้องการลดเวลา lock ให้น้อยที่สุด
-- `DROP COLUMN` และ `DROP CONSTRAINT` ย้อนกลับไม่ได้เมื่อ commit แล้ว ยืนยันว่าไม่มีอะไรขึ้นต่อสิ่งที่คุณกำลังจะลบ และใช้ transaction ที่ roll back ได้ระหว่างที่คุณตรวจสอบ
+- `ALTER TABLE` ถือ lock บน table และ lock queue เปลี่ยนการเปลี่ยนแปลงระดับมิลลิวินาทีให้เป็นเหตุขัดข้องได้ เริ่มทุก migration บน production ด้วย `SET lock_timeout` และพร้อมลองใหม่
+- การเพิ่ม column ที่มี `DEFAULT` เป็นค่าคงที่ (หรือ `now()`) เร็วใน PostgreSQL สมัยใหม่เพราะไม่ rewrite ทุก row ส่วน default แบบ volatile และการเปลี่ยน type ส่วนใหญ่ rewrite
+- ครอบ migration หลายขั้นด้วย transaction เพื่อให้ความล้มเหลวกลางทาง rollback อย่างสะอาดและไม่ทิ้ง schema ที่เปลี่ยนไปครึ่งเดียว
+- เพิ่ม constraint เป็น `NOT VALID` และ `VALIDATE CONSTRAINT` แยกบน table ใหญ่ การ validate ใช้ lock ที่ไม่บล็อกทราฟฟิกปกติ
+- `DROP COLUMN` และ `DROP CONSTRAINT` ย้อนกลับไม่ได้เมื่อ commit แล้ว ยืนยันว่าไม่มีอะไรพึ่งพาสิ่งที่คุณกำลังลบ และพึ่ง transaction ที่ rollback ได้ระหว่างตรวจ
+- การเปลี่ยนชื่อไม่อัปเดต body ของฟังก์ชัน โค้ดแอปพลิเคชัน หรือรายงานที่บันทึกไว้
 
-<Callout title="migrate ไปข้างหน้า แต่อย่ามืดบอด">
-มองทุกการเปลี่ยน schema เป็น migration คือขั้นตอนเล็ก ๆ ที่มีชื่อกำกับ ย้อนกลับได้ และทดสอบได้ก่อนขึ้น production เพิ่ม column พร้อม default หรือ backfill ทีหลัง ทำ constraint ให้เข้มงวดขึ้นหลังข้อมูลสะอาดแล้วเท่านั้น และรันการเปลี่ยนแปลงหลายขั้นตอนใน transaction เดียว migration ที่ระมัดระวังจะไม่มีใครรู้สึก ส่วน migration ที่สะเพร่าคือเหตุระบบล่ม
+<Callout title="Migrate ไปข้างหน้า อย่าทำแบบมั่ว">
+ปฏิบัติต่อทุกการเปลี่ยน schema เป็น migration: ขั้นตอนเล็ก มีชื่อ ย้อนกลับได้ ที่คุณทดสอบได้ก่อนแตะ production เพิ่ม column พร้อม default หรือ backfill เข้มงวด constraint หลังข้อมูลสะอาดเท่านั้น และรันการเปลี่ยนหลายขั้นใน transaction migration ที่รอบคอบผู้ใช้มองไม่เห็น migration ที่ประมาทคือเหตุขัดข้อง
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| migration แบบ online/non-blocking | ปลอดภัยแม้รันตอนช่วงเวลาทำงานปกติ ไม่กระทบ traffic | ต้องเขียนหลายขั้นตอนและวางแผนมากขึ้น |
-| `ALTER TABLE` แบบตรงไปตรงมา | เขียนและรันได้เร็ว โค้ดสั้น | อาจถือ lock แบบเข้มงวดจน block production traffic บน table ใหญ่ |
-| เพิ่ม column พร้อม `DEFAULT` เป็นค่าคงที่ (PostgreSQL รุ่นใหม่) | เป็น metadata-only ไม่เขียนทุก row ใหม่ จึงเร็วมาก | ใช้ได้เฉพาะ default ที่เป็นค่าคงที่ ไม่ใช่ expression ที่คำนวณต่อ row |
-| เปลี่ยนชนิดของ column ด้วย `ALTER COLUMN ... TYPE` | ทำได้ตรง ๆ ในคำสั่งเดียว | ทำให้เกิด full table rewrite สแกนและเขียนทุก row ใหม่ |
+| migration แบบออนไลน์/ไม่บล็อก (แยกขั้น, `NOT VALID`, เป็นชุด) | ปลอดภัยแม้ในเวลาทำการปกติ ไม่กระทบทราฟฟิก | ต้องมีหลายขั้นและวางแผนมากขึ้นเพื่อเขียน |
+| `ALTER TABLE` ตรง ๆ | เขียนและรันเร็ว โค้ดสั้น | อาจถือ lock เข้มที่บล็อกทราฟฟิก production บน table ใหญ่ |
+| เพิ่ม column ที่มี `DEFAULT` เป็นค่าคงที่ | แค่ metadata — ไม่ rewrite ทุก row จึงเร็วมาก | ต้องเป็นค่าคงที่หรือ stable เท่านั้น `gen_random_uuid()` rewrite (วัดข้างบน) |
+| เปลี่ยน type ของ column ด้วย `ALTER COLUMN ... TYPE` | ตรงไปตรงมา statement เดียว | บางการเปลี่ยน rewrite table (ดู matrix) บางอันไม่ |
+| `lock_timeout` บน migration | migration ไม่ทำให้ทราฟฟิกกองอยู่ข้างหลัง | อาจล้มเหลวและต้องลองใหม่ |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **รัน `ALTER TABLE ... TYPE` บน table ขนาดใหญ่ตอน peak traffic** — คำสั่งนี้ถือ exclusive lock ระหว่าง rewrite table ทั้งก้อน ถ้ารันตอนระบบมีโหลดสูงจะ block ทั้ง read และ write เป็นเวลานาน
-- **เปลี่ยนชนิด column โดยไม่ตรวจ `USING` ให้ถูกต้อง** — ถ้านิพจน์แปลงค่าไม่ตรงกับข้อมูลเดิมจริง ๆ อาจได้ค่าที่ผิดเพี้ยนหรือคำสั่งล้มเหลวกลางทาง
-- **เพิ่ม column แบบ `NOT NULL` โดยไม่มี default แล้วลืม backfill** — row ที่มีอยู่แล้วไม่มีค่าให้ column ใหม่ ทำให้ constraint ถูกละเมิดทันทีและคำสั่งล้มเหลว ต้อง backfill ก่อนค่อยตั้ง `NOT NULL`
-
-> 💡 ตัวอย่างจากของจริง
->
-> **[แนวทาง migration ของ GitLab](https://docs.gitlab.com/development/database/avoiding_downtime_in_migrations/)** — กำหนดให้ deploy โค้ดฝั่งแอปก่อนค่อยเพิ่ม `NOT NULL` constraint และแนะนำให้เพิ่ม column แบบ nullable ก่อนแล้วค่อย backfill แยกต่างหาก เพื่อเลี่ยงการถือ lock นาน ๆ บนฐานข้อมูล production ขนาดใหญ่ระหว่าง deploy
->
-> **ทีมที่ดูแลระบบ schema ขนาดใหญ่มาก** — เลือกใช้ pattern แบบ `pg_online_schema_change`-style หรือแบ่ง migration เป็นหลายขั้นตอนเล็ก ๆ โดยเฉพาะกับ table ขนาดใหญ่ เพื่อไม่ให้การเปลี่ยน schema กระทบ traffic การใช้งานจริงระหว่าง deploy
+- **"`ALTER COLUMN TYPE` ทุกอันต้อง rewrite table"** หลายอันไม่ (matrix ข้างบน) เช่นการขยาย `numeric(10,2)` เป็น `numeric(12,2)` ไม่ rewrite
+- **"`ALTER` ที่เสร็จทันทีทำร้าย production ไม่ได้"** มันยังต้องได้ lock ก่อน เมื่อต่อคิวหลัง transaction ยาวตัวเดียว มันบล็อก `SELECT` ธรรมดาไป 3 วินาที (ข้างบน)
+- **"PostgreSQL 11+ ทำให้ `ADD COLUMN ... DEFAULT` ทุกแบบทันที"** เฉพาะ default ที่ไม่ volatile
+- **"การเปลี่ยนชื่อปลอดภัยเพราะ view อัปเดตเอง"** view ตามไป แต่ body ของฟังก์ชันและ query ของแอปไม่ตาม
+- **"`NOT NULL` ต้อง rewrite"** ต้องสแกน ไม่ใช่ rewrite ถ้ามี CHECK ที่ validate แล้วก็ข้ามแม้แต่การสแกนได้
 
 export const quizAltering = [
   {
-    q: 'เหตุใดการเพิ่ม column แบบ NOT NULL โดยไม่มี default จึงล้มเหลวบน table ที่มี row อยู่แล้ว?',
+    q: 'ทำไมการเพิ่ม column NOT NULL โดยไม่มี default จึงล้มเหลวกับ table ที่มี row อยู่แล้ว?',
     options: [
-      'column แบบ NOT NULL ไม่ได้รับอนุญาตหลังการสร้าง',
-      'row ที่มีอยู่จะไม่มีค่า จึงละเมิด constraint',
+      'column NOT NULL ไม่ได้รับอนุญาตหลังสร้าง',
+      'row ที่มีอยู่จะไม่มีค่า ซึ่งฝ่าฝืน constraint',
       'ALTER TABLE เพิ่ม column ไม่ได้',
-      'ALTER TABLE จะ lock table ไว้ตลอดไป',
+      'มัน lock table ตลอดไป',
     ],
     answer: 1,
+    explain: 'บทเรียนแสดง `column "currency" of relation "products" contains null values` (SQLSTATE 23502) ให้ default หรือเพิ่มเป็น nullable, backfill แล้ว SET NOT NULL',
   },
   {
-    q: 'อะไรคือรูปแบบที่ปลอดภัยเมื่อไม่มี default เดียวที่สมเหตุสมผลสำหรับ column แบบ NOT NULL ใหม่?',
+    q: 'รูปแบบที่ปลอดภัยเมื่อไม่มี default ที่สมเหตุสมผลเพียงค่าเดียวสำหรับ column NOT NULL ใหม่คืออะไร?',
     options: [
-      'drop และสร้าง table ใหม่',
-      'เพิ่ม column แบบ nullable ก่อน, backfill ค่า แล้วค่อยตั้ง NOT NULL',
-      'ปิดใช้งาน constraints ชั่วคราว',
+      'drop แล้วสร้าง table ใหม่',
+      'เพิ่มเป็น nullable, backfill ค่า แล้ว set NOT NULL',
+      'ปิด constraint ชั่วคราว',
       'ใช้ CHECK แทน',
     ],
     answer: 1,
+    explain: 'การเพิ่มแบบ nullable เป็นแค่ metadata การ backfill คำนวณค่าของแต่ละ row และ SET NOT NULL แค่ต้องสแกน (ไม่ rewrite)',
   },
   {
-    q: 'เหตุใดจึงห่อ migration ของ ALTER TABLE หลายขั้นตอนไว้ใน transaction?',
+    q: 'ทำไมจึงครอบ migration `ALTER TABLE` หลายขั้นด้วย transaction?',
     options: [
       'เพื่อให้รันเร็วขึ้น',
-      'เพื่อให้ roll back ได้สะอาดเมื่อล้มเหลว และไม่ทิ้ง schema ไว้ครึ่ง ๆ กลาง ๆ',
-      'เพื่อหลีกเลี่ยงการถือ lock ใด ๆ',
-      'เพื่อข้ามการ validate row ที่มีอยู่',
+      'เพื่อให้ความล้มเหลว rollback สะอาดและ schema ไม่ถูกทิ้งไว้เปลี่ยนไปครึ่งเดียว',
+      'เพื่อไม่ต้องถือ lock ใด ๆ',
+      'เพื่อข้ามการตรวจ row ที่มีอยู่',
     ],
     answer: 1,
+    explain: 'DDL ของ PostgreSQL เป็น transactional: ROLLBACK ในบทเรียนคืนชุด column เดิมเป๊ะ transaction ไม่ได้ลบ lock แต่ถือไว้จนจบ',
+  },
+  {
+    q: 'statement ใดต่อไปนี้ rewrite ทั้ง table บน PostgreSQL 18?',
+    options: [
+      '`ALTER COLUMN n TYPE numeric(12,2)` เมื่อ `n` เคยเป็น `numeric(10,2)`',
+      '`ADD COLUMN c timestamptz DEFAULT now()`',
+      '`ADD COLUMN c uuid DEFAULT gen_random_uuid()`',
+      '`DROP COLUMN c`',
+    ],
+    answer: 2,
+    explain: 'default แบบ volatile ต้องการค่าต่างกันต่อ row จึง rewrite table (filenode เปลี่ยนใน matrix) อีกสามตัวเป็น "no rewrite"',
+  },
+  {
+    q: 'migration รัน `ALTER TABLE t ADD COLUMN x int` ขณะที่อีก session มี transaction ยาวที่เปิดค้างและอ่าน `t` แล้ว session อื่นที่ SELECT จาก `t` หลังจากนั้นจะเป็นอย่างไร?',
+    options: [
+      'อ่านได้ปกติ ALTER มองไม่เห็น',
+      'ต่อคิวหลัง ALTER ที่รออยู่จนกว่า transaction ยาวจะจบ',
+      'ล้มเหลวด้วย syntax error',
+      'อ่าน column ใหม่เป็น NULL',
+    ],
+    answer: 1,
+    explain: 'ALTER ที่รออยู่ถือตำแหน่งใน lock queue ที่ขัดแย้งกับทุกอย่าง ตั้ง `lock_timeout` ให้ ALTER ล้มเร็วแทน (บทเรียน: C รอ 3 วินาทีเมื่อไม่มี และ 1.5 ms เมื่อมี)',
   },
 ];
 
