@@ -1,6 +1,6 @@
 ---
 title: Isolation levels
-description: Read Committed, Repeatable Read, and Serializable — the read anomalies each one prevents, and how to set the level with SET TRANSACTION ISOLATION LEVEL.
+description: Read Committed, Repeatable Read, and Serializable — every anomaly reproduced with two real psql sessions, the exact 40001 error text, and a retry loop proved in four drivers.
 sidebar:
   order: 3
 ---
@@ -10,90 +10,334 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
 When many transactions run at once, they can interfere with each other in ways that produce surprising results. An **isolation level** is the dial that controls how much one transaction is protected from the in-progress work of others. Turning the dial up prevents more anomalies but makes conflicts more likely to fail and need a retry.
 
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026). Each concurrency example is a real run of two `psql` processes started at the same moment, printed as they came back. A line `\o /dev/null` around `pg_sleep(n)` just hides the empty result of the sleep, so a session can wait while the other one works.
+
+Two tables are used: `accounts` for reads and updates, and `doctors` for the classic write-skew story (a hospital rule says at least one doctor must stay on call).
+
+```sql
+-- sql/setup.sql
+CREATE TABLE accounts (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner   text NOT NULL,
+  balance numeric NOT NULL CHECK (balance >= 0)
+);
+INSERT INTO accounts (owner, balance) VALUES ('Ada', 500), ('Linus', 100);
+
+CREATE TABLE doctors (name text PRIMARY KEY, on_call boolean NOT NULL);
+INSERT INTO doctors VALUES ('alice', true), ('bob', true);
+```
+
 ## The anomalies
 
-The SQL standard names a set of phenomena that weaker isolation allows. PostgreSQL's levels are defined by which of these they forbid.
+The SQL standard names a set of phenomena that weaker isolation allows. PostgreSQL's levels are defined by which of these they forbid ([docs, table 13.1](https://www.postgresql.org/docs/18/transaction-iso.html)).
 
 - **Dirty read** — reading a row another transaction has changed but not yet committed. PostgreSQL never allows this at any level.
 - **Non-repeatable read** — reading the same row twice in one transaction and getting different committed values because another transaction changed it in between.
 - **Phantom read** — running the same search twice and finding rows that were not there the first time because another transaction inserted them.
-- **Write skew** — two transactions each read an overlapping set of rows, then each writes based on what it read, producing a result no single serial order could have created.
+- **Serialization anomaly (write skew is the classic one)** — two transactions each read an overlapping set of rows, then each writes based on what it read, producing a result no single serial order could have created.
 
-## The three levels you can choose
+This is what PostgreSQL allows at each level, straight from the documentation. The last column says how this lesson reproduces the cell:
 
-PostgreSQL offers three usable levels. (A fourth standard name, Read Uncommitted, exists but behaves like Read Committed here, because dirty reads are never permitted.)
+| Level | Dirty read | Non-repeatable read | Phantom read | Serialization anomaly | Proved here |
+|---|---|---|---|---|---|
+| Read Uncommitted | not possible (behaves as Read Committed) | possible | possible | possible | dirty-read run |
+| Read Committed (default) | not possible | possible | possible | possible | Ada 500 then 600; count 2 then 3 |
+| Repeatable Read | not possible | not possible | not possible in PostgreSQL | possible | 500 and 500; write skew commits both |
+| Serializable | not possible | not possible | not possible | not possible | write skew raises `40001` |
+
+Read Uncommitted is accepted as a name but internally it is Read Committed, because PostgreSQL never shows uncommitted data. Repeatable Read is stronger than the SQL standard requires: phantoms cannot happen either.
+
+## Read Committed: a fresh snapshot per statement
+
+Read Committed is the default. Each statement sees a snapshot of everything committed before that statement began, which is why two reads in the same transaction can disagree. Session A reads Ada's balance and counts the accounts with at least 100, waits two seconds, and reads again. One second in, session B adds 100 to Ada and inserts a new account, both committed at once:
 
 ```text
-Isolation level   | Dirty read | Non-repeatable read | Phantom read | Write skew
-------------------+------------+---------------------+--------------+-----------
-Read Committed    | No         | Possible            | Possible     | Possible
-Repeatable Read   | No         | No                  | No           | Possible
-Serializable      | No         | No                  | No           | No
+-- session A: script
+BEGIN;
+SELECT balance AS ada_first FROM accounts WHERE owner = 'Ada';
+SELECT count(*) AS rich_first FROM accounts WHERE balance >= 100;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+SELECT balance AS ada_second FROM accounts WHERE owner = 'Ada';
+SELECT count(*) AS rich_second FROM accounts WHERE balance >= 100;
+COMMIT;
+-- session A: psql output
+BEGIN
+ ada_first 
+-----------
+       500
+(1 row)
+
+ rich_first 
+------------
+          2
+(1 row)
+
+ ada_second 
+------------
+        600
+(1 row)
+
+ rich_second 
+-------------
+           3
+(1 row)
+
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance + 100 WHERE owner = 'Ada';
+INSERT INTO accounts (owner, balance) VALUES ('Grace', 300);
+-- session B: psql output
+UPDATE 1
+INSERT 0 1
 ```
 
-Read Committed is the default. Each statement in it sees a fresh snapshot of all data committed before that statement began, which is why two reads in the same transaction can disagree.
+The second read sees Ada's new balance (a **non-repeatable read**: 500 became 600) and a new row (a **phantom**: the count went from 2 to 3). Both changes were committed by B between A's two statements.
+
+## Repeatable Read: one snapshot per transaction
+
+At Repeatable Read the first query takes a snapshot and every later statement in the transaction uses it. The very same script, with only the first line changed:
+
+```text
+-- session A: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT balance AS ada_first FROM accounts WHERE owner = 'Ada';
+SELECT count(*) AS rich_first FROM accounts WHERE balance >= 100;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+SELECT balance AS ada_second FROM accounts WHERE owner = 'Ada';
+SELECT count(*) AS rich_second FROM accounts WHERE balance >= 100;
+COMMIT;
+-- session A: psql output
+BEGIN
+ ada_first 
+-----------
+       500
+(1 row)
+
+ rich_first 
+------------
+          2
+(1 row)
+
+ ada_second 
+------------
+        500
+(1 row)
+
+ rich_second 
+-------------
+           2
+(1 row)
+
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance + 100 WHERE owner = 'Ada';
+INSERT INTO accounts (owner, balance) VALUES ('Grace', 300);
+-- session B: psql output
+UPDATE 1
+INSERT 0 1
+```
+
+Ada is still 500 and the count is still 2, although B had committed both changes long before A's second read. The snapshot is the reason reads are stable; the price is that A is now working with data it knows may be stale, which matters as soon as A wants to write.
+
+## Dirty reads never happen
+
+Asking for `READ UNCOMMITTED` is allowed, and `SHOW` confirms the level was accepted. Session B updates Ada but does not commit; A, one second later, still sees the committed value:
+
+```text
+-- session A: script
+BEGIN ISOLATION LEVEL READ UNCOMMITTED;
+SHOW transaction_isolation;
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+SELECT balance AS ada_sees FROM accounts WHERE owner = 'Ada';
+COMMIT;
+-- session A: psql output
+BEGIN
+ transaction_isolation 
+-----------------------
+ read uncommitted
+(1 row)
+
+ ada_sees 
+----------
+      500
+(1 row)
+
+COMMIT
+
+-- session B: script
+BEGIN;
+UPDATE accounts SET balance = balance + 100 WHERE owner = 'Ada';
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+ROLLBACK;
+-- session B: psql output
+BEGIN
+UPDATE 1
+ROLLBACK
+```
 
 ## Setting the level
 
-You raise the level on a transaction with `SET TRANSACTION ISOLATION LEVEL`, issued right after `BEGIN` and before any data is read or written. The drivers expose the same idea through their transaction options.
+You choose the level for one transaction, either with `BEGIN ISOLATION LEVEL ...` or with `SET TRANSACTION ISOLATION LEVEL ...` as the first statement after `BEGIN`. The default for new transactions is `default_transaction_isolation`.
+
+```sql
+-- sql/set-level.sql
+SHOW default_transaction_isolation;
+
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SHOW transaction_isolation;
+COMMIT;
+
+-- the same thing in one line
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SHOW transaction_isolation;
+ROLLBACK;
+```
+
+```text
+ default_transaction_isolation 
+-------------------------------
+ read committed
+(1 row)
+
+BEGIN
+SET
+ transaction_isolation 
+-----------------------
+ repeatable read
+(1 row)
+
+COMMIT
+BEGIN
+ transaction_isolation 
+-----------------------
+ serializable
+(1 row)
+
+ROLLBACK
+```
+
+Once any query has run, the level can no longer change ([docs](https://www.postgresql.org/docs/18/sql-set-transaction.html)):
+
+```sql
+-- @expect-error 25001
+BEGIN;
+SELECT 1;
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+```
+
+```text
+BEGIN
+ ?column? 
+----------
+        1
+(1 row)
+
+ERROR:  SET TRANSACTION ISOLATION LEVEL must be called before any query
+```
+
+The drivers expose the same idea through their transaction options. This snippet reads Ada's balance twice at Repeatable Read; while it sleeps between the reads, a second session (started from the script) commits an update. Every driver sees the same balance twice:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    BEGIN;
-    SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+    -- sql/level-rr.sql
+    BEGIN ISOLATION LEVEL REPEATABLE READ;
     SELECT balance FROM accounts WHERE owner = 'Ada';
-    -- ... later in the same transaction, the value is guaranteed unchanged
-    SELECT balance FROM accounts WHERE owner = 'Ada';
+    -- ... another session commits an UPDATE to Ada's row here ...
+    SELECT balance FROM accounts WHERE owner = 'Ada';  -- same answer as the first read
     COMMIT;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    await client.query('BEGIN');
-    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-    const a = await client.query("SELECT balance FROM accounts WHERE owner = 'Ada'");
-    const b = await client.query("SELECT balance FROM accounts WHERE owner = 'Ada'");
-    await client.query('COMMIT');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      const first = await client.query("SELECT balance FROM accounts WHERE owner = 'Ada'");
+      await client.query('SELECT pg_sleep(2)'); // another session commits an UPDATE in this gap
+      const second = await client.query("SELECT balance FROM accounts WHERE owner = 'Ada'");
+      await client.query('COMMIT');
+      console.log(first.rows[0].balance, second.rows[0].balance);
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
+    conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ  # set it before the transaction starts
     with conn.transaction():
-        conn.isolation_level = "REPEATABLE READ"  # set before the first query
-        cur.execute("SELECT balance FROM accounts WHERE owner = 'Ada'")
-        first = cur.fetchone()
-        cur.execute("SELECT balance FROM accounts WHERE owner = 'Ada'")
-        second = cur.fetchone()
+        first = cur.execute("SELECT balance FROM accounts WHERE owner = 'Ada'").fetchone()[0]
+        cur.execute("SELECT pg_sleep(2)")  # another session commits an UPDATE in this gap
+        second = cur.execute("SELECT balance FROM accounts WHERE owner = 'Ada'").fetchone()[0]
+    print(first, second)
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    tx, _ := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-    var first, second int64
-    tx.QueryRow(ctx, "SELECT balance FROM accounts WHERE owner = 'Ada'").Scan(&first)
-    tx.QueryRow(ctx, "SELECT balance FROM accounts WHERE owner = 'Ada'").Scan(&second)
-    tx.Commit(ctx)
+    tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback(ctx)
+    var first, second string
+    tx.QueryRow(ctx, "SELECT balance::text FROM accounts WHERE owner = 'Ada'").Scan(&first)
+    tx.Exec(ctx, "SELECT pg_sleep(2)") // another session commits an UPDATE in this gap
+    tx.QueryRow(ctx, "SELECT balance::text FROM accounts WHERE owner = 'Ada'").Scan(&second)
+    fmt.Println(first, second)
+    return tx.Commit(ctx)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *tx).await?;
-    let first: i64 = sqlx::query_scalar("SELECT balance FROM accounts WHERE owner = 'Ada'")
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").execute(&mut *tx).await?;
+    let first: String = sqlx::query_scalar("SELECT balance::text FROM accounts WHERE owner = 'Ada'")
         .fetch_one(&mut *tx).await?;
-    let second: i64 = sqlx::query_scalar("SELECT balance FROM accounts WHERE owner = 'Ada'")
+    sqlx::query("SELECT pg_sleep(2)").execute(&mut *tx).await?; // another session commits an UPDATE in this gap
+    let second: String = sqlx::query_scalar("SELECT balance::text FROM accounts WHERE owner = 'Ada'")
         .fetch_one(&mut *tx).await?;
+    println!("{first} {second}");
     tx.commit().await?;
     ```
   </TabItem>
 </Tabs>
 
-**In pgAdmin:** open two Query Tool tabs side by side, set a high isolation level in one with `BEGIN; SET TRANSACTION ISOLATION LEVEL ...`, and run an `UPDATE` in the other tab to watch how the first transaction's repeated reads stay stable.
+```text
+$ (each snippet run once; the scratch database is reset before every run)
+[REPEATABLE READ, two reads] Node.js (pg 8.23.0): 500 500 | afterwards Ada 600, Linus 100
+[REPEATABLE READ, two reads] Python (psycopg 3.3.6): 500 500 | afterwards Ada 600, Linus 100
+[REPEATABLE READ, two reads] Go (pgx v5.11.0): 500 500 | afterwards Ada 600, Linus 100
+[REPEATABLE READ, two reads] Rust (sqlx 0.9.0): 500 500 | afterwards Ada 600, Linus 100
+```
+
+In Python the level must be set on the connection before the transaction starts (psycopg refuses `can't change 'isolation_level' now` inside `conn.transaction()`), so the snippet sets it first.
+
+**In pgAdmin:** open two Query Tool tabs side by side and run the two scripts above, one statement at a time, to see the same numbers.
 
 ## How a level decides what to allow
 
@@ -110,99 +354,399 @@ export const isoFlow = `flowchart TD
 
 <Mermaid code={isoFlow} title="Each isolation level reads from a different snapshot strategy" />
 
+## Writing under Repeatable Read
+
+The snapshot that makes reads stable also means A may try to change a row that has changed since its snapshot. The two levels behave differently. At Read Committed, an `UPDATE` waits for the other writer, re-reads the newest version of the row, and applies its change to that (so a relative update like `balance - 50` does not lose B's +100):
+
+```text
+-- session A: script
+BEGIN;
+SELECT balance AS a_snapshot_sees FROM accounts WHERE owner = 'Ada';
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+UPDATE accounts SET balance = balance - 50 WHERE owner = 'Ada';
+COMMIT;
+-- session A: psql output
+BEGIN
+ a_snapshot_sees 
+-----------------
+             500
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance + 100 WHERE owner = 'Ada';
+-- session B: psql output
+UPDATE 1
+
+-- afterwards:
+SELECT owner, balance FROM accounts WHERE owner = 'Ada';
+ owner | balance 
+-------+---------
+ Ada   |     550
+(1 row)
+```
+
+At Repeatable Read, A's snapshot still says 500 while the row now says 600, so applying A's update would silently overwrite something A never saw. PostgreSQL refuses instead:
+
+```text
+-- session A: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT balance AS a_snapshot_sees FROM accounts WHERE owner = 'Ada';
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+UPDATE accounts SET balance = balance - 50 WHERE owner = 'Ada';
+COMMIT;
+-- session A: psql output
+BEGIN
+ a_snapshot_sees 
+-----------------
+             500
+(1 row)
+
+ERROR:  could not serialize access due to concurrent update
+ROLLBACK
+
+-- session B: script
+\o /dev/null
+SELECT pg_sleep(1);
+\o
+UPDATE accounts SET balance = balance + 100 WHERE owner = 'Ada';
+-- session B: psql output
+UPDATE 1
+
+-- afterwards:
+SELECT owner, balance FROM accounts WHERE owner = 'Ada';
+ owner | balance 
+-------+---------
+ Ada   |     600
+(1 row)
+```
+
+A must roll back and start again on a fresh snapshot. Whenever you use Repeatable Read or Serializable for a writing transaction, this error is an expected outcome, not a bug.
+
+## Write skew: what Repeatable Read cannot see
+
+Two doctors, alice and bob, are both on call. The rule: at least one must stay. Each checks that two are on call, thinks about it, and takes themself off. They write to different rows, so there is no write conflict, and each snapshot said 2. At Repeatable Read both commit:
+
+```text
+-- session A: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) AS on_call_now FROM doctors WHERE on_call;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+UPDATE doctors SET on_call = false WHERE name = 'alice';
+COMMIT;
+-- session A: psql output
+BEGIN
+ on_call_now 
+-------------
+           2
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- session B: script
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) AS on_call_now FROM doctors WHERE on_call;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+UPDATE doctors SET on_call = false WHERE name = 'bob';
+COMMIT;
+-- session B: psql output
+BEGIN
+ on_call_now 
+-------------
+           2
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- afterwards:
+SELECT name, on_call FROM doctors ORDER BY name;
+ name  | on_call 
+-------+---------
+ alice | f
+ bob   | f
+(2 rows)
+```
+
+Nobody is on call. This is **write skew**, and it is allowed at Read Committed and Repeatable Read.
+
 ## Serializable and retries
 
-Serializable is the strongest level: PostgreSQL guarantees the outcome is as if the concurrent transactions had run one after another in some order. To do this it watches for dangerous patterns and, when it detects one, aborts a transaction with a **serialization failure** (SQLSTATE `40001`). That is not a bug; it is the level doing its job. Your application must catch that error and run the transaction again.
+Serializable is the strongest level: PostgreSQL guarantees the outcome is as if the concurrent transactions had run one after another in some order. It tracks which transactions read what the others wrote, and when it finds a dangerous pattern it aborts one of them with a **serialization failure** (SQLSTATE `40001`). The same two-doctor script at Serializable:
+
+```text
+-- session A: script
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) AS on_call_now FROM doctors WHERE on_call;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+UPDATE doctors SET on_call = false WHERE name = 'alice';
+COMMIT;
+-- session A: psql output
+BEGIN
+ on_call_now 
+-------------
+           2
+(1 row)
+
+UPDATE 1
+COMMIT
+
+-- session B: script
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) AS on_call_now FROM doctors WHERE on_call;
+\o /dev/null
+SELECT pg_sleep(2);
+\o
+UPDATE doctors SET on_call = false WHERE name = 'bob';
+COMMIT;
+-- session B: psql output
+BEGIN
+ on_call_now 
+-------------
+           2
+(1 row)
+
+UPDATE 1
+ERROR:  could not serialize access due to read/write dependencies among transactions
+DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
+HINT:  The transaction might succeed if retried.
+
+-- afterwards:
+SELECT name, on_call FROM doctors ORDER BY name;
+ name  | on_call 
+-------+---------
+ alice | f
+ bob   | t
+(2 rows)
+```
+
+One doctor stays on call. The loser gets `40001` at `COMMIT` with a `HINT` that says exactly what to do: retry. That is not a bug; it is the level doing its job. Which of the two transactions loses is not predictable, so the application must catch the error and run the whole transaction again ([docs](https://www.postgresql.org/docs/18/transaction-iso.html#XACT-SERIALIZABLE)). The retry must re-run the reads too, because the second attempt should see the first doctor already gone.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    BEGIN;
-    SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-    -- ... your reads and writes ...
-    COMMIT;  -- may raise: ERROR: could not serialize access ... (40001)
+    -- sql/serializable.sql
+    BEGIN ISOLATION LEVEL SERIALIZABLE;
+    SELECT count(*) FROM doctors WHERE on_call;
+    UPDATE doctors SET on_call = false WHERE name = 'alice';
+    COMMIT;  -- under contention this line can raise 40001: retry the whole block
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    async function runSerializable(work, attempts = 3) {
-      for (let i = 0; i < attempts; i++) {
+    async function goOffCall(pool, name) {
+      for (let attempt = 1; attempt <= 5; attempt++) {
         const client = await pool.connect();
         try {
           await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
-          await work(client);
+          const { rows } = await client.query('SELECT count(*)::int AS n FROM doctors WHERE on_call');
+          await client.query('SELECT pg_sleep(2)'); // stands in for slow application logic
+          if (rows[0].n >= 2) {
+            await client.query('UPDATE doctors SET on_call = false WHERE name = $1', [name]);
+          }
           await client.query('COMMIT');
+          console.log(`${name}: attempt ${attempt} committed (saw ${rows[0].n} on call)`);
           return;
         } catch (e) {
-          await client.query('ROLLBACK');
-          if (e.code !== '40001') throw e; // retry only on serialization failure
+          await client.query('ROLLBACK').catch(() => {});
+          if (e.code !== '40001' || attempt === 5) throw e; // retry only serialization failures
+          console.log(`${name}: attempt ${attempt} failed with ${e.code}, retrying`);
         } finally {
           client.release();
         }
       }
-      throw new Error('too many serialization retries');
     }
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     import psycopg
-    for _ in range(3):
-        try:
-            with conn.transaction():
-                conn.isolation_level = "SERIALIZABLE"
-                run_my_work(cur)
-            break
-        except psycopg.errors.SerializationFailure:
-            continue  # retry the whole transaction
+
+    def go_off_call(dsn, name):
+        for attempt in range(1, 6):
+            with psycopg.connect(dsn) as conn:
+                conn.isolation_level = psycopg.IsolationLevel.SERIALIZABLE
+                try:
+                    with conn.transaction():
+                        n = conn.execute("SELECT count(*) FROM doctors WHERE on_call").fetchone()[0]
+                        conn.execute("SELECT pg_sleep(2)")  # stands in for slow application logic
+                        if n >= 2:
+                            conn.execute("UPDATE doctors SET on_call = false WHERE name = %s", (name,))
+                    print(f"{name}: attempt {attempt} committed (saw {n} on call)")
+                    return
+                except psycopg.errors.SerializationFailure:  # SQLSTATE 40001
+                    print(f"{name}: attempt {attempt} failed with 40001, retrying")
+                    if attempt == 5:
+                        raise
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    for i := 0; i < 3; i++ {
-        tx, _ := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-        if err := runMyWork(ctx, tx); err != nil {
-            tx.Rollback(ctx)
-            return err
-        }
-        err := tx.Commit(ctx)
-        var pgErr *pgconn.PgError
-        if errors.As(err, &pgErr) && pgErr.Code == "40001" {
-            continue // serialization failure: retry
-        }
-        break
+    func goOffCall(ctx context.Context, dsn, name string) error {
+    	conn, err := pgx.Connect(ctx, dsn)
+    	if err != nil {
+    		return err
+    	}
+    	defer conn.Close(ctx)
+    	for attempt := 1; attempt <= 5; attempt++ {
+    		var n int
+    		err = pgx.BeginTxFunc(ctx, conn, pgx.TxOptions{IsoLevel: pgx.Serializable}, func(tx pgx.Tx) error {
+    			if err := tx.QueryRow(ctx, "SELECT count(*) FROM doctors WHERE on_call").Scan(&n); err != nil {
+    				return err
+    			}
+    			if _, err := tx.Exec(ctx, "SELECT pg_sleep(2)"); err != nil { // stands in for slow application logic
+    				return err
+    			}
+    			if n >= 2 {
+    				_, err := tx.Exec(ctx, "UPDATE doctors SET on_call = false WHERE name = $1", name)
+    				return err
+    			}
+    			return nil
+    		})
+    		var pgErr *pgconn.PgError
+    		if errors.As(err, &pgErr) && pgErr.Code == "40001" && attempt < 5 {
+    			fmt.Printf("%s: attempt %d failed with 40001, retrying\n", name, attempt)
+    			continue // the whole transaction runs again
+    		}
+    		if err == nil {
+    			fmt.Printf("%s: attempt %d committed (saw %d on call)\n", name, attempt, n)
+    		}
+    		return err
+    	}
+    	return nil
     }
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    for _ in 0..3 {
+    fn is_serialization_failure(e: &sqlx::Error) -> bool {
+        e.as_database_error().and_then(|d| d.code()).as_deref() == Some("40001")
+    }
+
+    async fn go_off_call_once(pool: &sqlx::PgPool, name: &str) -> Result<i64, sqlx::Error> {
         let mut tx = pool.begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-            .execute(&mut *tx).await?;
-        run_my_work(&mut tx).await?;
-        match tx.commit().await {
-            Ok(_) => break,
-            Err(e) if is_serialization_failure(&e) => continue,
-            Err(e) => return Err(e.into()),
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE").execute(&mut *tx).await?;
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM doctors WHERE on_call")
+            .fetch_one(&mut *tx).await?;
+        sqlx::query("SELECT pg_sleep(2)").execute(&mut *tx).await?; // stands in for slow application logic
+        if n >= 2 {
+            sqlx::query("UPDATE doctors SET on_call = false WHERE name = $1")
+                .bind(name).execute(&mut *tx).await?;
         }
+        tx.commit().await?;
+        Ok(n)
+    }
+
+    async fn go_off_call(pool: &sqlx::PgPool, name: &str) -> Result<(), sqlx::Error> {
+        for attempt in 1..=5 {
+            match go_off_call_once(pool, name).await {
+                Ok(n) => {
+                    println!("{name}: attempt {attempt} committed (saw {n} on call)");
+                    return Ok(());
+                }
+                Err(e) if is_serialization_failure(&e) && attempt < 5 => {
+                    println!("{name}: attempt {attempt} failed with 40001, retrying"); // run it all again
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
     ```
   </TabItem>
 </Tabs>
 
+Each of the four programs was run with alice and bob started at the same time. In every run one worker commits first, the other is aborted with `40001`, retries, and on the second attempt sees only one doctor on call and correctly leaves that doctor alone:
+
 ```text
-ERROR:  could not serialize access due to read/write dependencies among transactions
-DETAIL:  Reason code: ... 
-HINT:  The transaction might succeed if retried.
+$ (two workers, alice and bob, started together against the doctors table; reset to both on call before each run)
+-- Node.js (pg 8.23.0)
+alice: attempt 1 failed with 40001, retrying
+bob: attempt 1 committed (saw 2 on call)
+alice: attempt 2 committed (saw 1 on call)
+afterwards alice=true, bob=false
+-- Python (psycopg 3.3.6)
+bob: attempt 1 committed (saw 2 on call)
+alice: attempt 1 failed with 40001, retrying
+alice: attempt 2 committed (saw 1 on call)
+afterwards alice=true, bob=false
+-- Go (pgx v5.11.0)
+bob: attempt 1 committed (saw 2 on call)
+alice: attempt 1 failed with 40001, retrying
+alice: attempt 2 committed (saw 1 on call)
+afterwards alice=true, bob=false
+-- Rust (sqlx 0.9.0)
+alice: attempt 1 committed (saw 2 on call)
+bob: attempt 1 failed with 40001, retrying
+bob: attempt 2 committed (saw 1 on call)
+afterwards alice=false, bob=true
 ```
+
+Two details are easy to miss. First, retry only `40001` (and `40P01`, the deadlock error from the locking lesson): other errors are bugs and retrying them hides them. Second, the failure can arrive from any statement, including the `UPDATE`, not just from `COMMIT`; that is why each snippet keeps the whole transaction inside the loop.
+
+## Reading AI-generated code
+
+An assistant is asked to fix the hospital race. It knows Serializable prevents write skew, switches the level, and leaves a confident comment:
+
+<SpotTheBug lang="js" code={`// AI comment: "SERIALIZABLE prevents write skew, so this is safe"
+async function goOffCall(pool, name) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+    const { rows } = await client.query('SELECT count(*)::int AS n FROM doctors WHERE on_call');
+    await client.query('SELECT pg_sleep(2)'); // slow business logic
+    if (rows[0].n >= 2) {
+      await client.query('UPDATE doctors SET on_call = false WHERE name = $1', [name]);
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}`}>
+
+The isolation level is right and the code is still broken: it has no retry. Serializable does not make the conflict disappear, it turns a silent data error into a `40001` that someone has to handle. Calling the function for alice and bob at the same moment (pg 8.23.0):
+
+```text
+$ node serializable-no-retry.js   # alice and bob call goOffCall at the same moment
+alice fulfilled 
+bob rejected 40001 could not serialize access due to read/write dependencies among transactions
+afterwards alice=false, bob=true
+```
+
+The rule is preserved (bob is still on call), but bob's request fails and the user sees an error for something the application could have handled. Under real load a large share of requests would fail this way. The fix is the retry loop above: run the whole transaction again on `40001`, capped at a few attempts. The `goOffCall` in the Node.js tab is that fix, and its run is the Node.js block of the retry output.
+
+</SpotTheBug>
+
+## Mental Model
+
+Think of each level as a different promise about what you can see. Read Committed says "each statement sees the world as of the moment it started". Repeatable Read says "your whole transaction sees the world as of your first query". Serializable says "and I will also make sure your result matches some order in which you ran one at a time, or I will cancel you". A higher level never makes the database wait more; it makes a transaction more likely to be told to try again.
 
 ## Tips / gotchas
 
 - Read Committed is the right default for most workloads; only raise the level when you have a real anomaly to prevent.
 - At Serializable (and Repeatable Read for write conflicts), always wrap the transaction in a retry loop that re-runs it on SQLSTATE `40001`. The hint in the error even tells you so.
-- Set the isolation level at the very start of the transaction. Once data has been accessed, you cannot change it.
+- Set the isolation level at the very start of the transaction. Once data has been accessed, you cannot change it (`25001`).
 - A higher level is not "more correct" for free. It trades a higher chance of aborts for stronger guarantees, so measure before reaching for Serializable everywhere.
+- Long transactions at Repeatable Read or Serializable hold a snapshot that keeps dead row versions alive (see the MVCC lesson).
 
 <Callout title="Pick the weakest level that is still correct">
 Isolation is about ruling out specific anomalies, not about being maximally strict. Identify which anomaly would actually break your logic, choose the lowest level that forbids it, and add a retry loop if that level can abort. Correct and cheap beats strict and slow.
@@ -212,26 +756,24 @@ Isolation is about ruling out specific anomalies, not about being maximally stri
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Serializable (strictest) | Prevents every anomaly, including write skew; the result behaves as if transactions ran one at a time | Lower throughput, because contention causes more frequent aborts and retries |
-| Read Committed (the default) | High throughput, almost no aborts from isolation conflicts | Allows non-repeatable reads, phantom reads, and write skew to happen |
+| Serializable (strictest) | Prevents every anomaly, including write skew (one doctor stayed on call) | Some transactions abort with `40001` and must be retried; the retry has a cost |
+| Repeatable Read | Stable snapshot for reports and multi-statement reads (500 and 500) | Write skew still commits (nobody on call); concurrent updates fail with `could not serialize access due to concurrent update` |
+| Read Committed (the default) | High throughput, almost no aborts from isolation conflicts | Non-repeatable reads and phantoms happen (500 then 600, 2 then 3) |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Choosing Serializable everywhere "to be safe" without a retry loop** — Serializable routinely aborts a transaction with SQLSTATE `40001`. Without a retry loop, the application just breaks.
-- **Not wrapping a Serializable transaction in a retry loop** — the transaction fails on its very first conflict with no chance to succeed at all.
-- **Assuming a stricter level is always "more correct"** — each level only prevents specific anomalies. Understanding which anomaly a level prevents matters more than reflexively picking the strictest one.
-
-> 💡 Real-world example
->
-> **Bank ledger systems** — a transfer transaction that affects account balances commonly runs at Serializable specifically to prevent write skew between two accounts read and written concurrently, accepting the retry overhead as the cost of correctness.
->
-> **Postgres-backed job queues** — use `SKIP LOCKED` together with a weaker isolation level like Read Committed, so multiple workers can grab jobs concurrently without blocking each other, trading away a correctness guarantee this kind of work does not need.
+- **"Serializable means transactions run one at a time."** They still run concurrently; PostgreSQL only cancels the ones that could not have been run serially.
+- **"Repeatable Read prevents all anomalies."** It prevents non-repeatable reads and phantoms but not write skew: both doctors went off call.
+- **"A 40001 is an application bug."** It is the documented, expected answer; the fix is a retry loop, not a lower isolation level.
+- **"READ UNCOMMITTED lets you see dirty data."** In PostgreSQL it behaves as Read Committed, as the dirty-read run shows.
+- **"Choosing Serializable without a retry loop is safe."** The data stays correct, but requests fail.
 
 export const quizIso = [
   {
     q: 'Which isolation level is the PostgreSQL default?',
     options: ['Read Uncommitted', 'Read Committed', 'Repeatable Read', 'Serializable'],
     answer: 1,
+    explain: '`SHOW default_transaction_isolation` prints `read committed`, as in the lesson output.',
   },
   {
     q: 'What should an application do when a Serializable transaction fails with SQLSTATE 40001?',
@@ -242,6 +784,7 @@ export const quizIso = [
       'Restart the database server',
     ],
     answer: 1,
+    explain: 'The error carries `HINT: The transaction might succeed if retried.` In the lesson the retry saw one doctor on call and left them alone.',
   },
   {
     q: 'Which anomaly does Repeatable Read prevent that Read Committed allows?',
@@ -252,6 +795,29 @@ export const quizIso = [
       'Syntax errors',
     ],
     answer: 1,
+    explain: 'At Read Committed Ada went from 500 to 600 inside one transaction; at Repeatable Read she stayed 500. (In PostgreSQL phantoms are prevented too.)',
+  },
+  {
+    q: 'Two Repeatable Read transactions each check that two doctors are on call and then take a different doctor off call. What is the result?',
+    options: [
+      'One transaction fails with 40001',
+      'Both commit and nobody is on call',
+      'A deadlock',
+      'Both fail with a unique violation',
+    ],
+    answer: 1,
+    explain: 'They write different rows, so there is no write conflict, and Repeatable Read does not track read/write dependencies. Only Serializable prevents this write skew.',
+  },
+  {
+    q: 'Inside a Repeatable Read transaction, another session commits a change to a row you then try to UPDATE. What happens?',
+    options: [
+      'Your update silently overwrites it',
+      'Your update waits and then applies to the new version, as in Read Committed',
+      'PostgreSQL raises could not serialize access due to concurrent update',
+      'The other session is rolled back',
+    ],
+    answer: 2,
+    explain: 'Your snapshot still shows the old value, so applying the update would hide a change you never saw. The error (SQLSTATE 40001) means: roll back and retry.',
   },
 ];
 
