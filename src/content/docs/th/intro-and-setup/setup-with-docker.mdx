@@ -1,6 +1,6 @@
 ---
 title: ตั้งค่าด้วย Docker
-description: รัน PostgreSQL จาก Docker image อย่างเป็นทางการ — คำสั่ง docker run คำสั่งเดียว, docker-compose.yml พร้อม pgAdmin, การตรวจสอบ container และการเชื่อมต่อด้วย psql
+description: รัน PostgreSQL จาก Docker image อย่างเป็นทางการ — คำสั่ง docker run เดียว, docker-compose.yml พร้อม pgAdmin, การตรวจสอบ container และการเชื่อมต่อด้วย psql
 sidebar:
   order: 3
 ---
@@ -9,39 +9,117 @@ import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-วิธีที่เร็วที่สุดในการได้ PostgreSQL จริงมารันคือ Docker image `postgres` อย่างเป็นทางการ Docker จะดาวน์โหลดสำเนาฐานข้อมูลที่พร้อมใช้งาน เริ่มรันใน container ที่แยกออกมา แล้วรื้อทิ้งได้สะอาดเมื่อคุณเลิกใช้ — ไม่ต้องติดตั้งทั้งระบบ ไม่มี service หลงเหลือ บทเรียนนี้จะพาคุณจากศูนย์ไปสู่ฐานข้อมูลที่รันอยู่และเชื่อมต่อได้ด้วยคำสั่งไม่กี่บรรทัด
+วิธีที่เร็วที่สุดในการมี PostgreSQL จริงรันอยู่คือใช้ Docker image `postgres` อย่างเป็นทางการ Docker จะดาวน์โหลดฐานข้อมูลสำเร็จรูป เริ่มมันใน container ที่แยกเดี่ยว และปิดให้เรียบร้อยเมื่อคุณใช้เสร็จ — ไม่ต้องติดตั้งทั้งระบบ ไม่มี service ตกค้าง บทเรียนนี้พาคุณจากศูนย์ไปสู่ฐานข้อมูลที่รันอยู่และเชื่อมต่อได้ในไม่กี่คำสั่ง
 
-คุณจะต้องมี Docker ติดตั้งและรันอยู่ ทุกอย่างด้านล่างใช้คำสั่ง `docker` และ `docker compose` แบบธรรมดา
+คุณต้องมี Docker ติดตั้งและรันอยู่ ทุกอย่างด้านล่างใช้คำสั่ง `docker` และ `docker compose` ธรรมดา
+
+> ทุก transcript ในที่นี้รันบน Mac (Docker Desktop 29.6.1, Docker Compose v5.3.0, aarch64) กับ image `postgres:18.6` กันยายน 2026 เพื่อไม่ชนกับสิ่งอื่นบนเครื่องนี้ การรันจริงใช้ container ชื่อ `postgresql-b1-pg`, named volume `postgresql-b1-pgdata` และ host port `55440` transcript แสดงด้วยชื่อของบทเรียน (`pg`, `pgdata`, `5432`) ในจุดที่เป็นแค่ชื่อ ส่วน output ของ `docker ps` ปล่อยไว้ตามจริง ทุกอย่างถูกลบทิ้งหลังใช้ pgAdmin **ไม่ได้** ถูกสตาร์ต (ไม่ได้ pull image) ไฟล์ compose ตรวจด้วย `docker compose config` และรันเฉพาะ service `postgres`
 
 ## คำสั่งเดียวเพื่อรัน Postgres
 
 คำสั่งเดียวนี้จะ pull image หากจำเป็นและเริ่มฐานข้อมูล พร้อมตั้งรหัสผ่าน superuser, publish port มาตรฐาน และเก็บข้อมูลไว้ใน named volume เพื่อให้ข้อมูลรอดจากการ restart container
 
 ```bash
+# scripts/run-postgres.sh
 docker run --name pg \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
   -v pgdata:/var/lib/postgresql \
-  -d postgres:18
+  -d postgres:18.6
 ```
 
 ทัวร์สั้น ๆ เกี่ยวกับ flag ต่าง ๆ:
 
 - `--name pg` ตั้งชื่อที่จำง่ายให้ container เพื่อให้คำสั่งทีหลังอ้างชื่อนี้ได้
-- `-e POSTGRES_PASSWORD=secret` ตั้งรหัสผ่านสำหรับ user `postgres` เริ่มต้น ตัวแปรนี้บังคับ ถ้าไม่ใส่ image จะไม่ยอมเริ่มทำงาน
-- `-p 5432:5432` แมป PostgreSQL port ของ container ไปยัง port เดียวกันบนเครื่องของคุณ เพื่อให้เครื่องมือบน host เชื่อมต่อกับ `localhost:5432` ได้
-- `-v pgdata:/var/lib/postgresql` mount named volume หนึ่งระดับเหนือ data directory (image `postgres:18` เก็บ cluster ไว้ที่ `18/docker` ข้างใน ถ้า mount ที่ `/var/lib/postgresql/data` container จะ exit) เพื่อให้ข้อมูลของคุณไม่สูญหายเมื่อ container ถูกลบ
-- `-d postgres:18` รัน image อย่างเป็นทางการ tag `18` ในเบื้องหลัง
+- `-e POSTGRES_PASSWORD=secret` ตั้งรหัสผ่านสำหรับ user `postgres` เริ่มต้น ตัวแปรนี้บังคับ ถ้าไม่ใส่ image จะไม่ยอมเริ่มทำงาน (พิสูจน์ด้านล่าง)
+- `-p 5432:5432` แมป PostgreSQL port ของ container ไปยัง port เดียวกันบนเครื่องของคุณ เพื่อให้เครื่องมือบน host เชื่อมต่อกับ `localhost:5432` ได้ วิธีนี้ publish บน **ทุก** interface ของ host ใช้ `-p 127.0.0.1:5432:5432` เพื่อให้เข้าถึงได้จากเครื่องคุณเท่านั้น (transcript ด้านล่างทำแบบนี้)
+- `-v pgdata:/var/lib/postgresql` mount named volume หนึ่งระดับเหนือ data directory ตั้งแต่ image `postgres:18` cluster อยู่ในไดเรกทอรีย่อยที่ตั้งชื่อตาม version (`18/docker`) ใต้ mount นั้น จึงต้อง mount volume ที่ `/var/lib/postgresql` **ไม่ใช่** `/var/lib/postgresql/data` แบบบทเรียนเก่า ๆ
+- `-d postgres:18.6` รัน image อย่างเป็นทางการ ปักตามรุ่นที่คอร์สนี้ตรวจสอบไว้ ในเบื้องหลัง
+
+หน้าตาของการรันจริง พร้อมการตรวจสอบที่ส่วนถัดไปจะอธิบาย:
+
+```text
+$ docker run --name pg -e POSTGRES_PASSWORD=secret -p 5432:5432 -v pgdata:/var/lib/postgresql -d postgres:18.6
+<container-id>
+
+$ docker ps
+NAMES              IMAGE           STATUS         PORTS
+postgresql-b1-pg   postgres:18.6   Up 6 seconds   127.0.0.1:55440->5432/tcp
+
+$ docker exec pg psql -U postgres -c "show data_directory" -c "select version()"
+        data_directory         
+-------------------------------
+ /var/lib/postgresql/18/docker
+(1 row)
+
+                                                         version                                                          
+--------------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+(1 row)
+
+$ docker exec pg psql -U postgres -c "\conninfo"
+           Connection Information
+      Parameter       |        Value        
+----------------------+---------------------
+ Database             | postgres
+ Client User          | postgres
+ Socket Directory     | /var/run/postgresql
+ Server Port          | 5432
+ Options              | 
+ Protocol Version     | 3.0
+ Password Used        | false
+ GSSAPI Authenticated | false
+ Backend PID          | 90
+ SSL Connection       | false
+ Superuser            | on
+ Hot Standby          | off
+(12 rows)
+```
+
+บรรทัด `data_directory` คือหลักฐานของกฎเรื่อง volume: cluster อยู่ที่ `/var/lib/postgresql/18/docker` ใต้จุด mount
+
+### เกิดอะไรขึ้นกับ path mount แบบเก่า
+
+บทเรียนที่เขียนสำหรับ PostgreSQL 17 และเก่ากว่า mount `/var/lib/postgresql/data` บน image 18 container นั้นปฏิเสธที่จะเริ่ม:
+
+```text
+$ docker run --rm -e POSTGRES_PASSWORD=secret -v pgdata:/var/lib/postgresql/data postgres:18.6
+Error: in 18+, these Docker images are configured to store database data in a
+       format which is compatible with "pg_ctlcluster" (specifically, using
+       major-version-specific directory names).  This better reflects how
+       PostgreSQL itself works, and how upgrades are to be performed.
+
+       See also https://github.com/docker-library/postgres/pull/1259
+
+       Counter to that, there appears to be PostgreSQL data in:
+         /var/lib/postgresql/data (unused mount/volume)
+
+       This is usually the result of upgrading the Docker image without
+       upgrading the underlying database using "pg_upgrade" (which requires both
+       versions).
+
+       The suggested container configuration for 18+ is to place a single mount
+       at /var/lib/postgresql which will then place PostgreSQL data in a
+       subdirectory, allowing usage of "pg_upgrade --link" without mount point
+       boundary issues.
+
+       See https://github.com/docker-library/postgres/issues/37 for a (long)
+       discussion around this process, and suggestions for how to do so.
+exit=1
+```
+
+ข้อความยาวแต่วิธีแก้บรรทัดเดียว: mount `/var/lib/postgresql` (ดู [docker-library PR ที่ข้อความอ้างถึง](https://github.com/docker-library/postgres/pull/1259) และ [เอกสาร image](https://hub.docker.com/_/postgres))
 
 ## docker-compose.yml สำหรับการตั้งค่าที่ทำซ้ำได้
 
-การพิมพ์คำสั่งนั้นทุกครั้งก็น่าเบื่อ และคุณมักจะอยากได้ GUI ควบคู่ไปกับฐานข้อมูล ไฟล์ `docker-compose.yml` เก็บการตั้งค่าทั้งหมดไว้ในไฟล์เดียวเพื่อให้คุณเริ่มทุกอย่างได้ด้วย `docker compose up` ไฟล์นี้รัน PostgreSQL บวกกับ **pgAdmin** ตัว web GUI ที่คุณจะได้ทัวร์ในบทเรียนถัดไป
+การพิมพ์คำสั่งนั้นทุกครั้งเริ่มน่าเบื่อ และบ่อยครั้งคุณอยากได้ GUI ควบคู่กับฐานข้อมูล `docker-compose.yml` เก็บการตั้งค่าทั้งหมดไว้ในไฟล์เดียว เพื่อให้เริ่มทุกอย่างด้วย `docker compose up` ไฟล์นี้รัน PostgreSQL พร้อม **pgAdmin** ซึ่งเป็น web GUI ที่คุณจะได้ทัวร์ในบทถัดไป
 
 ```yaml
 services:
   postgres:
-    image: postgres:18
+    image: postgres:18.6
     environment:
       POSTGRES_PASSWORD: secret
       POSTGRES_DB: appdb
@@ -64,101 +142,296 @@ volumes:
   pgdata:
 ```
 
-บันทึกไฟล์นี้เป็น `docker-compose.yml` และเริ่มทุกอย่างจาก directory นั้น:
+บันทึกเป็น `docker-compose.yml` แล้วเริ่มทุกอย่างจากไดเรกทอรีนั้น:
 
 ```bash
+# scripts/compose-up.sh
 docker compose up -d
 ```
 
-ตอนนี้ PostgreSQL อยู่ที่ `localhost:5432` และ pgAdmin อยู่ที่ `http://localhost:8080` หากคุณอยากใช้ GUI ที่เบากว่า ให้สลับ service `pgadmin` ด้วย image `adminer` ที่ให้หน้า admin แบบไฟล์เดียวบน port ของตัวเอง ไม่ว่าทางใดก็ตาม service ฐานข้อมูลไม่เปลี่ยนแปลง
+ตอนนี้ PostgreSQL อยู่ที่ `localhost:5432` และ pgAdmin อยู่ที่ `http://localhost:8080` ถ้าอยากได้ GUI ที่เบากว่า ให้สลับ service `pgadmin` เป็น image `adminer` ซึ่งให้หน้า admin ไฟล์เดียวบน port ของมันเอง ไม่ว่าแบบไหน service ฐานข้อมูลก็ไม่เปลี่ยน นี่คือ service ฐานข้อมูลที่รันจากไฟล์นั้น (เฉพาะ `postgres` และเปลี่ยน host port เป็น `55440`):
+
+```text
+$ docker compose config --quiet    # the file above parses and validates
+exit=0
+
+$ docker compose up -d postgres    # pgAdmin image not pulled here; only the database service
+ Network postgresql-b1_default Creating 
+ Network postgresql-b1_default Created 
+ Volume postgresql-b1_pgdata Creating 
+ Volume postgresql-b1_pgdata Created 
+ Container postgresql-b1-postgres-1 Creating 
+ Container postgresql-b1-postgres-1 Created 
+ Container postgresql-b1-postgres-1 Starting 
+ Container postgresql-b1-postgres-1 Started 
+
+$ docker compose ps
+SERVICE    IMAGE           STATUS         PORTS
+postgres   postgres:18.6   Up 7 seconds   127.0.0.1:55440->5432/tcp
+
+$ docker compose exec postgres psql -U postgres -d appdb -c "\l appdb"
+                                                List of databases
+ Name  |  Owner   | Encoding | Locale Provider |  Collate   |   Ctype    | Locale | ICU Rules | Access privileges 
+-------+----------+----------+-----------------+------------+------------+--------+-----------+-------------------
+ appdb | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | 
+(1 row)
+
+
+$ docker compose down     # data stays in the pgdata volume
+ Container postgresql-b1-postgres-1 Removed 
+ Network postgresql-b1_default Removing 
+ Volume postgresql-b1_pgdata Removing 
+ Volume postgresql-b1_pgdata Removed 
+ Network postgresql-b1_default Removed 
+```
+
+ต่อด้วยข้อเรียกร้องเรื่องความคงอยู่ของข้อมูล คราวนี้ volume ถูกจัดการโดย compose `down` ลบ container และ network แต่เก็บ volume ไว้ ส่วน `down -v` ลบ volume ทิ้ง:
+
+```text
+$ docker compose down
+ Container postgresql-b1-postgres-1 Removed 
+ Network postgresql-b1_default Removing 
+ Network postgresql-b1_default Removed 
+
+$ docker volume ls --filter name=pgdata
+DRIVER    VOLUME NAME
+local     postgresql-b1_pgdata
+
+$ docker compose up -d && docker compose exec postgres psql -U postgres -d appdb -c "select * from t"
+ n 
+---
+ 1
+(1 row)
+
+
+$ docker compose down -v    # -v also deletes the volume: this one is destructive
+ Volume postgresql-b1_pgdata Removing 
+ Volume postgresql-b1_pgdata Removed 
+ Network postgresql-b1_default Removed 
+```
 
 ## ชิ้นส่วนต่าง ๆ ประกอบกันอย่างไร
 
-container คือสำเนาที่รันอยู่ของ image, named volume คือที่ที่ไฟล์ข้อมูลจริงอยู่บนเครื่องของคุณ และ client เชื่อมต่อผ่าน port ที่ publish ไว้ volume ถูกแยกออกจาก container โดยตั้งใจเพื่อให้ข้อมูลอยู่รอดได้นานกว่า container ใด ๆ ตัวเดียว
+container คือสำเนาที่กำลังรันของ image, named volume คือที่ที่ไฟล์ข้อมูลจริงอยู่บนเครื่องของคุณ และ client เชื่อมต่อผ่าน port ที่ publish volume ถูกแยกจาก container โดยตั้งใจ เพื่อให้ข้อมูลอยู่ยาวกว่า container ใด ๆ
 
 export const dockerDiagram = `flowchart LR
-  V[(pgdata named volume)] --> P[postgres container]
-  P -->|port 5432| H[Host machine]
-  H --> CLI[psql or driver]
-  H --> GUI[pgAdmin in browser]`;
+  V[("pgdata named volume")] --> P["postgres container"]
+  P -->|"port 5432"| H["Host machine"]
+  H --> CLI["psql or driver"]
+  H --> GUI["pgAdmin in browser"]`;
 
-<Mermaid code={dockerDiagram} title="container, volume และ client" />
+<Mermaid code={dockerDiagram} title="Container, volume และ client" />
 
 ## ตรวจสอบและเชื่อมต่อ
 
-ยืนยันว่า container ทำงานอยู่:
+ยืนยันว่า container ขึ้นแล้ว จากนั้นเชื่อมต่อ ถ้ามี `psql` บน host ให้ชี้ไปที่ฐานข้อมูลด้วย connection string ถ้าไม่มี `psql` ในเครื่อง image มีติดมาให้แล้ว:
 
 ```bash
+# scripts/verify-postgres.sh
 docker ps
-```
-
-คุณควรเห็น row สำหรับ image `postgres` ที่มีสถานะ `Up` และการแมป port `0.0.0.0:5432->5432/tcp` ตอนนี้เชื่อมต่อด้วย `psql` ถ้าเครื่อง host ของคุณมี `psql` อยู่แล้ว ให้ชี้ไปยังฐานข้อมูลด้วย connection string:
-
-```bash
 psql "postgresql://postgres:secret@localhost:5432/postgres"
-```
-
-ไม่มี `psql` ในเครื่อง? image มี `psql` ติดมาอยู่แล้ว ดังนั้นรันจากใน container แทนได้เลย:
-
-```bash
 docker exec -it pg psql -U postgres
 ```
 
-ไม่ว่าทางใดก็ตามคุณจะมาถึง prompt `postgres=#` พร้อมที่จะรัน SQL เมื่อคุณเสร็จงานสำหรับวันนี้ `docker compose down` จะหยุดทุกอย่าง เนื่องจากข้อมูลอยู่ใน volume `pgdata` ข้อมูลจึงยังอยู่ครบในครั้งถัดไปที่คุณเปิด stack ขึ้นมาใหม่
+`docker ps` แสดง image `postgres:18.6` สถานะ `Up` และการแมป port transcript ด้านบน (ส่วนแรก) เชื่อมต่อผ่าน published port จาก container ชั่วคราวอีกตัว ซึ่งก็คือเส้นทางเดียวกับที่เครื่องมือบน host ใช้ `\conninfo` แสดง `Server Port | 55440` และ `Password Used | true` ไม่ว่าแบบไหนคุณจะมาอยู่ที่ prompt `postgres=#` พร้อมรัน SQL
+
+volume คือสิ่งที่พาข้อมูลไป volume เดิม container ใหม่เอี่ยม row ยังอยู่ ลบ volume แล้วก็หาย:
+
+```text
+$ psql "postgresql://postgres:secret@localhost:5432/postgres" -c "select current_user, inet_server_port()"    # through the published port (55440 here)
+ current_user | inet_server_port 
+--------------+------------------
+ postgres     |             5432
+(1 row)
+
+           Connection Information
+      Parameter       |        Value         
+----------------------+----------------------
+ Database             | postgres
+ Client User          | postgres
+ Host                 | host.docker.internal
+ Host Address         | 192.168.65.254
+ Server Port          | 55440
+ Options              | 
+ Protocol Version     | 3.0
+ Password Used        | true
+ GSSAPI Authenticated | false
+ Backend PID          | 91
+ SSL Connection       | false
+ Superuser            | on
+ Hot Standby          | off
+(13 rows)
+
+
+$ docker exec pg psql -U postgres -c "create table notes (id int, body text)" -c "insert into notes values (1, 'still here')"
+CREATE TABLE
+INSERT 0 1
+
+$ docker rm -f pg
+postgresql-b1-pg
+
+$ docker run --name pg ... -v pgdata:/var/lib/postgresql -d postgres:18.6    # same volume, brand-new container
+<container-id>
+
+$ docker exec pg psql -U postgres -c "select * from notes"
+ id |    body    
+----+------------
+  1 | still here
+(1 row)
+
+
+$ docker rm -f pg && docker volume rm pgdata     # now delete the volume too
+postgresql-b1-pgdata
+$ (new container, new volume)  docker exec pg psql -U postgres -c "select * from notes"
+ERROR:  relation "notes" does not exist
+LINE 1: select * from notes
+                      ^
+```
+
+## รหัสผ่านและ `trust`
+
+`POSTGRES_PASSWORD` บังคับ เว้นแต่คุณผ่อนการยืนยันตัวตนอย่างชัดเจน พิสูจน์แล้ว:
+
+```text
+$ psql -h <host> -p 55441 -U postgres -w -c "select 1 as no_password_needed"     # POSTGRES_HOST_AUTH_METHOD=trust
+ no_password_needed 
+--------------------
+                  1
+(1 row)
+
+
+$ psql -h <host> -p 55442 -U postgres -w -c "select 1"     # POSTGRES_PASSWORD only, no password supplied
+psql: error: connection to server at "host.docker.internal" (192.168.65.254), port 55442 failed: fe_sendauth: no password supplied
+
+$ docker run --rm postgres:18.6    # no POSTGRES_PASSWORD at all
+Error: Database is uninitialized and superuser password is not specified.
+       You must specify POSTGRES_PASSWORD to a non-empty value for the
+       superuser. For example, "-e POSTGRES_PASSWORD=password" on "docker run".
+
+       You may also use "POSTGRES_HOST_AUTH_METHOD=trust" to allow all
+       connections without a password. This is *not* recommended.
+
+       See PostgreSQL documentation about "trust":
+```
+
+`POSTGRES_HOST_AUTH_METHOD=trust` ให้ทุกคนที่เข้าถึง port ได้เข้ามาโดยไม่ต้องใช้รหัสผ่านจริง ๆ ห้ามใช้นอกเครื่องของคุณ และห้ามใช้ร่วมกับ port ที่ publish บนทุก interface
+
+## Reading AI-generated code
+
+เมื่อขอให้ผู้ช่วย AI เขียน "compose file ที่เก็บข้อมูลถาวร" มันให้สิ่งที่ใกล้เคียงกับที่บล็อกส่วนใหญ่ยังเขียนอยู่ อ่านดู:
+
+<SpotTheBug lang="yaml" code={`# docker-compose.yml  (AI comment: "persist the data directory so nothing is lost")
+services:
+  db:
+    image: postgres:latest
+    environment:
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:`}>
+
+มีปัญหาจริงสองข้อ ทั้งสองพิสูจน์แล้วด้านบน ข้อแรก volume ถูก mount ที่ `/var/lib/postgresql/data` container จึง exit ด้วย status 1 พร้อมข้อความ `Error: in 18+, these Docker images are configured to store database data...` ไฟล์ที่ใช้ได้กับ image รุ่น 17 หรือเก่ากว่าจะพังบน image 18 ทุกตัว ข้อสอง `postgres:latest` ไม่ได้ปักรุ่น: ไฟล์เดิมจะหมายถึง major version อื่นแบบเงียบ ๆ ใน `docker compose pull` ครั้งถัดไป และ data directory ของ PostgreSQL ใช้ข้าม major ไม่ได้หากไม่มี `pg_upgrade` วิธีแก้คือ mount `/var/lib/postgresql` ปักรุ่น tag และ bind port ไว้ที่ loopback เท่านั้น:
+
+```yaml
+services:
+  db:
+    image: postgres:18.6
+    environment:
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+
+volumes:
+  pgdata:
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+Image = สูตร (อ่านอย่างเดียว), container = สำเนาที่รันอยู่หนึ่งชุด (ทิ้งได้), volume = ข้อมูล (คงทน), port mapping = ประตู ปัญหาทุกอย่างในบทนี้คือหนึ่งในสี่สิ่งนี้ผิด: tag ผิด, container ตายตอนเริ่ม, volume อยู่ผิด path หรือประตูเปิดให้ทั้งเครือข่าย
 
 ## เคล็ดลับและข้อควรระวัง
 
-- named volume คือสิ่งที่ทำให้ข้อมูลของคุณคงอยู่ ลบ container แล้วข้อมูลยังอยู่ ลบ volume แล้วข้อมูลหายไปตลอดกาล
-- `5432` คือ port เริ่มต้นของ PostgreSQL และ `postgres` คือ superuser เริ่มต้น เครื่องมือต่าง ๆ จะถือค่านี้เป็นค่าตั้งต้น เว้นแต่คุณจะระบุเป็นอย่างอื่น
-- `POSTGRES_DB` สร้างฐานข้อมูลเพิ่มเติมในการเริ่มต้นครั้งแรก ถ้าไม่ใส่ คุณก็ยังได้ฐานข้อมูล `postgres` ที่มีอยู่ในตัวให้ทำงานด้วย
-- `POSTGRES_PASSWORD` จำเป็นต้องมีสำหรับ image อย่างเป็นทางการ ใช้ secret จริงนอกการทดลองในเครื่อง ไม่ใช่ `secret`
-- ปักหมุดเวอร์ชันหลักอย่าง `postgres:18` แทน `postgres:latest` เพื่อให้การอัปเดต image ไม่ทำให้คุณประหลาดใจด้วยเวอร์ชันที่ต่างออกไป
+- named volume คือสิ่งที่ทำให้ข้อมูลของคุณคงอยู่ ลบ container แล้วข้อมูลยังอยู่ ลบ volume แล้วข้อมูลหายถาวร (พิสูจน์ทั้งสองอย่างด้านบน)
+- `5432` คือ port เริ่มต้นของ PostgreSQL และ `postgres` คือ superuser เริ่มต้น เครื่องมือต่าง ๆ สมมติค่าเหล่านี้เว้นแต่จะบอกเป็นอย่างอื่น
+- `POSTGRES_DB` สร้างฐานข้อมูลเพิ่มเมื่อเริ่มครั้งแรก (`appdb` ด้านบน) ถ้าไม่ใส่ก็ยังมีฐานข้อมูล `postgres` ในตัวให้ใช้
+- `POSTGRES_PASSWORD` (และ `POSTGRES_DB`) มีผลเฉพาะตอน data directory ว่าง การเปลี่ยนค่าแล้ว restart บน volume เดิมไม่มีผลอะไร
+- `POSTGRES_PASSWORD` บังคับสำหรับ image อย่างเป็นทางการ ใช้ secret จริงนอกการทดลองในเครื่อง ไม่ใช่ `secret`
+- ปัก tag `postgres:18.6` คือเป๊ะ `postgres:18` ตาม minor release ส่วน `postgres:latest` จะกระโดดข้าม major และทำให้ volume พัง
 
-<Callout title="ฐานข้อมูลที่ทิ้งได้ ข้อมูลที่คงทน">
-container ถูกออกแบบมาให้โยนทิ้งและสร้างใหม่ได้อย่างอิสระ แต่ข้อมูลของคุณไม่ควรเป็นเช่นนั้น การเก็บข้อมูลไว้ใน named volume มอบสิ่งที่ดีที่สุดของทั้งสองอย่างให้คุณ: คุณทำลายและสร้าง container ใหม่ได้บ่อยเท่าที่คุณต้องการโดยที่ row ต่าง ๆ ยังอยู่บน disk อย่างปลอดภัย
+<Callout title="ฐานข้อมูลใช้แล้วทิ้ง ข้อมูลคงทน">
+container ถูกออกแบบให้ทิ้งและสร้างใหม่ได้อย่างอิสระ แต่ข้อมูลของคุณไม่ควรเป็นเช่นนั้น การเก็บข้อมูลไว้ใน named volume ให้คุณได้ทั้งสองอย่าง: ทำลายและสร้าง container ใหม่กี่ครั้งก็ได้ ขณะที่ row ยังปลอดภัยบนดิสก์
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| รันด้วย Docker | เร็ว, disposable, ตั้งค่าเหมือนกันทุกเครื่อง | มี container overhead และต่างจากการ tune บน production จริงเล็กน้อย |
-| ติดตั้ง PostgreSQL แบบ native | ใกล้เคียงสภาพแวดล้อม production มากกว่า ไม่มี layer เพิ่ม | ติดตั้ง/ถอนยุ่งยากกว่า และต่างกันไปตามแต่ละ OS |
-| ใช้ image default ตรง ๆ | เริ่มงานได้ทันที ไม่ต้องเขียนอะไรเพิ่ม | ไม่ได้ tune เรื่อง memory หรือ config เฉพาะงาน |
-| เขียน Dockerfile กำหนดเอง | ปรับ config, extension ได้ตามต้องการ | ดูแลและอัปเดต image เองเพิ่มขึ้น |
+| รันด้วย Docker | เร็ว ทิ้งได้ และตั้งค่าเหมือนกันทุกเครื่อง | มี overhead ของ container และต่างจากการ tune บน production host จริงเล็กน้อย |
+| ติดตั้ง PostgreSQL แบบ native | ใกล้เคียงสภาพแวดล้อม production จริงกว่า ไม่มีชั้นเพิ่ม | ติดตั้ง/ถอนยากกว่า และต่างกันไปตามระบบปฏิบัติการ |
+| ใช้ image ดีฟอลต์ตามเดิม | ใช้งานได้ทันที ไม่ต้องเขียนอะไรเพิ่ม | ไม่ได้ tune หน่วยความจำหรือ config สำหรับ workload เฉพาะของคุณ |
+| เขียน Dockerfile เอง | ปรับ config และ extension ได้ตามต้องการ | ต้องดูแล image และอัปเดตเอง |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ไม่ mount named volume แล้วข้อมูลหายตอน `docker compose down -v`** — ถ้าไม่ผูก volume ไว้กับ data directory ข้อมูลทั้งหมดจะหายไปพร้อม container ตรวจสอบว่า `volumes:` ผูกไว้ถูกต้องเสมอ
-- **รันเป็น superuser เริ่มต้นแม้ตอน dev ในเครื่อง** — การใช้ user `postgres` ตลอดจะซ่อน bug เรื่อง permission ที่จะเจอจริงตอนขึ้น production ควรสร้าง role จำกัดสิทธิ์ไว้ทดสอบตั้งแต่ local
-- **ไว้ใจ config แบบ `POSTGRES_HOST_AUTH_METHOD=trust` แล้วลืมไปว่าไม่ปลอดภัย** — ค่านี้สะดวกตอน dev แต่ห้ามนำไปใช้นอกเครื่อง local เด็ดขาด เพราะเปิดให้เชื่อมต่อได้โดยไม่ต้องใช้รหัสผ่าน
-
-> 💡 ตัวอย่างจากของจริง
->
-> **[docker-library/postgres](https://hub.docker.com/_/postgres)** — official image เป็นจุดเริ่มต้นมาตรฐานที่คอร์สและ tutorial ส่วนใหญ่ใช้ เพราะให้ฐานข้อมูลที่ใช้งานได้จริงในไม่กี่วินาทีโดยไม่ต้องติดตั้งอะไรบนเครื่อง
->
-> **ทีม backend ทั่วไป** — มาตรฐานใช้ `docker-compose.yml` เป็นทางเข้าโปรเจกต์ เพื่อลดปัญหา "works on my machine" ตอน onboard คนใหม่เข้าทีม
+- **"`docker compose down` ลบข้อมูลของฉัน"** ไม่ใช่ ที่ลบคือ `down -v` (หรือ `docker volume rm`) ทั้งสองแสดงไว้ด้านบน
+- **"volume ต้อง mount ที่ `/var/lib/postgresql/data`"** จริงจนถึง 17 บน image 18 mount นั้นทำให้ container exit
+- **"`latest` ใช้ตอนพัฒนาได้"** ใช้ได้จนกว่า tag จะย้ายไป major ใหม่ แล้ว volume เดิมจะไม่สตาร์ต
+- **"รันด้วย superuser เริ่มต้นในเครื่องไม่เป็นไร"** มันซ่อน bug เรื่องสิทธิ์ที่คุณจะเจอจริงบน production สร้าง role ที่จำกัดสิทธิ์ไว้ทดสอบ (บทถัดไป)
+- **"`POSTGRES_HOST_AUTH_METHOD=trust` แค่สะดวก"** มันเอาการยืนยันตัวตนออกสำหรับทุกคนที่เข้าถึง port ได้ (พิสูจน์ด้านบน)
 
 export const quizDocker = [
   {
-    q: 'ทำไมต้อง mount named volume ที่ data directory ของ Postgres?',
+    q: 'ทำไมต้อง mount named volume ที่ตำแหน่งข้อมูลของ Postgres?',
     options: [
       'เพื่อให้ container เริ่มเร็วขึ้น',
-      'เพื่อให้ข้อมูลอยู่รอดเมื่อ container ถูกลบ',
+      'เพื่อให้ข้อมูลรอดเมื่อ container ถูกลบ',
       'เพื่อเปลี่ยน port เริ่มต้น',
-      'ต้องมีเพื่อให้ image รันได้',
+      'จำเป็นสำหรับให้ image รันได้',
     ],
     answer: 1,
+    explain: 'filesystem ของ container ถูกลบไปพร้อมกับมัน named volume คือที่เก็บแยก: บทเรียนลบ container สร้างตัวใหม่บน volume เดิม แล้ว row ยังอยู่',
   },
   {
-    q: 'ตัวแปร environment ใดที่ต้องตั้งค่าเพื่อให้ image postgres อย่างเป็นทางการเริ่มต้นได้?',
+    q: 'ต้องตั้ง environment variable ใดเพื่อให้ image postgres อย่างเป็นทางการเริ่มทำงาน (เว้นแต่ใช้ trust auth)?',
     options: ['POSTGRES_DB', 'POSTGRES_PASSWORD', 'PGADMIN_DEFAULT_EMAIL', 'POSTGRES_PORT'],
     answer: 1,
+    explain: 'ถ้าไม่ตั้ง entrypoint จะพิมพ์ "Database is uninitialized and superuser password is not specified" แล้วออก',
   },
   {
     q: 'port เริ่มต้นของ PostgreSQL คืออะไร?',
     options: ['80', '3306', '5432', '8080'],
     answer: 2,
+    explain: '5432 คือค่าเริ่มต้นของ PostgreSQL ส่วน 3306 คือ MySQL, 80/8080 คือ HTTP ในบทเรียน ฝั่ง host แมปเป็น 55440 แต่ใน container ยังฟังที่ 5432',
+  },
+  {
+    q: 'คุณใช้ `-v pgdata:/var/lib/postgresql/data` กับ `postgres:18.6` จะเกิดอะไรขึ้น?',
+    options: [
+      'ทำงานเหมือน PostgreSQL 17 ทุกประการ',
+      'container exit พร้อมข้อผิดพลาดที่บอกให้ mount /var/lib/postgresql แทน',
+      'เก็บข้อมูลได้ แต่ไม่เข้ารหัส',
+      'Docker เมินการ mount เงียบ ๆ',
+    ],
+    answer: 1,
+    explain: 'ตั้งแต่ version 18 image เก็บ cluster ในไดเรกทอรีย่อยตาม major version (`/var/lib/postgresql/18/docker`) จึงต้อง mount volume ขึ้นไปหนึ่งระดับ path ผิดทำให้ entrypoint exit ด้วย status 1',
+  },
+  {
+    q: 'หลัง `docker compose down` (ไม่มี flag) ข้อมูลของคุณอยู่ที่ไหน?',
+    options: [
+      'ถูกลบไปพร้อม container',
+      'ยังอยู่ใน named volume และอยู่ครบหลัง `up` ครั้งต่อไป',
+      'อยู่ใน service pgAdmin',
+      'อยู่ใน image',
+    ],
+    answer: 1,
+    explain: '`down` ลบ container และ network ส่วน named volume จะถูกเก็บไว้ เว้นแต่ใส่ `-v` ซึ่งบทเรียนใช้เป็นขั้นสุดท้ายเพื่อแสดงรูปแบบที่ทำลายข้อมูล',
   },
 ];
 
