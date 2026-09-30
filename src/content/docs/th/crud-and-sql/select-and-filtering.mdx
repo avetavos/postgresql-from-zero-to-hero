@@ -1,6 +1,6 @@
 ---
 title: การ select และการกรอง
-description: อ่าน row ด้วย SELECT — เลือก column, จำกัดด้วย WHERE, เรียงด้วย ORDER BY และแบ่งหน้าผลลัพธ์ด้วย LIMIT และ OFFSET
+description: อ่าน row ด้วย SELECT — เลือก column, กรองด้วย WHERE, IN, BETWEEN และ LIKE, จัดการ NULL ให้ถูกต้อง และเรียงลำดับกับแบ่งหน้าผลลัพธ์
 sidebar:
   order: 3
 ---
@@ -9,18 +9,47 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-การอ่านเป็นสิ่งที่คุณทำกับฐานข้อมูลบ่อยที่สุด และ `SELECT` คือเครื่องมือสำหรับงานนั้น `SELECT` หนึ่งคำสั่งอธิบายว่าคุณต้องการ column ไหน, row ไหนที่เข้าเกณฑ์, เรียงลำดับอย่างไร และเอาเท่าไหร่ server จะส่งคืนชุดผลลัพธ์ (result set) — ศูนย์หรือมากกว่าหนึ่ง row — โดยไม่เปลี่ยนแปลงอะไรบนดิสก์
+การอ่านคือสิ่งที่พบบ่อยที่สุดที่คุณทำกับฐานข้อมูล และ `SELECT` คือวิธีที่ทำ `SELECT` อธิบายว่าคุณต้องการ column ไหน row ไหนผ่านเกณฑ์ เรียงอย่างไร และกี่แถว เซิร์ฟเวอร์ส่งชุดผลลัพธ์ — ศูนย์ row หรือมากกว่า — โดยไม่เปลี่ยนอะไรบนดิสก์
 
-ตัวอย่างเหล่านี้สมมติว่า table `authors` ถูกเติมด้วย row จำนวนหนึ่งจากบทเรียน insert
+ทุก output ด้านล่างเป็นของจริงจาก **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) รันในฐานข้อมูลเปล่าหนึ่งตัว จากบนลงล่าง เริ่มด้วยชุดข้อมูลมาตรฐานของคอร์ส row ที่คุณเห็นที่นี่จึงเป็น row เดียวกับที่ได้จากบท insert ตัวเลขเวลามาจาก Mac เครื่องนี้
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## การเลือก column
 
-แสดงรายการ column ที่คุณต้องการหลัง `SELECT` ใช้ `*` เฉพาะตอนสำรวจอย่างรวดเร็วเท่านั้น ในโค้ดจริง ให้ระบุชื่อ column เพื่อให้ผลลัพธ์คงที่ แม้ในภายหลังจะมีคนเพิ่ม column เข้ามา
+ลิสต์ column ที่ต้องการหลัง `SELECT` ใช้ `*` เฉพาะตอนสำรวจเร็ว ๆ ในโค้ดจริงให้ระบุชื่อ column เพื่อให้ผลลัพธ์คงที่แม้มีคนเพิ่ม column ทีหลัง
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/select-columns.sql
     SELECT id, name, born FROM authors;
     ```
   </TabItem>
@@ -53,32 +82,48 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- id |      name       | born
-----+-----------------+------
-  1 | Mira Castellan  | 1971
-  2 | Devon Reyes     | 1985
-  3 | Priya Anand     | 1990
-  4 | Tomas Holt      | 1962
-(4 rows)
+ id |    name    | born 
+----+------------+------
+  1 | Mara Linde | 1968
+  2 | Owen Pryce | 1975
+  3 | Sela Vance | 1990
+(3 rows)
 ```
 
-## การจำกัดด้วย WHERE
+`SELECT *` คืน column ทั้งหมดที่ table มีในวันนี้:
 
-`WHERE` เก็บไว้เฉพาะ row ที่เงื่อนไขเป็นจริงเท่านั้น คุณสามารถเปรียบเทียบด้วย `=`, `<`, `>`, `<=`, `>=` และรวมเงื่อนไขด้วย `AND` และ `OR`
+```sql
+-- sql/select-star.sql
+SELECT * FROM books WHERE id = 1;
+```
+
+```text
+ id |     title     | author_id | published | copies_sold 
+----+---------------+-----------+-----------+-------------
+  1 | Quiet Harbors |         1 |      2003 |         450
+(1 row)
+```
+
+driver แต่ละตัวถูกรันหนึ่งครั้งกับชุดข้อมูลนี้ (ผลลัพธ์รวมไว้ท้ายบทเรียน) รายละเอียดหนึ่งที่เห็นได้ที่นั่น: `node-postgres` คืน id แบบ `bigint` เป็นสตริง (`id: '1'`) เพราะตัวเลข JavaScript เก็บจำนวนเต็ม 64 บิตได้ไม่ครบ
+
+## การกรองด้วย WHERE
+
+`WHERE` เก็บเฉพาะ row ที่เงื่อนไขเป็นจริง คุณเปรียบเทียบด้วย `=`, `<`, `>`, `<=`, `>=` และรวมเงื่อนไขด้วย `AND` และ `OR` ได้
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/select-where.sql
     SELECT name, born
     FROM authors
-    WHERE born >= 1980 AND born < 1995;
+    WHERE born >= 1970 AND born < 1995;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(
       'SELECT name, born FROM authors WHERE born >= $1 AND born < $2',
-      [1980, 1995],
+      [1970, 1995],
     );
     ```
   </TabItem>
@@ -86,7 +131,7 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     ```python
     cur.execute(
         "SELECT name, born FROM authors WHERE born >= %s AND born < %s",
-        (1980, 1995),
+        (1970, 1995),
     )
     ```
   </TabItem>
@@ -94,13 +139,13 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
     ```go
     rows, err := conn.Query(ctx,
         "SELECT name, born FROM authors WHERE born >= $1 AND born < $2",
-        1980, 1995)
+        1970, 1995)
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query("SELECT name, born FROM authors WHERE born >= $1 AND born < $2")
-        .bind(1980_i32)
+        .bind(1970_i32)
         .bind(1995_i32)
         .fetch_all(&pool)
         .await?;
@@ -109,20 +154,46 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
-    name     | born
--------------+------
- Devon Reyes | 1985
- Priya Anand | 1990
+    name    | born 
+------------+------
+ Owen Pryce | 1975
+ Sela Vance | 1990
 (2 rows)
 ```
 
-## IN, BETWEEN และการจับคู่ pattern
+## IN, BETWEEN และการจับคู่รูปแบบ
 
-`IN` ตรวจสอบการเป็นสมาชิกในรายการ, `BETWEEN` เป็นช่วงแบบรวมปลายทั้งสองข้าง และ `LIKE` จับคู่ pattern ของข้อความ `LIKE` สนใจตัวพิมพ์เล็กพิมพ์ใหญ่ PostgreSQL ยังมี `ILIKE` สำหรับการจับคู่แบบไม่สนใจตัวพิมพ์เล็กพิมพ์ใหญ่ด้วย ใน pattern นั้น `%` จับคู่กับอักขระต่อเนื่องชุดใดก็ได้ และ `_` จับคู่กับหนึ่งอักขระพอดี
+`IN` ตรวจการเป็นสมาชิกในลิสต์ `BETWEEN` คือช่วงแบบรวมปลายทั้งสอง (รวม 1968 และ 1975 ด้านล่าง) และ `LIKE` จับคู่รูปแบบข้อความ
+
+```sql
+-- sql/select-between-in.sql
+SELECT name, born
+FROM authors
+WHERE born BETWEEN 1968 AND 1975;
+
+SELECT title FROM books WHERE published IN (2003, 2011);
+```
+
+```text
+    name    | born 
+------------+------
+ Mara Linde | 1968
+ Owen Pryce | 1975
+(2 rows)
+
+     title     
+---------------
+ Quiet Harbors
+ Tidal Notes
+(2 rows)
+```
+
+`LIKE` แยกตัวพิมพ์เล็กใหญ่ PostgreSQL มี `ILIKE` สำหรับการจับคู่แบบไม่สนตัวพิมพ์ ในรูปแบบ `%` ตรงกับตัวอักษรกี่ตัวก็ได้ และ `_` ตรงกับหนึ่งตัวพอดี
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/select-ilike.sql
     SELECT name, born
     FROM authors
     WHERE born BETWEEN 1960 AND 1980
@@ -167,54 +238,138 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
-      name      | born
-----------------+------
- Mira Castellan | 1971
- Tomas Holt     | 1962
-(2 rows)
+    name    | born 
+------------+------
+ Mara Linde | 1968
+(1 row)
+```
+
+กฎเรื่องตัวพิมพ์เทียบข้างกัน (`'m%'` เป็นตัวพิมพ์เล็ก ชื่อขึ้นต้นด้วย `M`):
+
+```sql
+-- sql/select-like-case.sql
+SELECT name,
+       name LIKE 'm%'  AS like_lower_m,
+       name ILIKE 'm%' AS ilike_lower_m,
+       name LIKE '_ara%' AS underscore_matches_one_char
+FROM authors WHERE id = 1;
+```
+
+```text
+    name    | like_lower_m | ilike_lower_m | underscore_matches_one_char 
+------------+--------------+---------------+-----------------------------
+ Mara Linde | f            | t             | t
+(1 row)
 ```
 
 ## การจัดการ NULL
 
-`NULL` หมายถึง "ไม่ทราบ" จึงไม่ทำตัวเหมือนค่าธรรมดาทั่วไป คุณทดสอบด้วย `=` ไม่ได้ ให้ใช้ `IS NULL` และ `IS NOT NULL` แทน สมมติว่า author คนหนึ่งไม่มีปีเกิดที่บันทึกไว้
+`NULL` หมายถึง "ไม่ทราบ" จึงไม่ทำตัวเหมือนค่าปกติ คุณทดสอบด้วย `=` ไม่ได้ ใช้ `IS NULL` และ `IS NOT NULL` แทน `Unlinked Draft` ในชุดข้อมูลไม่มี author
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT name FROM authors WHERE born IS NULL;
+    -- sql/select-is-null.sql
+    SELECT title FROM books WHERE author_id IS NULL;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
-    const res = await pool.query('SELECT name FROM authors WHERE born IS NULL');
+    const res = await pool.query('SELECT title FROM books WHERE author_id IS NULL');
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    cur.execute("SELECT name FROM authors WHERE born IS NULL")
+    cur.execute("SELECT title FROM books WHERE author_id IS NULL")
     ```
   </TabItem>
   <TabItem label="Go">
     ```go
-    rows, err := conn.Query(ctx, "SELECT name FROM authors WHERE born IS NULL")
+    rows, err := conn.Query(ctx, "SELECT title FROM books WHERE author_id IS NULL")
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
-    let rows = sqlx::query("SELECT name FROM authors WHERE born IS NULL")
+    let rows = sqlx::query("SELECT title FROM books WHERE author_id IS NULL")
         .fetch_all(&pool)
         .await?;
     ```
   </TabItem>
 </Tabs>
 
-## การเรียงลำดับและแบ่งหน้า
+```text
+     title      
+----------------
+ Unlinked Draft
+(1 row)
+```
 
-`ORDER BY` เรียงผลลัพธ์ เติม `DESC` เพื่อเรียงจากมากไปน้อย `LIMIT` จำกัดจำนวน row และ `OFFSET` ข้าม row จากด้านบน — เมื่อใช้ร่วมกันจะช่วยให้คุณแบ่งหน้าผ่าน table ขนาดใหญ่ได้
+ส่วนที่เหลือของตรรกะสามค่า รันบน table เดียวกัน `= NULL` ไม่คืนอะไร `<> 1` **ทิ้ง** row ที่ author เป็น NULL ด้วย เพราะ `unknown <> 1` คือ unknown ไม่ใช่ true ส่วน `IS DISTINCT FROM` ปฏิบัติต่อ NULL เหมือนค่าปกติ และ `count(column)` ข้าม NULL ขณะที่ `count(*)` ไม่ข้าม:
+
+```sql
+-- sql/select-null.sql
+SELECT title FROM books WHERE author_id = NULL;
+SELECT title FROM books WHERE author_id <> 1 ORDER BY id;
+SELECT title FROM books WHERE author_id IS DISTINCT FROM 1 ORDER BY id;
+SELECT count(*) AS all_rows, count(author_id) AS non_null_author_id FROM books;
+```
+
+```text
+ title 
+-------
+(0 rows)
+
+    title    
+-------------
+ Tidal Notes
+(1 row)
+
+     title      
+----------------
+ Tidal Notes
+ Unlinked Draft
+(2 rows)
+
+ all_rows | non_null_author_id 
+----------+--------------------
+        4 |                  3
+(1 row)
+```
+
+NULL ยังมีตำแหน่งการเรียง: ท้ายสุดในการเรียงจากน้อยไปมากโดยค่าเริ่มต้น และหน้าสุดเมื่อใช้ `NULLS FIRST`:
+
+```sql
+-- sql/select-null-order.sql
+SELECT title, author_id FROM books ORDER BY author_id;
+SELECT title, author_id FROM books ORDER BY author_id NULLS FIRST, id;
+```
+
+```text
+       title       | author_id 
+-------------------+-----------
+ Quiet Harbors     |         1
+ The Glass Orchard |         1
+ Tidal Notes       |         2
+ Unlinked Draft    |          
+(4 rows)
+
+       title       | author_id 
+-------------------+-----------
+ Unlinked Draft    |          
+ Quiet Harbors     |         1
+ The Glass Orchard |         1
+ Tidal Notes       |         2
+(4 rows)
+```
+
+## การเรียงลำดับและการแบ่งหน้า
+
+`ORDER BY` เรียงผลลัพธ์ เพิ่ม `DESC` สำหรับเรียงจากมากไปน้อย `LIMIT` จำกัดจำนวน row และ `OFFSET` ข้าม row จากบนสุด — สองอย่างรวมกันให้คุณเปิดดู table ใหญ่ทีละหน้า
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/select-order-limit.sql
     SELECT name, born
     FROM authors
     ORDER BY born DESC
@@ -256,50 +411,343 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
-    name     | born
--------------+------
- Devon Reyes | 1985
- Mira Castellan | 1971
+    name    | born 
+------------+------
+ Owen Pryce | 1975
+ Mara Linde | 1968
 (2 rows)
 ```
 
-**ใน pgAdmin:** รันอันใดก็ได้เหล่านี้ใน Query Tool ผลลัพธ์จะปรากฏใน table Data Output ด้านล่าง และคุณยังเรียง column ได้ด้วยการคลิกที่หัว column
+**ใน pgAdmin:** รันตัวอย่างใดก็ได้ใน Query Tool ผลลัพธ์ปรากฏใน grid Data Output ด้านล่าง ซึ่งคุณเรียง column ได้โดยคลิกหัวคอลัมน์
+
+ลำดับการเรียงแน่นอนได้ก็ต่อเมื่อ key ที่ใช้เรียงไม่ซ้ำ `sales` มี tie (สอง row ที่ 400 copies) เพิ่ม tiebreaker เช่น primary key เพื่อให้ลำดับทำซ้ำได้:
+
+```sql
+-- sql/select-order-tiebreaker.sql
+SELECT id, region, copies FROM sales ORDER BY copies DESC, id LIMIT 3;
+```
+
+```text
+ id | region | copies 
+----+--------+--------
+  1 | East   |    900
+  2 | West   |    400
+  3 | West   |    400
+(3 rows)
+```
+
+ข้อความเรียงตาม collation ของฐานข้อมูล ไม่ใช่ตามค่าไบต์ ใน `en_US.utf8` `apple` กับ `Apple` อยู่ติดกัน ใน `"C"` ตัวพิมพ์ใหญ่ทุกตัวมาก่อนตัวพิมพ์เล็กทุกตัว:
+
+```sql
+-- sql/select-collation.sql
+SELECT datcollate AS database_collation FROM pg_database WHERE datname = current_database();
+SELECT w AS default_collation FROM (VALUES ('apple'), ('Banana'), ('cherry'), ('Apple')) t(w) ORDER BY w;
+SELECT w AS c_collation FROM (VALUES ('apple'), ('Banana'), ('cherry'), ('Apple')) t(w) ORDER BY w COLLATE "C";
+```
+
+```text
+ database_collation 
+--------------------
+ en_US.utf8
+(1 row)
+
+ default_collation 
+-------------------
+ apple
+ Apple
+ Banana
+ cherry
+(4 rows)
+
+ c_collation 
+-------------
+ Apple
+ Banana
+ apple
+ cherry
+(4 rows)
+```
+
+และ `LIMIT` ที่ไม่มี `ORDER BY` คืน row *บางส่วน* ตามลำดับที่เซิร์ฟเวอร์อ่านได้ มันดูคงที่จนกระทั่งมี row หนึ่งถูก update (PostgreSQL เขียน row เวอร์ชันใหม่ไว้คนละที่) แล้วสอง row แรกก็เปลี่ยน:
+
+```sql
+-- sql/limit-without-order.sql
+SELECT id, title FROM books LIMIT 2;
+UPDATE books SET copies_sold = copies_sold WHERE id = 1;
+SELECT id, title FROM books LIMIT 2;
+SELECT id, title FROM books ORDER BY id LIMIT 2;
+```
+
+```text
+ id |       title       
+----+-------------------
+  1 | Quiet Harbors
+  2 | The Glass Orchard
+(2 rows)
+
+UPDATE 1
+ id |       title       
+----+-------------------
+  2 | The Glass Orchard
+  3 | Tidal Notes
+(2 rows)
+
+ id |       title       
+----+-------------------
+  1 | Quiet Harbors
+  2 | The Glass Orchard
+(2 rows)
+```
+
+### OFFSET ลึกช้า keyset paging ไม่ช้า
+
+`OFFSET n` ข้าม row โดยไม่อ่านไม่ได้: เซิร์ฟเวอร์สร้าง `n + limit` row แรกแล้วทิ้ง `n` ตัว ต้นทุนโตตามเลขหน้า keyset ("seek") paging ขอ row หลัง key ล่าสุดที่คุณเห็นแทน บน 200,000 row หน้า 15,001 ทั้งสองวิธี (plan แสดง row ที่อ่านจริง):
+
+```sql
+-- sql/offset-vs-keyset.sql
+CREATE TABLE events (id int PRIMARY KEY, payload text);
+INSERT INTO events SELECT g, md5(g::text) FROM generate_series(1, 200000) g;
+ANALYZE events;
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, SUMMARY ON)
+SELECT id FROM events ORDER BY id LIMIT 10 OFFSET 150000;
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, SUMMARY ON)
+SELECT id FROM events WHERE id > 150000 ORDER BY id LIMIT 10;
+```
+
+```text
+CREATE TABLE
+INSERT 0 200000
+ANALYZE
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Limit (actual time=19.105..19.108 rows=10.00 loops=1)
+   ->  Index Only Scan using events_pkey on events (actual time=0.012..15.379 rows=150010.00 loops=1)
+         Heap Fetches: 150010
+         Index Searches: 1
+ Planning Time: 0.095 ms
+ Execution Time: 19.118 ms
+(6 rows)
+
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Limit (actual time=0.004..0.006 rows=10.00 loops=1)
+   ->  Index Only Scan using events_pkey on events (actual time=0.004..0.005 rows=10.00 loops=1)
+         Index Cond: (id > 150000)
+         Heap Fetches: 10
+         Index Searches: 1
+ Planning Time: 0.039 ms
+ Execution Time: 0.010 ms
+(7 rows)
+```
+
+`OFFSET 150000` อ่าน 150,010 row ใช้ราว 19 ms ส่วนแบบ keyset อ่าน 10 row ใช้ไมโครวินาทีไม่กี่ตัว หน้าลึก ๆ ผู้ใช้จริงแทบไม่ต้องการ แต่ crawler และงาน export ต้องการตลอด ข้อแลกเปลี่ยน: keyset ต้องมี key เรียงที่ไม่ซ้ำและมี index (`ORDER BY id` หรือ `(created_at, id)`) และกระโดดไป "หน้า 300" ตรง ๆ ไม่ได้
+
+### การจับคู่รูปแบบและ index
+
+คำแนะนำที่ว่า `ILIKE '%text%'` "ใช้ index ธรรมดาไม่ได้" เป็นจริง และทางแก้คือ trigram index บน 200,000 row เดิม พบ 4 row จาก 200,000 กับ `ILIKE` บน `'%A3F9C%'` (ข้อมูลเป็น hex ตัวพิมพ์เล็ก จึงทำให้ `ILIKE` มีความหมาย): แม้มี B-tree ธรรมดาบน column PostgreSQL ก็อ่านทั้ง table แต่เมื่อมี GIN index ของ `pg_trgm` มันอ่าน heap block ห้าบล็อก:
+
+```sql
+-- sql/ilike-trigram.sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX events_payload_btree ON events (payload);
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, SUMMARY ON)
+SELECT id FROM events WHERE payload ILIKE '%A3F9C%';
+CREATE INDEX events_payload_trgm ON events USING gin (payload gin_trgm_ops);
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, SUMMARY ON)
+SELECT id FROM events WHERE payload ILIKE '%A3F9C%';
+```
+
+```text
+CREATE EXTENSION
+CREATE INDEX
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Seq Scan on events (actual time=11.414..102.843 rows=4.00 loops=1)
+   Filter: (payload ~~* '%A3F9C%'::text)
+   Rows Removed by Filter: 199996
+ Planning Time: 0.296 ms
+ Execution Time: 102.865 ms
+(5 rows)
+
+CREATE INDEX
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on events (actual time=0.157..0.167 rows=4.00 loops=1)
+   Recheck Cond: (payload ~~* '%A3F9C%'::text)
+   Rows Removed by Index Recheck: 1
+   Heap Blocks: exact=5
+   ->  Bitmap Index Scan on events_payload_trgm (actual time=0.147..0.147 rows=5.00 loops=1)
+         Index Cond: (payload ~~* '%A3F9C%'::text)
+         Index Searches: 1
+ Planning Time: 0.188 ms
+ Execution Time: 0.185 ms
+(9 rows)
+```
+
+แนวคิดเดียวกันกับ `WHERE lower(email) = ...`: index ธรรมดาบน `payload` ถูกเมิน แต่ expression index บนนิพจน์เดียวกันถูกใช้:
+
+```sql
+-- sql/lower-expression-index.sql
+EXPLAIN (COSTS OFF) SELECT id FROM events WHERE lower(payload) = 'abc';
+CREATE INDEX events_payload_lower ON events (lower(payload));
+EXPLAIN (COSTS OFF) SELECT id FROM events WHERE lower(payload) = 'abc';
+```
+
+```text
+                   QUERY PLAN                   
+------------------------------------------------
+ Gather
+   Workers Planned: 1
+   ->  Parallel Seq Scan on events
+         Filter: (lower(payload) = 'abc'::text)
+(4 rows)
+
+CREATE INDEX
+                     QUERY PLAN                     
+----------------------------------------------------
+ Bitmap Heap Scan on events
+   Recheck Cond: (lower(payload) = 'abc'::text)
+   ->  Bitmap Index Scan on events_payload_lower
+         Index Cond: (lower(payload) = 'abc'::text)
+(4 rows)
+```
+
+โมดูล indexes ลงลึกทั้งหมดนี้ ประเด็นตรงนี้คือรูปแบบของ query ตัดสินว่า index ช่วยได้หรือไม่
+
+## Reading AI-generated code
+
+ผลลัพธ์ของ driver ที่สัญญาไว้ก่อนหน้า:
+
+```text
+$ (each snippet run once against the course dataset in a scratch database; the program then prints the values of one column)
+[Choosing columns] Node.js (pg 8.23.0):
+    [
+      { id: '1', name: 'Mara Linde', born: 1968 },
+      { id: '2', name: 'Owen Pryce', born: 1975 },
+      { id: '3', name: 'Sela Vance', born: 1990 }
+    ]
+[Choosing columns] Python (psycopg 3.3.6):
+    (1, 'Mara Linde', 1968)
+    (2, 'Owen Pryce', 1975)
+    (3, 'Sela Vance', 1990)
+[Choosing columns] Go (pgx v5.11.0): Mara Linde, Owen Pryce, Sela Vance
+[Choosing columns] Rust (sqlx 0.9.0): Mara Linde, Owen Pryce, Sela Vance
+[WHERE] Node.js (pg 8.23.0): Owen Pryce, Sela Vance
+[WHERE] Python (psycopg 3.3.6): Owen Pryce, Sela Vance
+[WHERE] Go (pgx v5.11.0): Owen Pryce, Sela Vance
+[WHERE] Rust (sqlx 0.9.0): Owen Pryce, Sela Vance
+[BETWEEN + ILIKE] Node.js (pg 8.23.0): Mara Linde
+[BETWEEN + ILIKE] Python (psycopg 3.3.6): Mara Linde
+[BETWEEN + ILIKE] Go (pgx v5.11.0): Mara Linde
+[BETWEEN + ILIKE] Rust (sqlx 0.9.0): Mara Linde
+[IS NULL] Node.js (pg 8.23.0): Unlinked Draft
+[IS NULL] Python (psycopg 3.3.6): Unlinked Draft
+[IS NULL] Go (pgx v5.11.0): Unlinked Draft
+[IS NULL] Rust (sqlx 0.9.0): Unlinked Draft
+[ORDER BY / LIMIT / OFFSET] Node.js (pg 8.23.0): Owen Pryce, Mara Linde
+[ORDER BY / LIMIT / OFFSET] Python (psycopg 3.3.6): Owen Pryce, Mara Linde
+[ORDER BY / LIMIT / OFFSET] Go (pgx v5.11.0): Owen Pryce, Mara Linde
+[ORDER BY / LIMIT / OFFSET] Rust (sqlx 0.9.0): Owen Pryce, Mara Linde
+```
+
+ผู้ช่วย AI ถูกขอ endpoint หนังสือที่แบ่งหน้า และเขียน query ที่ตรงไปตรงมา:
+
+<SpotTheBug lang="sql" code={`-- GET /api/books?page=N   (AI comment: "simple pagination, 2 per page")
+SELECT id, title FROM books LIMIT 2 OFFSET :page_offset;`}>
+
+มันผ่านทุกเทสต์บน table ที่นิ่ง เมื่อไม่มี `ORDER BY` เซิร์ฟเวอร์คืน row ตามลำดับใดก็ได้ และลำดับเปลี่ยนจริงเมื่อข้อมูลถูกแก้ (แสดงข้างบน) ที่นี่ผู้ใช้อ่านหน้า 1 ของ feed สี่ row มีคนแก้ row 1 แล้วผู้ใช้ขอหน้า 2:
+
+```sql
+-- sql/pagination-bug.sql
+-- page 1 of a "newest first" list, 2 per page, but no ORDER BY
+CREATE TABLE feed (id int PRIMARY KEY, title text);
+INSERT INTO feed VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four');
+SELECT id, title FROM feed LIMIT 2 OFFSET 0;
+-- someone edits row 1 while the user reads page 1 ...
+UPDATE feed SET title = 'one (edited)' WHERE id = 1;
+-- ... page 2:
+SELECT id, title FROM feed LIMIT 2 OFFSET 2;
+```
+
+```text
+CREATE TABLE
+INSERT 0 4
+ id | title 
+----+-------
+  1 | one
+  2 | two
+(2 rows)
+
+UPDATE 1
+ id |    title     
+----+--------------
+  4 | four
+  1 | one (edited)
+(2 rows)
+```
+
+หน้า 2 แสดง row 1 อีกครั้ง (ที่แก้แล้ว) และไม่เคยแสดง row 3 ทั้งสองเงียบ: ไม่มี error ไม่มี warning วิธีแก้คือการเรียงที่แน่นอนบน key ที่ไม่ซ้ำ:
+
+```sql
+-- sql/pagination-fix.sql
+SELECT id, title FROM feed ORDER BY id LIMIT 2 OFFSET 0;
+SELECT id, title FROM feed ORDER BY id LIMIT 2 OFFSET 2;
+```
+
+```text
+ id |    title     
+----+--------------
+  1 | one (edited)
+  2 | two
+(2 rows)
+
+ id | title 
+----+-------
+  3 | three
+  4 | four
+(2 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+`SELECT` คือ pipeline: FROM (row ไหนมีอยู่) แล้ว WHERE (ตัวไหนผ่าน) แล้ว select list แล้ว ORDER BY แล้ว LIMIT/OFFSET แต่ละขั้นเห็นเฉพาะสิ่งที่ขั้นก่อนหน้าส่งให้ นั่นคือเหตุผลที่การเปรียบเทียบกับ NULL ทิ้ง row แบบเงียบ ๆ (ขั้น WHERE เก็บเฉพาะ *true*) ทำไม LIMIT ที่ไม่เรียงจึงไม่แน่นอน (ไม่เคยกำหนดลำดับ) และทำไม OFFSET ลึกจึงแพง (ขั้นก่อนหน้าต้องสร้าง row เหล่านั้นก่อน OFFSET จะทิ้งได้)
 
 ## เคล็ดลับและข้อควรระวัง
 
-- `NULL` ใช้ตรรกะสามค่า (three-valued logic): การเปรียบเทียบกับ `NULL` ไม่ได้เป็นจริงหรือเท็จ แต่เป็นไม่ทราบ (unknown) ดังนั้น row เหล่านั้นจึงถูกตัดออกโดย `WHERE` จงใช้ `IS NULL` แทน `= NULL` เสมอ
-- `LIMIT` ที่ไม่มี `ORDER BY` จะคืนชุดย่อยแบบสุ่ม — server อาจคืน row ในลำดับใดก็ได้ และลำดับนั้นอาจเปลี่ยนไประหว่างการรันแต่ละครั้ง จงจับคู่ `LIMIT` กับ `ORDER BY` ที่มีผลแน่นอน (deterministic) เสมอ
-- `ILIKE` สะดวกแต่ไม่สามารถใช้ index ธรรมดาได้อย่างมีประสิทธิภาพ สำหรับการค้นหาข้อความหนัก ๆ ให้ศึกษา trigram index หรือ full-text search ในภายหลังของคอร์ส
-- การ select เฉพาะ column ที่คุณต้องการช่วยให้ result set เล็กและโค้ดของคุณทนทานต่อการเปลี่ยนแปลง schema
+- `NULL` ใช้ตรรกะสามค่า: การเปรียบเทียบกับ `NULL` ไม่จริงไม่เท็จแต่ไม่ทราบ row เหล่านั้นจึงถูก `WHERE` ตัดออก ใช้ `IS NULL` (หรือ `IS DISTINCT FROM`) แทน `= NULL` เสมอ
+- `LIMIT` ที่ไม่มี `ORDER BY` คืนส่วนย่อยตามอำเภอใจ — เซิร์ฟเวอร์คืน row ลำดับใดก็ได้ และลำดับนั้นเปลี่ยนได้ระหว่างการรัน จับคู่ `LIMIT` กับ `ORDER BY` ที่แน่นอนพร้อม tiebreaker ที่ไม่ซ้ำเสมอ
+- `ILIKE '%x%'` ใช้ B-tree ธรรมดาไม่ได้ GIN index ของ `pg_trgm` ทำให้เร็ว (ราว 100 ms เหลือ 0.2 ms ข้างบน) `lower(col) = ...` ต้องใช้ expression index
+- ควรใช้ keyset paging แทน `OFFSET` ลึกกับ table ใหญ่
+- เลือกเฉพาะ column ที่ต้องการ ทำให้ชุดผลลัพธ์เล็กและโค้ดทนต่อการเปลี่ยน schema
 
-<Callout title="เรียงลำดับก่อนแบ่งหน้า">
-การแบ่งหน้า (pagination) มีความหมายก็ต่อเมื่ออยู่บนการเรียงลำดับที่คงที่ ถ้าสอง row เสมอกันบน column ที่ใช้เรียง ให้เพิ่มตัวตัดสินเสมอ (tiebreaker) เช่น `ORDER BY born DESC, id` เพื่อให้ row เดิมไม่ปรากฏบนสองหน้า
+<Callout title="เรียงก่อนแบ่งหน้า">
+การแบ่งหน้ามีความหมายเฉพาะบนการเรียงที่คงที่ ถ้าสอง row เสมอกันบน column ที่เรียง ให้เพิ่ม tiebreaker เช่น `ORDER BY born DESC, id` เพื่อไม่ให้ row เดียวกันโผล่ในสองหน้า
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| ระบุ column list ชัดเจน | ผลลัพธ์คงที่ (stable API), ส่งข้อมูลผ่าน wire น้อยลง, ไม่ leak column ที่อ่อนไหว | ต้องแก้ query เมื่อ column ที่ต้องการเปลี่ยน |
-| `SELECT *` | เขียนเร็ว สะดวกตอน prototype หรือสำรวจข้อมูล | พังเงียบ ๆ เมื่อมีคนเพิ่ม/ลบ/เปลี่ยนชื่อ column ทีหลัง และอาจ leak column ที่ไม่ควรออก |
-| กรองด้วย `WHERE` ใน SQL | ถูก push ไปให้ database ทำ ใช้ index ได้ ส่งเฉพาะ row ที่ต้องการผ่าน wire | ต้องเข้าใจ SQL และวางแผน index ให้ตรงกับ pattern การกรอง |
-| ดึงข้อมูลทั้งหมดมากรองใน application code | เขียน logic ฝั่งแอปได้ง่าย ไม่ต้องคิด SQL ซับซ้อน | เปลือง bandwidth, พลาดโอกาสใช้ index, ช้าลงเมื่อ table โต |
+| ลิสต์ column ชัดเจน | API คงที่ ข้อมูลผ่านเครือข่ายน้อยลง ไม่รั่ว column อ่อนไหว | ต้องแก้ query เมื่อ column ที่ต้องการเปลี่ยน |
+| `SELECT *` | เขียนเร็ว สะดวกสำหรับ prototype หรือสำรวจข้อมูล | พังแบบเงียบ ๆ เมื่อมีคนเพิ่ม/ลบ/เปลี่ยนชื่อ column ทีหลัง และอาจรั่ว column ที่ไม่ควรเปิดเผย |
+| กรองด้วย `WHERE` ใน SQL | ถูกผลักลงฐานข้อมูล ใช้ index ได้ มีเฉพาะ row ที่ต้องการข้ามเครือข่าย | ต้องเข้าใจ SQL และวางแผน index ให้ตรงกับรูปแบบตัวกรอง |
+| ดึงทุกอย่างแล้วกรองในโค้ดแอป | ตรรกะฝั่งแอปง่าย ไม่ต้องเขียน SQL ซับซ้อน | สิ้นเปลืองแบนด์วิดท์ พลาดโอกาสใช้ index และช้าลงเมื่อ table โต |
+| แบ่งหน้าด้วย `LIMIT`/`OFFSET` | เรียบง่าย กระโดดไปหน้าใดก็ได้ | ต้นทุนโตตาม offset (19 ms ที่ 150,000 row) |
+| Keyset paging | ต้นทุนต่อหน้าคงที่ | ต้องมี key เรียงที่ไม่ซ้ำและมี index กระโดดหน้าแบบสุ่มไม่ได้ |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ `SELECT *` ใน production code** — เมื่อมีคนเพิ่ม column ใหม่ทีหลัง ผลลัพธ์ที่ได้เปลี่ยนไปแบบไม่ตั้งใจ และอาจ leak column ที่อ่อนไหวออกไปด้วย ให้ระบุ column ที่ต้องการเสมอ
-- **ห่อ column ที่มี index ด้วย function ใน `WHERE`** เช่น `WHERE lower(email) = ...` — ทำให้ index ธรรมดาใช้งานไม่ได้ ต้องใช้ expression index หรือปรับ query
-- **คิดว่า `NULL` จับคู่กับ `=` ได้** — `WHERE born = NULL` ไม่คืน row ใด ๆ เลยเพราะ `NULL` เทียบด้วยตรรกะสามค่า ต้องใช้ `IS NULL` แทน
-
-> 💡 ตัวอย่างจากของจริง
->
-> **API สาธารณะที่ออกแบบมาดี** — บังคับให้ client ระบุ field ที่ต้องการอย่างชัดเจนและมี pagination เสมอ เพื่อป้องกัน `SELECT *` ที่แอบเปลี่ยน contract ของ response และรักษา query plan ให้คาดเดาได้
->
-> **ระบบ dashboard แบบ real-time** — กรองข้อมูลด้วย `WHERE` และ index ที่วางแผนไว้ล่วงหน้าแทนการดึงทั้ง table มากรองในโค้ด เพื่อให้ query ตอบสนองไวแม้ table มีหลายสิบล้าน row
+- **"`WHERE col <> 1` คืนทุก row ที่ไม่ใช่ 1"** ไม่รวม row ที่ `col` เป็น NULL (พิสูจน์ข้างบน)
+- **"`LIMIT 10` ให้ 10 row แรก"** ให้ 10 row ตัวไหนไม่ระบุถ้าไม่มี `ORDER BY`
+- **"`BETWEEN` ไม่รวมขอบบน"** รวมทั้งสองปลาย
+- **"`ILIKE` คือ `LIKE` ที่ช้ากว่า"** มันยังใช้ index เดียวกับ `LIKE` ไม่ได้ด้วย trigram index ทำให้เร็วทั้งคู่
+- **"การเรียงเหมือนกันทุกที่"** มันตาม collation: `apple, Apple, Banana` ใน `en_US.utf8`, `Apple, Banana, apple` ใน `"C"`
 
 export const quizSelect = [
   {
-    q: 'จะหา row ที่ column born ไม่มีค่า (unknown) ได้อย่างถูกต้องอย่างไร?',
+    q: 'คุณหา row ที่ column born ไม่ทราบค่าอย่างถูกต้องได้อย่างไร?',
     options: [
       'WHERE born = NULL',
       'WHERE born IS NULL',
@@ -307,31 +755,46 @@ export const quizSelect = [
       'WHERE born <> 0',
     ],
     answer: 1,
+    explain: '`= NULL` ไม่เคยเป็นจริง (unknown) จึงคืน 0 row ในบทเรียน ส่วน `IS NULL` คืน row นั้น',
   },
   {
-    q: 'ข้อไหนถูกต้องเกี่ยวกับ LIMIT ที่ไม่มี ORDER BY?',
+    q: 'ข้อใดจริงเกี่ยวกับ LIMIT ที่ไม่มี ORDER BY?',
     options: [
       'คืน row ที่เก่าที่สุดเสมอ',
-      'คืน subset แบบสุ่มที่อาจเปลี่ยนไปเรื่อย ๆ',
+      'คืนส่วนย่อยตามอำเภอใจที่อาจเปลี่ยนได้',
       'เกิด error',
-      'sort ตาม primary key ให้อัตโนมัติ',
+      'เรียงตาม primary key โดยอัตโนมัติ',
     ],
     answer: 1,
+    explain: 'หลัง UPDATE ที่ไม่เปลี่ยนค่าทำให้ row ย้ายที่ `LIMIT 2` คืน row 2 และ 3 แทน 1 และ 2 มีแต่ ORDER BY ที่กำหนดลำดับ',
   },
   {
-    q: 'operator ตัวไหนทำ pattern match แบบไม่สนตัวพิมพ์เล็กใหญ่ (case-insensitive) ใน PostgreSQL?',
+    q: 'operator ใดจับคู่รูปแบบแบบไม่สนตัวพิมพ์เล็กใหญ่ใน PostgreSQL?',
     options: ['LIKE', 'ILIKE', 'BETWEEN', 'IN'],
     answer: 1,
+    explain: '`name ILIKE \'m%\'` ตรงกับ `Mara Linde` ส่วน `name LIKE \'m%\'` ไม่ตรง',
   },
   {
-    q: 'OFFSET 1 ทำอะไรใน SELECT?',
+    q: '`OFFSET 1` ใน SELECT ทำอะไร?',
     options: [
-      'คืนแค่ row แรก',
-      'ข้าม row แรกของผลลัพธ์ที่ sort แล้ว',
-      'จำกัดผลลัพธ์ให้เหลือ row เดียว',
-      'เลื่อนตำแหน่งของ column',
+      'คืนเฉพาะ row แรก',
+      'ข้าม row แรกของผลลัพธ์ที่เรียงแล้ว',
+      'จำกัดผลลัพธ์ให้ row เดียว',
+      'ชดเชยตำแหน่ง column',
     ],
     answer: 1,
+    explain: 'มันทิ้ง row แรกของผลลัพธ์ก่อน LIMIT ทำงาน: `ORDER BY born DESC LIMIT 2 OFFSET 1` คืน author ที่ใหม่เป็นอันดับ 2 และ 3',
+  },
+  {
+    q: 'books.author_id คือ 1, 1, 2, NULL `WHERE author_id <> 1` คืนอะไร?',
+    options: [
+      'เฉพาะ row ที่ author_id เป็น 2',
+      'row ที่ author_id เป็น 2 และ NULL',
+      'ทั้งสี่ row',
+      'error เพราะเปรียบเทียบ NULL ไม่ได้',
+    ],
+    answer: 0,
+    explain: 'NULL <> 1 เป็น unknown และ WHERE เก็บเฉพาะ true ใช้ `IS DISTINCT FROM 1` เพื่อรวม row ที่เป็น NULL',
   },
 ];
 
