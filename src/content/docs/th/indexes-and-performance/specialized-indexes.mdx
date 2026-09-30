@@ -1,116 +1,116 @@
 ---
-title: Specialized index
-description: เหนือกว่า B-tree — GIN สำหรับ jsonb อาร์เรย์และ full-text, GiST สำหรับข้อมูลเชิงเรขาคณิตและช่วง, BRIN สำหรับ table ขนาดมหึมาแบบ append-only, Hash สำหรับ equality รวมถึง partial, expression และ covering INCLUDE index
+title: Index เฉพาะทาง
+description: ทัวร์ที่วัดผลจริงของ index แบบ GIN, GiST, BRIN และ Hash รวมถึงแบบ partial, expression และ covering — ขนาดและ plan บน 300,000 row และความผิดพลาดที่ทำให้ index ไม่ถูกใช้
 sidebar:
   order: 4
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-B-tree จัดการ equality, range, การ sort และ prefix match ได้ — ซึ่งครอบคลุม query ส่วนใหญ่ แต่ข้อมูลบางอย่างและรูปแบบ query บางอย่างต้องการโครงสร้างที่ต่างออกไป PostgreSQL มาพร้อมกับ index access method อื่น ๆ อีกหลายแบบ และ *variant* ของ index อีกสองสามแบบที่ใช้ได้กับ access method ใด ๆ บทเรียนนี้คือการพาทัวร์ว่าควรหยิบแต่ละแบบมาใช้เมื่อใด
+B-tree รองรับ equality, range, การเรียงลำดับ และ (ด้วย operator class ที่ถูก) การ match แบบ prefix ซึ่งครอบคลุม query ส่วนใหญ่ แต่ข้อมูลและรูปแบบ query บางอย่างต้องการโครงสร้างอื่น PostgreSQL มาพร้อม index access method อื่นอีกหลายแบบ และ *ตัวแปร* ของ index ที่ใช้ได้กับทุก access method บทนี้เป็นทัวร์ของพวกมัน และสำหรับแต่ละแบบจะแสดงขนาดและ plan บน row จริง คุณจึงเห็นว่าเมื่อไรมันคุ้มค่า
 
-## GIN — สำหรับค่าที่บรรจุหลายรายการ
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ทุกขนาดและ plan คัดลอกจาก `psql` และเวลาเป็นการรันครั้งเดียวจาก Mac เครื่องนี้
 
-**Generalized Inverted Index** (GIN) สร้างขึ้นสำหรับ column ที่แต่ละ row บรรจุรายการที่ค้นหาได้ *หลายรายการ*: สมาชิกของอาร์เรย์, คีย์และค่าของเอกสาร `jsonb` หรือคำ ("lexemes") ของเอกสาร full-text GIN จับคู่แต่ละรายการเข้ากับ row ที่บรรจุรายการนั้น ดังนั้น "หาทุก row ที่บรรจุรายการนี้" จึงรวดเร็ว
+export const indexChoice = `flowchart TD
+  Q["What does the query do?"] --> A["Equality, range, ORDER BY"]
+  Q --> B["Contains an item: jsonb, array, tsvector"]
+  Q --> C["Overlaps, nearest neighbour: ranges, geometry"]
+  Q --> D["Range on a huge, physically ordered table"]
+  Q --> E["Equality only, long keys"]
+  A --> A1["B-tree"]
+  B --> B1["GIN"]
+  C --> C1["GiST"]
+  D --> D1["BRIN"]
+  E --> E1["Hash"]`;
 
-```sql
--- speed up containment queries on a jsonb column
-CREATE INDEX books_meta_gin ON books USING gin (metadata);
+<Mermaid code={indexChoice} title="เลือก index แบบไหนสำหรับ query แบบไหน" />
 
--- now this uses the index
-SELECT * FROM books WHERE metadata @> '{"genre": "fiction"}';
-```
+## ชุดข้อมูล
 
-ใช้ GIN เมื่อคุณ query *ภายใน* ค่าที่เป็นองค์ประกอบ (composite values): การหา containment ของ `jsonb` ด้วย `@>`, ความเป็นสมาชิกของอาร์เรย์ หรือ full-text search ด้วย `tsvector`
-
-## GiST — สำหรับข้อมูลเชิงเรขาคณิต ช่วง และเพื่อนบ้านที่ใกล้ที่สุด
-
-**Generalized Search Tree** (GiST) รองรับ query ที่ B-tree แสดงออกไม่ได้: รูปทรงสองรูปซ้อนทับกันไหม, จุดหนึ่งตกอยู่ในกล่องหรือไม่, row ใดอยู่ใกล้ตำแหน่งนี้ที่สุด, ช่วงสองช่วงตัดกันไหม GiST คือกระดูกสันหลังของชนิดข้อมูลเชิงเรขาคณิต, ชนิดข้อมูลแบบช่วง (range) และส่วนขยาย PostGIS
-
-```sql
--- index a range column for overlap queries
-CREATE INDEX rooms_booking_gist ON rooms USING gist (booked_during);
-
--- find bookings that overlap a given period
-SELECT * FROM rooms WHERE booked_during && '[2026-06-01,2026-06-08)'::tsrange;
-```
-
-ใช้ GiST สำหรับข้อมูลเชิงพื้นที่ (spatial), การซ้อนทับของช่วงด้วย `&&` และการเรียงลำดับตามเพื่อนบ้านที่ใกล้ที่สุด
-
-## BRIN — สำหรับ table ขนาดมหึมาที่เรียงลำดับโดยธรรมชาติ
-
-**Block Range Index** (BRIN) มีขนาดเล็กจิ๋ว แทนที่จะทำ index ให้ทุก row BRIN เก็บแค่ค่าต่ำสุดและสูงสุดของแต่ละช่วงบล็อก (block range) ของ table วิธีนี้ทำงานได้สวยงามเมื่อค่าของ column เรียงตัวสอดคล้องกับลำดับการจัดเก็บทางกายภาพ — โดยทั่วไปคือ column timestamp บน log แบบ append-only หรือ table events ที่ row ใหม่จะมี timestamp มากกว่าเสมอ
+table เดียวของหนังสือ 300 000 เล่ม มีเอกสาร JSON `metadata`, ISBN, `created_at` ที่เรียงตามเวลา และแฟลก `in_print` (หนังสือ 5 % หมดพิมพ์) ตั้ง `autovacuum_enabled = off` เฉพาะ table นี้เพื่อให้การสาธิต visibility map ตอนท้ายทำงานเหมือนเดิมทุกครั้ง extension `btree_gist` ต้องใช้กับ exclusion constraint ทีหลัง
 
 ```sql
--- a tiny index for a massive, time-ordered table
-CREATE INDEX events_created_brin ON events USING brin (created_at);
+-- sql/setup.sql
+CREATE EXTENSION IF NOT EXISTS btree_gist;
 
-SELECT * FROM events WHERE created_at >= '2026-06-01';
+CREATE TABLE books (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  isbn       text        NOT NULL,
+  title      text        NOT NULL,
+  author_id  int         NOT NULL,
+  created_at timestamptz NOT NULL,
+  in_print   boolean     NOT NULL,
+  metadata   jsonb       NOT NULL
+) WITH (autovacuum_enabled = off);  -- keeps the visibility-map demo repeatable
+INSERT INTO books (isbn, title, author_id, created_at, in_print, metadata)
+SELECT md5(g::text),
+       (ARRAY['Amber', 'Birch', 'Cedar', 'Dune', 'Ember', 'Fjord', 'Glen', 'Harbor'])[1 + h % 8] || ' Notes ' || g,
+       1 + g % 500,
+       timestamptz '2020-01-01 00:00:00+00' + g * interval '5 minutes',
+       g % 20 <> 0,
+       jsonb_build_object(
+         'genre',  (ARRAY['fiction', 'poetry', 'history', 'science', 'travel', 'cooking', 'art', 'sport'])[1 + (h / 8) % 8],
+         'rating', 1 + (h / 64) % 5,
+         'pages',  100 + (h / 320) % 700,
+         'tags',   jsonb_build_array('t' || (h / 224000) % 50, 't' || h % 97))
+FROM (SELECT g, ('x' || substr(md5(g::text || 'h'), 1, 7))::bit(28)::int AS h
+      FROM generate_series(1, 300000) AS g) AS s;
+ANALYZE books;
+SELECT count(*) AS books,
+       pg_size_pretty(pg_table_size('books')) AS table_size,
+       count(*) FILTER (WHERE metadata @> '{"genre": "poetry", "rating": 5}') AS poetry_5
+FROM books;
 ```
 
-BRIN ใช้พื้นที่เพียงเศษเสี้ยวของ B-tree ข้อแลกเปลี่ยนคือ BRIN ช่วยได้ก็ต่อเมื่อข้อมูลเรียงทางกายภาพตาม column ที่ทำ index ถ้าค่ากระจายแบบสุ่ม ก็แทบไร้ประโยชน์
+```text
+CREATE EXTENSION
+CREATE TABLE
+INSERT 0 300000
+ANALYZE
+ books  | table_size | poetry_5 
+--------+------------+----------
+ 300000 | 59 MB      |     7452
+(1 row)
+```
 
-## Hash — สำหรับ equality เท่านั้น
+## GIN: สำหรับค่าที่มีหลายรายการ
 
-index แบบ **Hash** รองรับ operation เพียงอย่างเดียวเท่านั้น: equality (`=`) ทำ range หรือ sort ไม่ได้ การค้นหาแบบ equality ของ B-tree สมัยใหม่นั้นดีมากจน Hash แทบจะไม่ใช่ผู้ชนะที่ชัดเจน แต่กินพื้นที่น้อยกว่าเล็กน้อยสำหรับ column ขนาดใหญ่ที่ใช้ equality อย่างเดียว
+**Generalized Inverted Index** (GIN) สร้างมาสำหรับ column ที่แต่ละ row เก็บรายการที่ค้นได้ *หลายอย่าง*: สมาชิกของ array, key และ value ของเอกสาร `jsonb` หรือคำ ("lexeme") ของเอกสาร full-text GIN แมปแต่ละรายการไปยัง row ที่มีมัน "หา row ที่มี X ทั้งหมด" จึงเป็นการค้นหาแทนการ scan เมื่อไม่มี index query แบบ containment อ่านทุก row:
 
 ```sql
-CREATE INDEX books_isbn_hash ON books USING hash (isbn);
-
-SELECT * FROM books WHERE isbn = '978-0-00-000000-0';
+-- sql/gin-baseline.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books
+WHERE metadata @> '{"genre": "poetry", "rating": 5, "tags": ["t3"]}';
 ```
 
-จงหยิบ Hash มาใช้ก็ต่อเมื่อคุณวัดผลแล้วว่าชนะ B-tree จริง สำหรับงานที่ใช้ equality ล้วน ๆ มิเช่นนั้นให้ใช้ B-tree เป็นค่าเริ่มต้น
-
-## partial index — ทำ index เฉพาะ row ที่คุณ query
-
-**partial** index ครอบคลุมเฉพาะ row ที่ตรงกับเงื่อนไข `WHERE` หาก query ของคุณมองเฉพาะชุดย่อยเล็ก ๆ อยู่เสมอ การทำ index ให้เฉพาะชุดย่อยนั้นจะทำให้ index เล็กลงและดูแลรักษาได้เร็วขึ้น
-
-```sql
--- only books still in print get indexed
-CREATE INDEX books_active_idx ON books (title) WHERE in_print = true;
+```text
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=23.295..25.749 rows=1.00 loops=1)
+   ->  Gather (actual time=23.176..25.744 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate (actual time=21.810..21.811 rows=1.00 loops=3)
+               ->  Parallel Seq Scan on books (actual time=0.303..21.800 rows=78.67 loops=3)
+                     Filter: (metadata @> '{"tags": ["t3"], "genre": "poetry", "rating": 5}'::jsonb)
+                     Rows Removed by Filter: 99921
+ Planning Time: 0.252 ms
+ Execution Time: 25.811 ms
+(10 rows)
 ```
 
-index นี้เหมาะที่สุดเมื่อ query ส่วนใหญ่มี `WHERE in_print = true`; planner หยิบไปใช้ได้ และ row ที่ `in_print` เป็น false จะไม่เข้าไปอยู่ใน index เลย
-
-## expression index — ทำ index ให้ค่าที่คำนวณได้
-
-หากคุณกรองด้วย *ผลลัพธ์* ของ expression อยู่บ่อย ๆ จงทำ index ให้ expression นั้นโดยตรง index ธรรมดาบน `email` ไม่ช่วยการค้นหาแบบไม่สนตัวพิมพ์เล็กใหญ่ แต่ index บน `lower(email)` ช่วยได้
-
-```sql
-CREATE INDEX authors_lower_name_idx ON authors (lower(name));
-
--- now this is an index scan, not a seq scan
-SELECT * FROM authors WHERE lower(name) = 'ada lovelace';
-```
-
-expression ใน query ต้องตรงกับ expression ที่ทำ index ไว้ทุกประการ planner ถึงจะหยิบ index นั้นมาใช้
-
-## covering index — ตอบ query จาก index เพียงอย่างเดียว
-
-**covering** index ใช้ `INCLUDE` เพื่อเก็บ column เพิ่มเติมไว้ใน index ที่ไม่ได้เป็นส่วนหนึ่งของคีย์การค้นหา หากทุก column ที่ query ต้องการอยู่ใน index PostgreSQL ก็สามารถตอบจาก index ได้โดยไม่ต้องแตะ table เลย — เรียกว่า *index-only scan*
-
-```sql
--- search on author_id, but also carry title and published along
-CREATE INDEX books_author_cover_idx
-  ON books (author_id) INCLUDE (title, published);
-
--- can be answered from the index alone
-SELECT title, published FROM books WHERE author_id = 4;
-```
-
-column ใน `INCLUDE` ถูกเก็บไว้เฉพาะที่ใบ (leaves) ของ index เท่านั้น ไม่ได้ใช้ในการเรียงลำดับ จึงเพิ่มข้อมูลได้โดยไม่เปลี่ยนพฤติกรรมการค้นหา
-
-## การสร้าง index เหล่านี้จาก driver
-
-คำสั่ง `CREATE INDEX` ก็เป็นเพียง SQL driver ตัวไหนก็ส่งคำสั่งนี้ออกไปด้วยวิธีเดียวกัน นี่คือตัวอย่าง GIN ใน driver ต่าง ๆ
+สร้าง GIN index มาตรฐานของ `jsonb` และ query เดิมกลายเป็น bitmap scan ของ index:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
+    -- sql/gin-create.sql
     CREATE INDEX books_meta_gin ON books USING gin (metadata);
     ```
   </TabItem>
@@ -138,63 +138,760 @@ column ใน `INCLUDE` ถูกเก็บไว้เฉพาะที่�
   </TabItem>
 </Tabs>
 
-**ใน pgAdmin:** กล่องโต้ตอบ Create Index มี dropdown ของ Access Method ที่แสดงรายการ btree, hash, gin, gist, brin และอื่น ๆ และมีตัวเลือกสำหรับ column `INCLUDE` ดังนั้นคุณจึงสร้าง index เหล่านี้ได้โดยไม่ต้องเขียน SQL ด้วยมือ
+statement เดียวกันที่ส่งจากแต่ละ driver แล้วอ่านกลับจาก `pg_indexes`:
+
+```text
+$ (each driver runs the CREATE INDEX once on a fresh copy of the dataset, then reads the definition back from pg_indexes)
+Node.js (pg 8.23.0):    CREATE INDEX books_meta_gin ON public.books USING gin (metadata)
+Python (psycopg 3.3.6): CREATE INDEX books_meta_gin ON public.books USING gin (metadata)
+Go (pgx v5.11.0):       CREATE INDEX books_meta_gin ON public.books USING gin (metadata)
+Rust (sqlx 0.9.0):      CREATE INDEX books_meta_gin ON public.books USING gin (metadata)
+```
+
+```sql
+-- sql/gin-plan.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books
+WHERE metadata @> '{"genre": "poetry", "rating": 5, "tags": ["t3"]}';
+```
+
+```text
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Aggregate (actual time=5.158..5.163 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on books (actual time=4.264..5.146 rows=236.00 loops=1)
+         Recheck Cond: (metadata @> '{"tags": ["t3"], "genre": "poetry", "rating": 5}'::jsonb)
+         Heap Blocks: exact=234
+         ->  Bitmap Index Scan on books_meta_gin (actual time=4.231..4.231 rows=236.00 loops=1)
+               Index Cond: (metadata @> '{"tags": ["t3"], "genre": "poetry", "rating": 5}'::jsonb)
+               Index Searches: 1
+ Planning Time: 0.270 ms
+ Execution Time: 5.204 ms
+(9 rows)
+```
+
+25.8 ms กลายเป็น 5.2 ms (รันครั้งแรกครั้งเดียว บางส่วนจึงเป็น cache เย็น) `jsonb` มี GIN operator class ที่สอง `jsonb_path_ops` ซึ่ง index เฉพาะ path พร้อมค่า ไม่ใช่ key เปล่า ๆ เล็กกว่าและเร็วกว่าสำหรับ `@>` และตอบ query ว่ามี key อยู่ไหม (`?`) ไม่ได้ ตรงนี้คือทั้งสองแบบ และ plan สำหรับแต่ละ operator:
+
+```sql
+-- sql/gin-path-ops.sql
+CREATE INDEX books_meta_gin_path ON books USING gin (metadata jsonb_path_ops);
+SELECT relname, pg_size_pretty(pg_relation_size(oid)) AS size
+FROM pg_class
+WHERE relname IN ('books', 'books_meta_gin', 'books_meta_gin_path')
+ORDER BY pg_relation_size(oid) DESC;
+```
+
+```text
+CREATE INDEX
+       relname       |  size   
+---------------------+---------
+ books               | 59 MB
+ books_meta_gin      | 5000 kB
+ books_meta_gin_path | 3704 kB
+(3 rows)
+```
+
+```sql
+-- sql/gin-operators.sql
+DROP INDEX books_meta_gin;
+-- containment: still served by the smaller jsonb_path_ops index
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books
+WHERE metadata @> '{"genre": "poetry", "rating": 5, "tags": ["t3"]}';
+-- key existence (?) is only supported by the default jsonb_ops
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books WHERE metadata ? 'genre';
+```
+
+```text
+DROP INDEX
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ Aggregate (actual time=2.073..2.076 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on books (actual time=1.271..2.062 rows=236.00 loops=1)
+         Recheck Cond: (metadata @> '{"tags": ["t3"], "genre": "poetry", "rating": 5}'::jsonb)
+         Heap Blocks: exact=234
+         ->  Bitmap Index Scan on books_meta_gin_path (actual time=1.241..1.241 rows=236.00 loops=1)
+               Index Cond: (metadata @> '{"tags": ["t3"], "genre": "poetry", "rating": 5}'::jsonb)
+               Index Searches: 1
+ Planning Time: 0.258 ms
+ Execution Time: 2.122 ms
+(9 rows)
+
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=18.266..20.204 rows=1.00 loops=1)
+   ->  Gather (actual time=18.182..20.201 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate (actual time=16.994..16.994 rows=1.00 loops=3)
+               ->  Parallel Seq Scan on books (actual time=0.006..13.644 rows=100000.00 loops=3)
+                     Filter: (metadata ? 'genre'::text)
+ Planning Time: 0.033 ms
+ Execution Time: 20.222 ms
+(9 rows)
+```
+
+`jsonb_path_ops` ขนาด 3.7 MB เทียบกับ 5 MB และตอบ containment ใน 2.1 ms query `?` (key มีอยู่ไหม?) ต้องใช้ `jsonb_ops` มาตรฐาน และเมื่อเหลือแค่ `jsonb_path_ops` มันถอยกลับไปเป็น `Seq Scan` ใช้ GIN เมื่อคุณ query *ข้างใน* ค่าประกอบ: containment ของ `jsonb` ด้วย `@>`, การเป็นสมาชิกของ array หรือ full-text search ด้วย `tsvector` ([docs](https://www.postgresql.org/docs/18/gin.html))
+
+## GiST: สำหรับข้อมูลเรขาคณิต ช่วง และเพื่อนบ้านใกล้สุด
+
+**Generalized Search Tree** (GiST) index ค่าที่ซ้อนทับกันหรือมี "ระยะทาง": รูปทรงเรขาคณิต, range และการค้นหาเพื่อนบ้านใกล้สุด สำหรับ table การจองห้อง (200 000 row แต่ละอันเป็น `tstzrange`) "การจองใดซ้อนทับวันนี้?" คือ query `&&` (overlap) B-tree ตอบไม่ได้ และเมื่อไม่มี index มันคือการ scan:
+
+```sql
+-- sql/gist-setup.sql
+CREATE TABLE rooms (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  room_id       int NOT NULL,
+  booked_during tstzrange NOT NULL
+);
+INSERT INTO rooms (room_id, booked_during)
+SELECT g % 1000,
+       tstzrange(timestamptz '2024-01-01 00:00+00' + (g / 1000) * interval '1 day',
+                 timestamptz '2024-01-01 00:00+00' + (g / 1000) * interval '1 day' + interval '20 hours')
+FROM generate_series(0, 199999) AS g;
+ANALYZE rooms;
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM rooms WHERE booked_during && tstzrange('2024-03-01 00:00+00', '2024-03-02 00:00+00');
+```
+
+```text
+CREATE TABLE
+INSERT 0 200000
+ANALYZE
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ Aggregate (actual time=13.127..13.128 rows=1.00 loops=1)
+   ->  Seq Scan on rooms (actual time=3.922..13.090 rows=1000.00 loops=1)
+         Filter: (booked_during && '["2024-03-01 00:00:00+00","2024-03-02 00:00:00+00")'::tstzrange)
+         Rows Removed by Filter: 199000
+ Planning Time: 0.133 ms
+ Execution Time: 13.147 ms
+(6 rows)
+```
+
+```sql
+-- sql/gist-create.sql
+CREATE INDEX rooms_booked_gist ON rooms USING gist (booked_during);
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM rooms WHERE booked_during && tstzrange('2024-03-01 00:00+00', '2024-03-02 00:00+00');
+SELECT relname, pg_size_pretty(pg_relation_size(oid)) AS size
+FROM pg_class WHERE relname IN ('rooms', 'rooms_booked_gist') ORDER BY pg_relation_size(oid) DESC;
+```
+
+```text
+CREATE INDEX
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Aggregate (actual time=0.486..0.491 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on rooms (actual time=0.384..0.449 rows=1000.00 loops=1)
+         Recheck Cond: (booked_during && '["2024-03-01 00:00:00+00","2024-03-02 00:00:00+00")'::tstzrange)
+         Heap Blocks: exact=9
+         ->  Bitmap Index Scan on rooms_booked_gist (actual time=0.366..0.367 rows=1000.00 loops=1)
+               Index Cond: (booked_during && '["2024-03-01 00:00:00+00","2024-03-02 00:00:00+00")'::tstzrange)
+               Index Searches: 1
+ Planning Time: 0.368 ms
+ Execution Time: 0.526 ms
+(9 rows)
+
+      relname      |  size   
+-------------------+---------
+ rooms             | 13 MB
+ rooms_booked_gist | 9800 kB
+(2 rows)
+```
+
+13.1 ms กลายเป็น 0.53 ms; ราคาคือ index 9.8 MB สังเกตว่า literal ต้องเป็นชนิด range เดียวกับ column `tstzrange` คือ `timestamptz` การ cast literal เป็น `tsrange` (timestamp *ไม่มี* time zone) เป็นคนละชนิดและไม่มี operator ระหว่างสองชนิดนั้น:
+
+```sql
+-- @expect-error 42883
+SELECT count(*) FROM rooms WHERE booked_during && '[2024-03-01,2024-03-03)'::tsrange;
+```
+
+```text
+ERROR:  operator does not exist: tstzrange && tsrange
+LINE 1: SELECT count(*) FROM rooms WHERE booked_during && '[2024-03-...
+                                                       ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+```
+
+GiST ยังเป็นกลไกของ **exclusion constraint** ซึ่งขยาย `UNIQUE` จาก "ไม่ซ้ำกัน" เป็น "ไม่ซ้อนทับกัน" ด้วย `btree_gist` คุณรวม equality บนห้องกับ overlap บนช่วงเวลา และฐานข้อมูลเองปฏิเสธการจองซ้อน:
+
+```sql
+-- sql/exclusion-constraint.sql
+CREATE TABLE room_bookings (
+  room_id       int NOT NULL,
+  booked_during tstzrange NOT NULL,
+  EXCLUDE USING gist (room_id WITH =, booked_during WITH &&)
+);
+INSERT INTO room_bookings VALUES (5, tstzrange('2024-03-01 09:00+00', '2024-03-01 11:00+00'));
+INSERT INTO room_bookings VALUES (6, tstzrange('2024-03-01 10:00+00', '2024-03-01 12:00+00'));
+```
+
+```text
+CREATE TABLE
+INSERT 0 1
+INSERT 0 1
+```
+
+```sql
+-- @expect-error 23P01
+INSERT INTO room_bookings VALUES (5, tstzrange('2024-03-01 10:00+00', '2024-03-01 12:00+00'));
+```
+
+```text
+ERROR:  conflicting key value violates exclusion constraint "room_bookings_room_id_booked_during_excl"
+DETAIL:  Key (room_id, booked_during)=(5, ["2024-03-01 10:00:00+00","2024-03-01 12:00:00+00")) conflicts with existing key (room_id, booked_during)=(5, ["2024-03-01 09:00:00+00","2024-03-01 11:00:00+00")).
+```
+
+## BRIN: สำหรับ table ใหญ่ที่เรียงตามธรรมชาติ
+
+**Block Range Index** (BRIN) เก็บเพียงค่าต่ำสุดและสูงสุดของ column ต่อ block range ของ table (ค่าเริ่มต้น 128 page) ใช้ได้เฉพาะเมื่อค่าใน column สัมพันธ์กับลำดับทางกายภาพของ row ซึ่งเป็นกรณีของ table แบบ append-only ที่มี timestamp ตรงนี้ `created_at` เพิ่มตาม row id:
+
+```sql
+-- sql/brin-baseline.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books WHERE created_at >= '2021-06-01 00:00+00' AND created_at < '2021-06-08 00:00+00';
+```
+
+```text
+                                                                               QUERY PLAN                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=11.283..13.787 rows=1.00 loops=1)
+   ->  Gather (actual time=11.131..13.780 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate (actual time=9.809..9.810 rows=1.00 loops=3)
+               ->  Parallel Seq Scan on books (actual time=4.016..9.782 rows=672.00 loops=3)
+                     Filter: ((created_at >= '2021-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2021-06-08 00:00:00+00'::timestamp with time zone))
+                     Rows Removed by Filter: 99328
+ Planning Time: 0.325 ms
+ Execution Time: 13.856 ms
+(10 rows)
+```
+
+สร้าง B-tree และ BRIN บน column นั้นแล้วเทียบขนาด:
+
+```sql
+-- sql/brin-create.sql
+CREATE INDEX books_created_btree ON books (created_at);
+CREATE INDEX books_created_brin  ON books USING brin (created_at);
+SELECT relname, pg_size_pretty(pg_relation_size(oid)) AS size
+FROM pg_class
+WHERE relname IN ('books', 'books_created_btree', 'books_created_brin')
+ORDER BY pg_relation_size(oid) DESC;
+DROP INDEX books_created_btree;  -- keep only BRIN to see its plan
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books WHERE created_at >= '2021-06-01 00:00+00' AND created_at < '2021-06-08 00:00+00';
+```
+
+```text
+CREATE INDEX
+CREATE INDEX
+       relname       |  size   
+---------------------+---------
+ books               | 59 MB
+ books_created_btree | 6600 kB
+ books_created_brin  | 24 kB
+(3 rows)
+
+DROP INDEX
+                                                                              QUERY PLAN                                                                              
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual time=0.871..0.872 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on books (actual time=0.121..0.801 rows=2016.00 loops=1)
+         Recheck Cond: ((created_at >= '2021-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2021-06-08 00:00:00+00'::timestamp with time zone))
+         Rows Removed by Index Recheck: 8016
+         Heap Blocks: lossy=256
+         ->  Bitmap Index Scan on books_created_brin (actual time=0.018..0.019 rows=2560.00 loops=1)
+               Index Cond: ((created_at >= '2021-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2021-06-08 00:00:00+00'::timestamp with time zone))
+               Index Searches: 1
+ Planning Time: 0.152 ms
+ Execution Time: 0.887 ms
+(10 rows)
+```
+
+**24 kB เทียบกับ 6 600 kB** ของ B-tree (และ 59 MB ของ table): index BRIN เล็กกว่าราว 275 เท่า plan ของ BRIN คือ `Bitmap Heap Scan` ที่ `Heap Blocks: lossy=256`: index บอกเพียง "ช่วงเหล่านี้อาจมี row ที่ตรง" และ PostgreSQL ตรวจ row ในช่วงเหล่านั้นซ้ำ (`Rows Removed by Index Recheck: 8016`) มันตอบข้อมูลหนึ่งสัปดาห์ใน 0.9 ms เทียบกับ 13.9 ms ของ sequential scan
+
+BRIN พึ่งพา correlation ระหว่าง column กับลำดับทางกายภาพทั้งหมด ซึ่ง `pg_stats` รายงาน:
+
+```sql
+-- sql/brin-correlation.sql
+SELECT attname, round(correlation::numeric, 3) AS correlation
+FROM pg_stats
+WHERE tablename = 'books' AND attname IN ('id', 'created_at', 'isbn')
+ORDER BY attname;
+```
+
+```text
+  attname   | correlation 
+------------+-------------
+ created_at |       1.000
+ id         |       1.000
+ isbn       |      -0.002
+(3 rows)
+```
+
+`created_at` และ `id` เป็น 1.000 (เรียงสมบูรณ์); hash ของ `isbn` ราว 0 (สุ่ม) เพื่อดู BRIN พัง ให้คัดลอก table ในลำดับสุ่มแล้ว index column เดียวกัน:
+
+```sql
+-- sql/brin-shuffled.sql
+CREATE TABLE books_shuffled AS SELECT * FROM books ORDER BY random();
+CREATE INDEX books_shuffled_brin ON books_shuffled USING brin (created_at);
+ANALYZE books_shuffled;
+SELECT attname, round(correlation::numeric, 3) AS correlation
+FROM pg_stats WHERE tablename = 'books_shuffled' AND attname = 'created_at';
+-- what the planner chooses by default
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books_shuffled WHERE created_at >= '2021-06-01 00:00+00' AND created_at < '2021-06-08 00:00+00';
+-- what the BRIN index would do if forced (teaching switch)
+BEGIN;
+SET LOCAL enable_seqscan = off;
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books_shuffled WHERE created_at >= '2021-06-01 00:00+00' AND created_at < '2021-06-08 00:00+00';
+ROLLBACK;
+```
+
+```text
+SELECT 300000
+CREATE INDEX
+ANALYZE
+  attname   | correlation 
+------------+-------------
+ created_at |       0.007
+(1 row)
+
+                                                                               QUERY PLAN                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=10.646..12.652 rows=1.00 loops=1)
+   ->  Gather (actual time=10.537..12.644 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate (actual time=8.623..8.623 rows=1.00 loops=3)
+               ->  Parallel Seq Scan on books_shuffled (actual time=0.085..8.581 rows=672.00 loops=3)
+                     Filter: ((created_at >= '2021-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2021-06-08 00:00:00+00'::timestamp with time zone))
+                     Rows Removed by Filter: 99328
+ Planning Time: 0.072 ms
+ Execution Time: 12.670 ms
+(10 rows)
+
+BEGIN
+SET
+                                                                                    QUERY PLAN                                                                                    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=21.638..23.501 rows=1.00 loops=1)
+   ->  Gather (actual time=21.505..23.497 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate (actual time=19.922..19.923 rows=1.00 loops=3)
+               ->  Parallel Bitmap Heap Scan on books_shuffled (actual time=0.405..19.855 rows=672.00 loops=3)
+                     Recheck Cond: ((created_at >= '2021-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2021-06-08 00:00:00+00'::timestamp with time zone))
+                     Rows Removed by Index Recheck: 99328
+                     Heap Blocks: lossy=2889
+                     Worker 0:  Heap Blocks: lossy=2373
+                     Worker 1:  Heap Blocks: lossy=2354
+                     ->  Bitmap Index Scan on books_shuffled_brin (actual time=0.188..0.188 rows=76160.00 loops=1)
+                           Index Cond: ((created_at >= '2021-06-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2021-06-08 00:00:00+00'::timestamp with time zone))
+                           Index Searches: 1
+ Planning Time: 0.142 ms
+ Execution Time: 23.542 ms
+(16 rows)
+
+ROLLBACK
+```
+
+correlation ตอนนี้ 0.007 planner ปฏิเสธ index อย่างถูกต้องและ scan table (12.7 ms) เมื่อบังคับใช้ (สวิตช์สำหรับสอน) BRIN ระบุแทบทุก block range เป็นตัวเลือก (`Heap Blocks: lossy` หลักพันในแต่ละ process, `Rows Removed by Index Recheck: 99328`) จึงอ่านทั้ง table อยู่ดีและ *ช้ากว่า* 23.5 ms index เล็กมากแต่ไม่ตัดอะไรทิ้งเลย
+
+## Hash: สำหรับ equality เท่านั้น
+
+**Hash index** เก็บ hash ของ key รองรับเฉพาะ `=`; ใช้กับ range หรือ `ORDER BY` ไม่ได้ จุดขายคือขนาดสำหรับ key ยาว สำหรับ ISBN 32 ตัวอักษร:
+
+```sql
+-- sql/hash-index.sql
+CREATE INDEX books_isbn_hash  ON books USING hash (isbn);
+CREATE INDEX books_isbn_btree ON books (isbn);
+SELECT relname, pg_size_pretty(pg_relation_size(oid)) AS size
+FROM pg_class WHERE relname IN ('books_isbn_hash', 'books_isbn_btree') ORDER BY 2 DESC;
+DROP INDEX books_isbn_btree;
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM books WHERE isbn = md5('777');
+-- a range / ORDER BY cannot use a hash index
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM books WHERE isbn > md5('777') ORDER BY isbn LIMIT 5;
+```
+
+```text
+CREATE INDEX
+CREATE INDEX
+     relname      |  size   
+------------------+---------
+ books_isbn_hash  | 8208 kB
+ books_isbn_btree | 17 MB
+(2 rows)
+
+DROP INDEX
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Index Scan using books_isbn_hash on books (actual time=0.012..0.013 rows=1.00 loops=1)
+   Index Cond: (isbn = 'f1c1592588411002af340cbaedd6fc33'::text)
+   Index Searches: 1
+ Planning Time: 0.392 ms
+ Execution Time: 0.025 ms
+(5 rows)
+
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Limit (actual time=12.677..15.197 rows=5.00 loops=1)
+   ->  Gather Merge (actual time=12.676..15.195 rows=5.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Sort (actual time=11.045..11.046 rows=4.33 loops=3)
+               Sort Key: isbn
+               Sort Method: top-N heapsort  Memory: 27kB
+               Worker 0:  Sort Method: top-N heapsort  Memory: 27kB
+               Worker 1:  Sort Method: top-N heapsort  Memory: 27kB
+               ->  Parallel Seq Scan on books (actual time=0.013..10.455 rows=5580.67 loops=3)
+                     Filter: (isbn > 'f1c1592588411002af340cbaedd6fc33'::text)
+                     Rows Removed by Filter: 94419
+ Planning Time: 0.072 ms
+ Execution Time: 15.211 ms
+(14 rows)
+```
+
+hash index ขนาด 8.2 MB เทียบกับ 17 MB ของ B-tree และการค้นหาแบบ equality ใช้ 0.025 ms แต่ B-tree ให้การเรียงและ range ด้วย เมื่อมีเฉพาะ hash index `ORDER BY isbn LIMIT 5` กลายเป็น parallel sequential scan บวก sort (15.2 ms) hash index ถูกบันทึกลง WAL และปลอดภัยเมื่อ crash ตั้งแต่ PostgreSQL 10 คำเตือนเก่าที่ห้ามใช้จึงไม่มีผลแล้ว ([docs](https://www.postgresql.org/docs/18/hash-index.html)) แต่ข้อจำกัดแบบ equality-only ยังอยู่
+
+## Partial index: index เฉพาะ row ที่ query
+
+**partial index** มี clause `WHERE` และมีเฉพาะ row ที่เข้าเงื่อนไข ถ้าคุณค้นหาแต่หนังสือที่หมดพิมพ์ (5 % ของ table) partial index มีขนาดเป็นเศษเสี้ยวของ index เต็ม และดูแลถูกกว่า:
+
+```sql
+-- sql/partial-index.sql
+CREATE INDEX books_author_full ON books (author_id);
+CREATE INDEX books_out_of_print_idx ON books (author_id) WHERE NOT in_print;
+SELECT relname, pg_size_pretty(pg_relation_size(oid)) AS size
+FROM pg_class WHERE relname IN ('books_author_full', 'books_out_of_print_idx') ORDER BY pg_relation_size(oid) DESC;
+DROP INDEX books_author_full;  -- now only the partial index exists
+-- the WHERE of the query implies the index predicate: usable
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM books WHERE NOT in_print AND author_id = 21;
+-- it does not: not usable
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM books WHERE in_print AND author_id = 21;
+```
+
+```text
+CREATE INDEX
+CREATE INDEX
+        relname         |  size   
+------------------------+---------
+ books_author_full      | 2032 kB
+ books_out_of_print_idx | 120 kB
+(2 rows)
+
+DROP INDEX
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on books (actual time=0.127..0.776 rows=600.00 loops=1)
+   Recheck Cond: ((author_id = 21) AND (NOT in_print))
+   Heap Blocks: exact=600
+   ->  Bitmap Index Scan on books_out_of_print_idx (actual time=0.072..0.072 rows=600.00 loops=1)
+         Index Cond: (author_id = 21)
+         Index Searches: 1
+ Planning Time: 0.727 ms
+ Execution Time: 0.803 ms
+(8 rows)
+
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather (actual time=9.567..11.834 rows=0.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Parallel Seq Scan on books (actual time=7.970..7.970 rows=0.00 loops=3)
+         Filter: (in_print AND (author_id = 21))
+         Rows Removed by Filter: 100000
+ Planning Time: 0.020 ms
+ Execution Time: 11.844 ms
+(8 rows)
+```
+
+120 kB เทียบกับ 2 032 kB planner ใช้มันเมื่อ `WHERE` ของ query บ่งชี้ predicate ของ index (`NOT in_print`) และใช้ไม่ได้เมื่อไม่บ่งชี้ (`in_print` อีก 95 %): กรณีหลังถอยกลับไปเป็น sequential scan `UNIQUE` index แบบ partial ยังเป็นวิธีมาตรฐานในการพูดว่า "ไม่ซ้ำในหมู่ row ที่ active"
+
+## Expression index: index ค่าที่คำนวณ
+
+**expression index** เก็บผลของฟังก์ชันหรือ expression แก้กรณีที่ query ครอบ column ด้วยฟังก์ชันจน index ธรรมดาไม่มีประโยชน์:
+
+```sql
+-- sql/expression-index.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM books WHERE lower(title) = 'harbor notes 1234';
+CREATE INDEX books_lower_title_idx ON books (lower(title));
+ANALYZE books;
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM books WHERE lower(title) = 'harbor notes 1234';
+-- a different expression is a different question
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT * FROM books WHERE title ILIKE 'harbor notes 1234';
+```
+
+```text
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Gather (actual time=29.244..31.787 rows=0.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Parallel Seq Scan on books (actual time=27.812..27.812 rows=0.00 loops=3)
+         Filter: (lower(title) = 'harbor notes 1234'::text)
+         Rows Removed by Filter: 100000
+ Planning Time: 0.394 ms
+ Execution Time: 31.834 ms
+(8 rows)
+
+CREATE INDEX
+ANALYZE
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Index Scan using books_lower_title_idx on books (actual time=0.036..0.036 rows=0.00 loops=1)
+   Index Cond: (lower(title) = 'harbor notes 1234'::text)
+   Index Searches: 1
+ Planning Time: 0.185 ms
+ Execution Time: 0.049 ms
+(5 rows)
+
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Gather (actual time=47.536..49.496 rows=0.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   ->  Parallel Seq Scan on books (actual time=45.965..45.965 rows=0.00 loops=3)
+         Filter: (title ~~* 'harbor notes 1234'::text)
+         Rows Removed by Filter: 100000
+ Planning Time: 0.098 ms
+ Execution Time: 49.505 ms
+(8 rows)
+```
+
+sequential scan 31.8 ms แล้ว 0.05 ms เมื่อมี index บน `lower(title)` query ต้องใช้ expression เดียวกัน: `title ILIKE '...'` เป็นคนละคำถามและยัง scan (49.5 ms) สำหรับกรณีนั้นต้องใช้ trigram index (`pg_trgm`) ซึ่งครอบคลุมพร้อม full-text search
+
+## Covering index: ตอบ query จาก index อย่างเดียว
+
+**Index Only Scan** ตอบ query จาก index โดยไม่แตะ table ถ้าทุก column ที่ต้องการอยู่ใน index `INCLUDE` เพิ่ม column ที่ไม่ใช่ key เข้าไปในใบของ index เพื่อจุดประสงค์นี้ พวกมันถูกเก็บแต่ไม่ใช้เรียงลำดับ
+
+มีข้อแม้ที่ `Heap Fetches` แสดง entry ของ index ไม่บอกว่า row มองเห็นได้สำหรับ transaction ของคุณ visibility map บอก และมีแต่ `VACUUM` ที่สร้างมัน ก่อน `VACUUM` planner ไม่เลือก index-only scan เลย (ใช้ bitmap heap scan 1.35 ms); เมื่อบังคับ มันต้องไปที่ heap ทั้ง 600 row (`Heap Fetches: 600`); หลัง `VACUUM` การไปที่ heap หายไป:
+
+```sql
+-- sql/covering-index.sql
+CREATE INDEX books_author_incl ON books (author_id) INCLUDE (title);
+-- before VACUUM the visibility map is empty: the planner avoids index-only scans
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT author_id, title FROM books WHERE author_id = 7;
+-- force one to count the heap visits it would need (teaching switch)
+BEGIN;
+SET LOCAL enable_bitmapscan = off;
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT author_id, title FROM books WHERE author_id = 7;
+ROLLBACK;
+VACUUM books;
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF) SELECT author_id, title FROM books WHERE author_id = 7;
+```
+
+```text
+CREATE INDEX
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on books (actual time=0.196..1.308 rows=600.00 loops=1)
+   Recheck Cond: (author_id = 7)
+   Heap Blocks: exact=600
+   ->  Bitmap Index Scan on books_author_incl (actual time=0.137..0.137 rows=600.00 loops=1)
+         Index Cond: (author_id = 7)
+         Index Searches: 1
+ Planning Time: 0.819 ms
+ Execution Time: 1.353 ms
+(8 rows)
+
+BEGIN
+SET
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Index Only Scan using books_author_incl on books (actual time=0.013..0.179 rows=600.00 loops=1)
+   Index Cond: (author_id = 7)
+   Heap Fetches: 600
+   Index Searches: 1
+ Planning Time: 0.034 ms
+ Execution Time: 0.201 ms
+(6 rows)
+
+ROLLBACK
+VACUUM
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Index Only Scan using books_author_incl on books (actual time=0.010..0.055 rows=600.00 loops=1)
+   Index Cond: (author_id = 7)
+   Heap Fetches: 0
+   Index Searches: 1
+ Planning Time: 0.113 ms
+ Execution Time: 0.085 ms
+(6 rows)
+```
+
+`Heap Fetches: 0` และ 0.085 ms ต้นทุนของ `INCLUDE (title)` คือ index ที่ใหญ่ขึ้น และทุก `UPDATE` ของ `title` ตอนนี้แตะมันด้วย
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกบอกว่าการค้นหาช้าบน column `metadata` และเพิ่ม GIN index พร้อมคอมเมนต์ว่าตัวกรองเร็วแล้ว:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "GIN index on metadata makes the genre/rating filters fast"
+CREATE INDEX books_meta_gin ON books USING gin (metadata);
+
+SELECT count(*) FROM books
+WHERE metadata->>'genre' = 'poetry'
+  AND metadata->>'rating' = '5'
+  AND metadata->'tags' ? 't3';`}>
+
+index มีอยู่ แต่ query กรองด้วย `->>` (ดึงเป็น text) และ `?` บนค่าที่ดึงออกมา GIN index ของ `jsonb` รองรับ operator ที่ใช้กับ *column* (`@>`, `?`, `?|`, `?&`, `@?`, `@@`); expression อย่าง `metadata->>'genre'` เป็นคนละ expression และ index ไม่ถูกพิจารณาเลย:
+
+```sql
+-- sql/stb-wrong.sql
+CREATE INDEX books_meta_gin ON books USING gin (metadata);
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books
+WHERE metadata->>'genre' = 'poetry'
+  AND metadata->>'rating' = '5'
+  AND metadata->'tags' ? 't3';
+```
+
+```text
+CREATE INDEX
+                                                                              QUERY PLAN                                                                               
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual time=13.753..15.535 rows=1.00 loops=1)
+   ->  Gather (actual time=0.140..15.516 rows=236.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Parallel Seq Scan on books (actual time=0.079..12.344 rows=78.67 loops=3)
+               Filter: (((metadata -> 'tags'::text) ? 't3'::text) AND ((metadata ->> 'genre'::text) = 'poetry'::text) AND ((metadata ->> 'rating'::text) = '5'::text))
+               Rows Removed by Filter: 99921
+ Planning Time: 0.276 ms
+ Execution Time: 15.568 ms
+(9 rows)
+```
+
+`Parallel Seq Scan`, 15.6 ms อ่านทั้ง 300 000 row เพื่อคืน 236 เขียนตัวกรองใหม่เป็น containment บน column มันคืน 236 row เท่าเดิม และ planner ใช้ GIN index (ที่นี่คือตัว `jsonb_path_ops` ที่เล็กกว่าที่สร้างไว้ก่อนหน้า):
+
+```sql
+-- sql/stb-fixed.sql
+EXPLAIN (ANALYZE, BUFFERS OFF, COSTS OFF)
+SELECT count(*) FROM books
+WHERE metadata @> '{"genre": "poetry", "rating": 5, "tags": ["t3"]}';
+SELECT
+  (SELECT count(*) FROM books
+   WHERE metadata->>'genre' = 'poetry' AND metadata->>'rating' = '5' AND metadata->'tags' ? 't3') AS old_way,
+  (SELECT count(*) FROM books
+   WHERE metadata @> '{"genre": "poetry", "rating": 5, "tags": ["t3"]}') AS containment;
+```
+
+```text
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ Aggregate (actual time=2.157..2.160 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on books (actual time=1.264..2.146 rows=236.00 loops=1)
+         Recheck Cond: (metadata @> '{"tags": ["t3"], "genre": "poetry", "rating": 5}'::jsonb)
+         Heap Blocks: exact=234
+         ->  Bitmap Index Scan on books_meta_gin_path (actual time=1.234..1.234 rows=236.00 loops=1)
+               Index Cond: (metadata @> '{"tags": ["t3"], "genre": "poetry", "rating": 5}'::jsonb)
+               Index Searches: 1
+ Planning Time: 0.400 ms
+ Execution Time: 2.218 ms
+(9 rows)
+
+ old_way | containment 
+---------+-------------
+     236 |         236
+(1 row)
+```
+
+สังเกต `"rating": 5` เป็นตัวเลข JSON ใน containment ส่วน `->>'rating' = '5'` เทียบ text: สองรูปแบบตรงกันบนข้อมูลนี้ แต่ containment ที่ใช้ชนิด JSON ผิดจะไม่ match อะไรเลย ถ้าต้องกรองค่าที่ดึงออกมาค่าเดียวซ้ำ ๆ expression index บน `((metadata->>'genre'))` คือคำตอบแบบ B-tree
+
+</SpotTheBug>
+
+## Mental Model
+
+index แต่ละชนิดคือโครงสร้างข้อมูลที่ตอบคำถามตระกูลหนึ่งได้ถูก B-tree: "อะไรมาก่อน หลัง หรือเท่ากับสิ่งนี้?" GIN: "row ไหนมีรายการนี้?" GiST: "ค่าไหนซ้อนทับหรืออยู่ใกล้สิ่งนี้?" BRIN: "ส่วนไหนของ table อาจมีค่านี้?" เล็กเพราะเก็บเพียง min และ max ต่อส่วน และมีประโยชน์เฉพาะเมื่อ table เรียงทางกายภาพตาม column Hash: "key ตรงนี้เป๊ะมีอยู่ไหม?" ตัวแปร (partial, expression, covering) เปลี่ยน *row ไหน* หรือ *ค่าอะไร* ที่ถูก index ไม่ใช่คำถามที่โครงสร้างตอบได้ index ถูกใช้เฉพาะเมื่อ query ถามคำถามที่ index สร้างมาตอบ
 
 ## เคล็ดลับและข้อควรระวัง
 
-- จงจับคู่ access method ให้เข้ากับรูปแบบของ query: GIN สำหรับ "บรรจุรายการ", GiST สำหรับ "ซ้อนทับหรืออยู่ใกล้", BRIN สำหรับ "ขนาดมหึมาและเรียงลำดับทางกายภาพ", Hash สำหรับ "equality เท่านั้น" และ B-tree สำหรับทุกอย่างที่เหลือ
-- BRIN มีประสิทธิภาพก็ต่อเมื่อลำดับ row ทางกายภาพเป็นไปตาม column ที่ทำ index ถ้าข้อมูลไม่เรียงลำดับ BRIN ก็ไม่ช่วยอะไร
-- partial และ expression index เป็น variant ที่คุณนำมาใช้ทับ access method ใด ๆ ได้ ไม่ใช่ชนิดที่แยกต่างหาก ผสมกันได้เลย เช่น partial GIN index ก็ใช้ได้สมบูรณ์
-- สำหรับ covering index จงระบุ column ค้นหาตามปกติ และวาง column ที่เพียงแค่คืนค่ากลับไว้ใน `INCLUDE` เพื่อไม่ให้ไปทำให้ส่วนที่ใช้ค้นหาของ index บวม (bloat)
+- เลือก access method ให้ตรงกับรูปแบบ query: GIN สำหรับ "มีรายการนี้", GiST สำหรับ "ซ้อนทับหรืออยู่ใกล้", BRIN สำหรับ "ใหญ่และเรียงทางกายภาพ", Hash สำหรับ "equality อย่างเดียว" และ B-tree สำหรับทุกอย่างอื่น
+- BRIN ลองบน column เวลาแบบ append-only ได้ปลอดภัย ตรวจ `pg_stats.correlation` ก่อน (ใกล้ 1.0 หรือ -1.0) หลัง update หรือ delete หนัก ๆ ที่เอาพื้นที่ว่างกลับมาใช้ correlation อาจเสื่อม
+- สำหรับ `jsonb` เลือก `jsonb_path_ops` เมื่อใช้แค่ `@>` (เล็กกว่า เร็วกว่า); เก็บ class มาตรฐานไว้ถ้าต้องการ `?`
+- partial index ถูกใช้เฉพาะเมื่อ `WHERE` ของ query บ่งชี้ predicate; expression index เฉพาะเมื่อ query ใช้ expression ซ้ำ
+- index-only scan ต้องการ `VACUUM` เพื่อสร้าง visibility map; ตรวจ `Heap Fetches`
+- ทุก index ที่เพิ่มทำให้การเขียนช้าลงและกินดิสก์ วัดก่อนเพิ่ม
 
-<Callout title="เฉพาะทาง ไม่ใช่แปลกประหลาด">
-index ส่วนใหญ่ของคุณจะเป็น B-tree ธรรมดา แต่เมื่อคุณเก็บ `jsonb`, ค้นหาอาร์เรย์หรือ full text, ทำงานกับเรขาคณิตหรือช่วง หรือมี table time-series พันล้าน row access method เฉพาะทางจะเปลี่ยน query ที่เป็นไปไม่ได้ให้กลายเป็นเรื่องง่าย แค่รู้ว่ามีตัวเลือกพวกนี้อยู่ก็ได้ประโยชน์ไปครึ่งทางแล้ว หยิบมาใช้เมื่อ B-tree ตอบคำถามนั้นไม่ได้
+<Callout title="เลือกโครงสร้างให้ตรงกับคำถาม">
+ถามว่า query ทำอะไร ไม่ใช่ column คืออะไร column `jsonb` ที่ query ด้วย `->>` แบบ equality ต้องการ B-tree expression index; column เดียวกันที่ query ด้วย `@>` ต้องการ GIN timestamp บน table แบบ append-only ต้องการ BRIN ถ้าขนาดสำคัญที่สุด และ B-tree ถ้าต้องการค้นหาแบบตรงเป๊ะด้วย
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| index เฉพาะทาง (GIN, GiST, BRIN, Hash) | เล็กกว่าและเร็วกว่า B-tree มากสำหรับรูปแบบ query ที่ออกแบบมารองรับโดยเฉพาะ | ใช้ได้ดีเฉพาะรูปแบบ query ที่ตรงกันเท่านั้น เลือกผิดแล้วแทบไม่ช่วยอะไรเลย |
-| B-tree ทั่วไป | รองรับ equality, range, sort และ prefix match ได้พร้อมกัน เป็นตัวเลือกปลอดภัยเมื่อไม่แน่ใจ | ใหญ่กว่าและช้ากว่า index เฉพาะทางสำหรับงานที่ index เฉพาะทางถนัด เช่น containment ของ `jsonb` |
+| GIN (`jsonb_ops`) | `@>`, `?` บน jsonb, array, full text; 25.8 ms เหลือ 5.2 ms ที่นี่ | index 5 MB เขียนช้าลง; ไร้ประโยชน์กับ expression `->>` |
+| GIN (`jsonb_path_ops`) | เล็กกว่า (3.7 MB) และ `@>` เร็วกว่า | ไม่มี query key-existence (`?`) |
+| GiST | overlap, เพื่อนบ้านใกล้สุด, exclusion constraint; 13.1 ms เหลือ 0.53 ms ที่นี่ | index 9.8 MB; ต้องใช้ชนิด range ที่ตรงกัน |
+| BRIN | 24 kB แทน 6.6 MB | เฉพาะ column ที่เรียงทางกายภาพ; lossy ต้องตรวจ row ซ้ำ |
+| Hash | ครึ่งหนึ่งของ B-tree บน key ยาว | equality อย่างเดียว ไม่มีการเรียง |
+| Partial | 120 kB แทน 2 MB | รองรับเฉพาะ query ที่บ่งชี้ predicate |
+| Expression | ทำให้ `lower(title) = ...` เร็วขึ้นราว 600 เท่า | query ต้องใช้ expression เดิมเป๊ะ |
+| Covering (`INCLUDE`) | Index Only Scan, 0.085 ms | index ใหญ่ขึ้น; ต้อง `VACUUM` จึงทำงาน |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ใช้ B-tree กับ column `jsonb`** — B-tree ไม่ช่วย query แบบ containment (`@>`) ได้ดี จงใช้ GIN สำหรับ `jsonb`, อาร์เรย์ หรือ full-text search
-- **ใช้ BRIN บน table ที่ลำดับ row ทางกายภาพไม่สอดคล้องกับ column ที่ทำ index** — BRIN พึ่งพาว่าค่าของ column เรียงตัวตามลำดับการจัดเก็บจริง หากข้อมูลกระจายแบบสุ่ม BRIN แทบไร้ประโยชน์และควรใช้ B-tree แทน
-- **เลือก Hash index โดยไม่ตรวจสอบข้อจำกัด** — Hash รองรับแค่ equality (`=`) เท่านั้น ทำ range query หรือ `ORDER BY` ไม่ได้เลย จงมั่นใจว่า query ของคุณใช้ equality ล้วน ๆ ก่อนเลือก Hash
-
-> 💡 ตัวอย่างจากของจริง
->
-> **บริษัทที่รัน event/log table ขนาดใหญ่** — table แบบ append-only ที่ row ใหม่มี timestamp มากกว่าเสมอ (เช่น log หรือ event stream) ใช้ BRIN index บน `created_at` เพราะขนาด index เล็กกว่า B-tree มาก แต่ยังช่วย range query ตามเวลาได้ดี เป็นรูปแบบที่พบทั่วไปในบริษัท analytics ที่รัน PostgreSQL ในสเกลใหญ่
->
-> **แพลตฟอร์มที่มี full-text search และ column `jsonb` เยอะ** — ระบบที่เก็บ metadata แบบยืดหยุ่นใน `jsonb` (เช่น product catalog หรือ document store) พึ่งพา GIN index เพื่อให้ query แบบ containment และ full-text search เร็วพอสำหรับ production
+- **"GIN index บน column jsonb เร่งทุกตัวกรองบนมัน"** เฉพาะ operator ที่ใช้กับ column เอง; `metadata->>'genre' = ...` ละเลยมัน (15.6 ms)
+- **"BRIN คือ B-tree ที่เล็กกว่า"** มันตอบคำถามต่างกัน: เมื่อเรียงสุ่มมันตัดอะไรไม่ได้ (23.5 ms ช้ากว่า scan)
+- **"Hash index ไม่ปลอดภัย"** ไม่ใช่ตั้งแต่ PostgreSQL 10 แค่รองรับเฉพาะ equality
+- **"index-only scan ไม่แตะ table เลย"** แตะจนกว่า `VACUUM` จะทำเครื่องหมาย page ว่า all-visible (`Heap Fetches: 600` แล้ว 0)
+- **"index เดียวบน `lower(title)` รองรับ `ILIKE` ด้วย"** รองรับเฉพาะ expression เดียวกัน
 
 export const quizSpecialized = [
   {
-    q: 'index ชนิดใดถูกออกแบบมาสำหรับ containment ของ jsonb, ความเป็นสมาชิกของอาร์เรย์ และ full-text search?',
+    q: 'index ชนิดใดออกแบบมาสำหรับ containment ของ jsonb, การเป็นสมาชิกของ array และ full-text search?',
     options: ['BRIN', 'GIN', 'Hash', 'B-tree'],
     answer: 1,
+    explain: 'GIN แมปแต่ละรายการ (key, element, lexeme) ไปยัง row ที่มีมัน บน 300 000 row query `@>` ลดจาก 25.8 ms เหลือ 5.2 ms',
   },
   {
-    q: 'เมื่อใดที่ BRIN index เหมาะสม?',
+    q: 'BRIN index เหมาะเมื่อไร?',
     options: [
-      'สำหรับค่าที่กระจายแบบสุ่ม',
-      'สำหรับ table ขนาดมหึมาที่ลำดับทางกายภาพเป็นไปตาม column ที่ทำ index เช่น log ที่มี timestamp',
-      'สำหรับการบังคับความเป็น unique',
-      'สำหรับการค้นหาข้อความแบบไม่สนตัวพิมพ์เล็กใหญ่',
+      'กับค่าที่กระจายแบบสุ่ม',
+      'กับ table ใหญ่ที่ลำดับทางกายภาพตาม column ที่ index เช่น log ของ timestamp',
+      'เพื่อบังคับความไม่ซ้ำ',
+      'สำหรับการค้นหา text แบบไม่สนตัวพิมพ์',
     ],
     answer: 1,
+    explain: 'มันเก็บ min/max ต่อ block range: 24 kB แทน 6.6 MB เมื่อ correlation เป็น 1.000 บนสำเนาที่สลับลำดับ (correlation 0.007) มันตัดอะไรไม่ได้และช้ากว่าการ scan',
   },
   {
-    q: 'INCLUDE เพิ่มอะไรให้กับ index?',
+    q: 'INCLUDE เพิ่มอะไรให้ index?',
     options: [
-      'คีย์การค้นหาเพิ่มเติมที่เปลี่ยนการเรียงลำดับ',
-      'column ที่ไม่ใช่คีย์ซึ่งถูกเก็บไว้ใน index เพื่อให้ตอบ query ได้โดยไม่ต้องอ่าน table',
-      'ข้อบังคับความเป็น unique',
-      'access method ตัวที่สอง',
+      'key ค้นหาเพิ่มที่เปลี่ยนลำดับ',
+      'column ที่ไม่ใช่ key เก็บใน index เพื่อให้ตอบ query ได้โดยไม่ต้องอ่าน table',
+      'unique constraint',
+      'access method ที่สอง',
     ],
     answer: 1,
+    explain: 'INCLUDE (title) เก็บ title ไว้ในใบของ index หลัง VACUUM query กลายเป็น Index Only Scan ที่ Heap Fetches: 0',
+  },
+  {
+    q: 'มี GIN index บน `metadata` แต่ `WHERE metadata->>\'genre\' = \'poetry\'` ทำ Seq Scan ทำไม?',
+    options: [
+      'GIN index jsonb ไม่ได้',
+      'ตัวกรองอยู่บน expression ที่ดึงออกมา ไม่ใช่ column ที่ index; ใช้ `metadata @> \'{"genre":"poetry"}\'` หรือ expression index',
+      'ไม่ได้รัน ANALYZE',
+      'เลือก jsonb_path_ops',
+    ],
+    answer: 1,
+    explain: 'operator ของ index ใช้กับ expression ที่ถูก index การเขียนใหม่เป็น containment คืน 236 row เท่าเดิมโดยใช้ index (2.2 ms แทน 15.6 ms)',
+  },
+  {
+    q: 'exclusion constraint `EXCLUDE USING gist (room_id WITH =, booked_during WITH &&)` บังคับอะไร?',
+    options: [
+      'room_id ทุกตัวไม่ซ้ำ',
+      'ไม่มีสอง row ที่ห้องเดียวกันและช่วงเวลาซ้อนทับกัน',
+      'ช่วงเวลาต้องเรียงลำดับ',
+      'ห้ามลบห้อง',
+    ],
+    answer: 1,
+    explain: 'มันขยาย UNIQUE ไปสู่การซ้อนทับ การ insert ครั้งที่สองของห้อง 5 ล้มด้วย SQLSTATE 23P01 "conflicting key value violates exclusion constraint"',
   },
 ];
 
