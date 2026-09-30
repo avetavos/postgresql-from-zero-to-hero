@@ -1,50 +1,85 @@
 ---
-title: Window function
-description: จัดอันดับ row และคำนวณยอดสะสมด้วย OVER, PARTITION BY, และ ORDER BY โดยใช้ ROW_NUMBER, RANK, DENSE_RANK, และ SUM() OVER — และดูว่าทำไม window ถึงเก็บ row ไว้ ส่วน GROUP BY ยุบทิ้ง
+title: Window Function
+description: เพิ่ม rank, ยอดสะสม, ค่าจาก row ก่อนหน้า และตัวเลขต่อกลุ่มเป็น column เพิ่มโดยไม่ยุบ row — OVER, PARTITION BY, frame และกับดักของ default frame ที่ทำให้ยอดรวมผิด
 sidebar:
   order: 5
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
-import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-`GROUP BY` ยุบหลาย row ให้เหลือ row สรุปเพียง row เดียว และบางครั้งนั่นคือสิ่งที่ผิดเป๊ะ ๆ เพราะคุณอยากได้ทั้งบทสรุป *และ* รายละเอียดต้นฉบับวางเคียงกัน งานนี้เป็นของ window function ซึ่งจะมองชุดของ row ที่เกี่ยวข้องกับ row ปัจจุบัน — เรียกว่า *window* — แล้วคำนวณค่าออกมา โดยยังคงทุก row ไว้ในผลลัพธ์ นี่คือวิธีเพิ่มอันดับ, ยอดสะสม หรือค่าเฉลี่ยต่อกลุ่มเข้าไปเป็น column เสริมโดยไม่เสียรายละเอียดใด ๆ
+`GROUP BY` ยุบหลาย row เป็น row สรุปหนึ่ง row และบางครั้งนั่นผิดพอดี: คุณอยากได้ทั้งสรุป *และ* รายละเอียดเดิมข้าง ๆ กัน window function ทำอย่างนั้น window function มองชุด row ที่เกี่ยวข้องกับ row ปัจจุบัน — *window* ของมัน — แล้วคำนวณค่า แต่ทุก row ยังอยู่ในผลลัพธ์ วิธีนี้เพิ่ม rank, ยอดสะสม หรือค่าเฉลี่ยต่อกลุ่มเป็น column เพิ่มได้โดยไม่เสียรายละเอียด
 
-เรายังคงใช้ table `authors`, `books`, และ `sales` ต่อไป
+ทุกอย่างด้านล่างรันบน **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop บน Mac, กันยายน 2026) คัดลอกจาก `psql` fence `sql` รันจากบนลงล่างในฐานข้อมูลเปล่าหนึ่งตัว ตัวเลขเวลามาจาก Mac เครื่องนี้
 
-## OVER clause
+## ชุดข้อมูล
 
-คุณเปลี่ยนฟังก์ชันธรรมดาให้กลายเป็น window function โดยการเพิ่ม `OVER` clause ภายในนั้น `PARTITION BY` แบ่ง row ออกเป็นกลุ่ม (เหมือน `GROUP BY` แต่ไม่ยุบ row ทิ้ง) และ `ORDER BY` กำหนดลำดับภายในแต่ละ partition ที่นี่เราใส่หมายเลขให้ยอดขายภายในแต่ละภูมิภาค โดยเรียงจากมากสุดก่อน
+ชุดข้อมูลมาตรฐานของ module นี้ region West มี **เสมอ**: สองยอดขายที่ 400 เล่ม เสมอนี้ไม่ได้มีไว้ประดับ ผลหลายอย่างข้างล่างมีความหมายเพราะมัน
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
+
+## clause OVER
+
+เปลี่ยนฟังก์ชันธรรมดาให้เป็น window function ด้วยการเพิ่ม clause `OVER` ข้างใน `PARTITION BY` แบ่ง row เป็นกลุ่ม (เหมือน `GROUP BY` แต่ไม่ยุบ) และ `ORDER BY` กำหนดลำดับในแต่ละ partition เริ่มจาก aggregate ธรรมดาบน window: แต่ละยอดขายข้างยอดรวมของ region
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT region, copies,
-           ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-    FROM sales
-    ORDER BY region, seq;
+    -- sql/over-partition.sql
+    SELECT s.region, b.title, s.copies,
+           sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+    FROM sales AS s
+    JOIN books AS b ON b.id = s.book_id
+    ORDER BY s.region, s.copies DESC, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(`
-      SELECT region, copies,
-             ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-      FROM sales
-      ORDER BY region, seq
+      SELECT s.region, b.title, s.copies,
+             sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      ORDER BY s.region, s.copies DESC, b.title
     `);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute("""
-        SELECT region, copies,
-               ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-        FROM sales
-        ORDER BY region, seq
+        SELECT s.region, b.title, s.copies,
+               sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+        FROM sales AS s
+        JOIN books AS b ON b.id = s.book_id
+        ORDER BY s.region, s.copies DESC, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -52,19 +87,22 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx, `
-      SELECT region, copies,
-             ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-      FROM sales
-      ORDER BY region, seq`)
+      SELECT s.region, b.title, s.copies,
+             sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      ORDER BY s.region, s.copies DESC, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT region, copies,
-                ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-         FROM sales
-         ORDER BY region, seq",
+        "SELECT s.region, b.title, s.copies,
+                sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+         FROM sales AS s
+         JOIN books AS b ON b.id = s.book_id
+         ORDER BY s.region, s.copies DESC, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -73,52 +111,99 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- region | copies | seq
---------+--------+-----
- East   |    900 |   1
- East   |    200 |   2
- West   |    400 |   1
- West   |    350 |   2
+ region |       title       | copies | region_total 
+--------+-------------------+--------+--------------
+ East   | The Glass Orchard |    900 |         1150
+ East   | Tidal Notes       |    200 |         1150
+ East   | Quiet Harbors     |     50 |         1150
+ West   | Quiet Harbors     |    400 |          950
+ West   | Tidal Notes       |    400 |          950
+ West   | The Glass Orchard |    150 |          950
+(6 rows)
 ```
 
-การใส่หมายเลขเริ่มต้นใหม่ที่ 1 ภายในแต่ละภูมิภาคเพราะ `PARTITION BY region` ทุก row ของยอดขายยังคงอยู่ครบ — ไม่มีอะไรถูกยุบ ตรงกันข้ามกับ `GROUP BY` ที่จะเหลือเพียง row เดียวต่อหนึ่งภูมิภาค
+เทียบกับ `GROUP BY` ที่ให้หนึ่ง row ต่อ region และเสียรายละเอียด:
 
-## ROW_NUMBER, RANK, และ DENSE_RANK
+```sql
+-- sql/group-by-vs-window.sql
+-- GROUP BY: one row per region, the detail is gone
+SELECT region, sum(copies) AS region_total FROM sales GROUP BY region ORDER BY region;
+```
 
-ฟังก์ชันจัดอันดับสามตัวนี้ล้วนเรียงลำดับ row ภายใน partition แต่ต่างกันที่วิธีจัดการกับค่าที่เสมอกัน `ROW_NUMBER` ให้หมายเลขที่ไม่ซ้ำกันเสมอ `RANK` ให้ row ที่เสมอกันได้หมายเลขเดียวกันแล้วกระโดดข้ามไปข้างหน้า `DENSE_RANK` ให้ row ที่เสมอกันได้หมายเลขเดียวกันแต่ไม่กระโดดข้าม
+```text
+ region | region_total 
+--------+--------------
+ East   |         1150
+ West   |          950
+(2 rows)
+```
+
+เพราะ window เก็บทุก row คุณจึงคำนวณสัดส่วนของกลุ่มใน query เดียวกันได้:
+
+```sql
+-- sql/share-of-region.sql
+SELECT s.region, b.title, s.copies,
+       round(100.0 * s.copies / sum(s.copies) OVER (PARTITION BY s.region), 1) AS pct_of_region
+FROM sales AS s
+JOIN books AS b ON b.id = s.book_id
+ORDER BY s.region, s.copies DESC, b.title;
+```
+
+```text
+ region |       title       | copies | pct_of_region 
+--------+-------------------+--------+---------------
+ East   | The Glass Orchard |    900 |          78.3
+ East   | Tidal Notes       |    200 |          17.4
+ East   | Quiet Harbors     |     50 |           4.3
+ West   | Quiet Harbors     |    400 |          42.1
+ West   | Tidal Notes       |    400 |          42.1
+ West   | The Glass Orchard |    150 |          15.8
+(6 rows)
+```
+
+## ROW_NUMBER, RANK และ DENSE_RANK
+
+ฟังก์ชันให้เลขทั้งสามต่างกันที่การจัดการกับ row เสมอ ตรงนี้อยู่เคียงกันบน window เดียวกัน clause `WINDOW w AS (...)` ตั้งชื่อให้ครั้งเดียวจึงไม่ต้องเขียนซ้ำ:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT copies,
-           ROW_NUMBER()  OVER (ORDER BY copies DESC) AS row_num,
-           RANK()        OVER (ORDER BY copies DESC) AS rnk,
-           DENSE_RANK()  OVER (ORDER BY copies DESC) AS dense
-    FROM sales
-    ORDER BY copies DESC;
+    -- sql/rank-functions.sql
+    SELECT s.region, b.title, s.copies,
+           row_number() OVER w AS row_number,
+           rank()       OVER w AS rank,
+           dense_rank() OVER w AS dense_rank
+    FROM sales AS s
+    JOIN books AS b ON b.id = s.book_id
+    WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+    ORDER BY s.region, s.copies DESC, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(`
-      SELECT copies,
-             ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
-             RANK()       OVER (ORDER BY copies DESC) AS rnk,
-             DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
-      FROM sales
-      ORDER BY copies DESC
+      SELECT s.region, b.title, s.copies,
+             row_number() OVER w AS row_number,
+             rank()       OVER w AS rank,
+             dense_rank() OVER w AS dense_rank
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+      ORDER BY s.region, s.copies DESC, b.title
     `);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute("""
-        SELECT copies,
-               ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
-               RANK()       OVER (ORDER BY copies DESC) AS rnk,
-               DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
-        FROM sales
-        ORDER BY copies DESC
+        SELECT s.region, b.title, s.copies,
+               row_number() OVER w AS row_number,
+               rank()       OVER w AS rank,
+               dense_rank() OVER w AS dense_rank
+        FROM sales AS s
+        JOIN books AS b ON b.id = s.book_id
+        WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+        ORDER BY s.region, s.copies DESC, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -126,23 +211,28 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx, `
-      SELECT copies,
-             ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
-             RANK()       OVER (ORDER BY copies DESC) AS rnk,
-             DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
-      FROM sales
-      ORDER BY copies DESC`)
+      SELECT s.region, b.title, s.copies,
+             row_number() OVER w AS row_number,
+             rank()       OVER w AS rank,
+             dense_rank() OVER w AS dense_rank
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+      ORDER BY s.region, s.copies DESC, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT copies,
-                ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
-                RANK()       OVER (ORDER BY copies DESC) AS rnk,
-                DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
-         FROM sales
-         ORDER BY copies DESC",
+        "SELECT s.region, b.title, s.copies,
+                row_number() OVER w AS row_number,
+                rank()       OVER w AS rank,
+                dense_rank() OVER w AS dense_rank
+         FROM sales AS s
+         JOIN books AS b ON b.id = s.book_id
+         WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+         ORDER BY s.region, s.copies DESC, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -151,48 +241,104 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- copies | row_num | rnk | dense
---------+---------+-----+-------
-    900 |       1 |   1 |     1
-    400 |       2 |   2 |     2
-    400 |       3 |   2 |     2
-    200 |       4 |   4 |     3
-    150 |       5 |   5 |     4
-    50  |       6 |   6 |     5
+ region |       title       | copies | row_number | rank | dense_rank 
+--------+-------------------+--------+------------+------+------------
+ East   | The Glass Orchard |    900 |          1 |    1 |          1
+ East   | Tidal Notes       |    200 |          2 |    2 |          2
+ East   | Quiet Harbors     |     50 |          3 |    3 |          3
+ West   | Quiet Harbors     |    400 |          2 |    1 |          1
+ West   | Tidal Notes       |    400 |          1 |    1 |          1
+ West   | The Glass Orchard |    150 |          3 |    3 |          2
+(6 rows)
 ```
 
-ดูสอง row ของ 400 สิ `ROW_NUMBER` ให้เป็น 2 กับ 3, `RANK` เรียกทั้งคู่ว่า 2 แล้วกระโดดไป 4, ส่วน `DENSE_RANK` เรียกทั้งคู่ว่า 2 แล้วไปต่อที่ 3 เลือกตัวที่พฤติกรรมต่อค่าเสมอกันตรงกับที่คุณต้องการ
+ดูที่คู่เสมอของ West (400 และ 400):
 
-## ยอดสะสมด้วย SUM() OVER
+- `row_number()` ไม่เคยซ้ำ: 1 และ 2 **ตัวไหน** ในสอง row ที่เสมอกันได้ 1 นั้น query ไม่ได้กำหนด ตรงนี้ Tidal Notes ได้ 1 และ Quiet Harbors ได้ 2 plan อื่นอาจสลับกัน เพิ่มตัวตัดสินเสมอใน `ORDER BY` ของ window เมื่อเลขต้องทำซ้ำได้
+- `rank()` ให้ทั้งคู่ rank เท่ากัน (1) แล้วข้าม: ตัวถัดไปคือ 3
+- `dense_rank()` ให้ทั้งคู่ 1 และไม่ข้าม: ตัวถัดไปคือ 2
 
-เพิ่ม `ORDER BY` ภายใน `OVER` ให้กับ aggregate แล้วจะกลายเป็นการคำนวณแบบสะสม คือแต่ละ row จะเห็นทั้งตัวเองบวกกับทุก row ที่อยู่ก่อนหน้าตามลำดับ นี่คือวิธีมาตรฐานในการผลิตยอดสะสม
+ผลลัพธ์จาก driver สำหรับ query ในบทนี้ แต่ละอันรันหนึ่งครั้ง (`pg` คืนผล `bigint` เช่น `row_number()` และ `sum(int)` เป็น string):
+
+```text
+$ (each snippet run once against the dataset above)
+[rank]     Python (psycopg 3.3.6): [('East', 'The Glass Orchard', 900, 1, 1, 1), ('East', 'Tidal Notes', 200, 2, 2, 2), ('East', 'Quiet Harbors', 50, 3, 3, 3), ('West', 'Quiet Harbors', 400, 2, 1, 1), ('West', 'Tidal Notes', 400, 1, 1, 1), ('West', 'The Glass Orchard', 150, 3, 3, 2)]
+[rank]     Node.js (pg 8.23.0), first West row: { region: 'West', title: 'Quiet Harbors', copies: 400, row_number: '2', rank: '1', dense_rank: '1' }
+[running]  Python:                 [('East', 'The Glass Orchard', 900, 900), ('East', 'Tidal Notes', 200, 1100), ('East', 'Quiet Harbors', 50, 1150), ('West', 'Quiet Harbors', 400, 400), ('West', 'Tidal Notes', 400, 800), ('West', 'The Glass Orchard', 150, 950)]
+[running]  Node.js, first West row: { region: 'West', title: 'Quiet Harbors', copies: 400, running_rows: '400' }
+[all]      Go (pgx v5.11.0) and Rust (sqlx 0.9.0) returned the same rows as Python for all three queries
+```
+
+## ยอดสะสมและ default frame
+
+window ที่มี `ORDER BY` มี **frame**: ส่วนย่อยของ partition ที่ฟังก์ชันมองเห็น ถ้าไม่เขียน frame ค่าเริ่มต้นคือ `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` ซึ่งรวมทุก *peer* ของ row ปัจจุบัน คือทุก row ที่เรียงเท่ากับมัน เมื่อค่าเรียงไม่ซ้ำ มันทำตัวเป็น "ทุกอย่างถึง row นี้" เมื่อมีเสมอ มันไม่เป็นอย่างนั้น:
+
+```sql
+-- sql/running-total-default.sql
+-- default frame: RANGE ... CURRENT ROW, which includes all peers (rows with an equal ORDER BY value)
+SELECT s.region, b.title, s.copies,
+       sum(s.copies) OVER (PARTITION BY s.region ORDER BY s.copies DESC) AS running_default
+FROM sales AS s
+JOIN books AS b ON b.id = s.book_id
+ORDER BY s.region, s.copies DESC, b.title;
+```
+
+```text
+ region |       title       | copies | running_default 
+--------+-------------------+--------+-----------------
+ East   | The Glass Orchard |    900 |             900
+ East   | Tidal Notes       |    200 |            1100
+ East   | Quiet Harbors     |     50 |            1150
+ West   | Quiet Harbors     |    400 |             800
+ West   | Tidal Notes       |    400 |             800
+ West   | The Glass Orchard |    150 |             950
+(6 rows)
+```
+
+West แสดง **800, 800, 950** ไม่ใช่ 400, 800, 950: สอง row ที่ 400 เป็น peer กัน แต่ละตัวจึง "เห็น" อีกตัวอยู่แล้ว นั่นคือยอดสะสมที่ผิดแบบเงียบ ๆ เขียน frame ให้ชัดด้วย `ROWS` และเพิ่มตัวตัดสินเสมอเพื่อให้ลำดับถูกกำหนด:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT region, copies,
-           SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-    FROM sales
-    ORDER BY region, copies DESC;
+    -- sql/running-total-rows.sql
+    SELECT s.region, b.title, s.copies,
+           sum(s.copies) OVER (
+             PARTITION BY s.region
+             ORDER BY s.copies DESC, b.title
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+           ) AS running_rows
+    FROM sales AS s
+    JOIN books AS b ON b.id = s.book_id
+    ORDER BY s.region, s.copies DESC, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(`
-      SELECT region, copies,
-             SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-      FROM sales
-      ORDER BY region, copies DESC
+      SELECT s.region, b.title, s.copies,
+             sum(s.copies) OVER (
+               PARTITION BY s.region
+               ORDER BY s.copies DESC, b.title
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS running_rows
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      ORDER BY s.region, s.copies DESC, b.title
     `);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute("""
-        SELECT region, copies,
-               SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-        FROM sales
-        ORDER BY region, copies DESC
+        SELECT s.region, b.title, s.copies,
+               sum(s.copies) OVER (
+                 PARTITION BY s.region
+                 ORDER BY s.copies DESC, b.title
+                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+               ) AS running_rows
+        FROM sales AS s
+        JOIN books AS b ON b.id = s.book_id
+        ORDER BY s.region, s.copies DESC, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -200,19 +346,30 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx, `
-      SELECT region, copies,
-             SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-      FROM sales
-      ORDER BY region, copies DESC`)
+      SELECT s.region, b.title, s.copies,
+             sum(s.copies) OVER (
+               PARTITION BY s.region
+               ORDER BY s.copies DESC, b.title
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS running_rows
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      ORDER BY s.region, s.copies DESC, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT region, copies,
-                SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-         FROM sales
-         ORDER BY region, copies DESC",
+        "SELECT s.region, b.title, s.copies,
+                sum(s.copies) OVER (
+                  PARTITION BY s.region
+                  ORDER BY s.copies DESC, b.title
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS running_rows
+         FROM sales AS s
+         JOIN books AS b ON b.id = s.book_id
+         ORDER BY s.region, s.copies DESC, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -221,90 +378,428 @@ import ProgressTracker from '../../../../components/ProgressTracker.tsx';
 </Tabs>
 
 ```text
- region | copies | running
---------+--------+---------
- East   |    900 |     900
- East   |    200 |    1100
- West   |    400 |     400
- West   |    350 |     750
+ region |       title       | copies | running_rows 
+--------+-------------------+--------+--------------
+ East   | The Glass Orchard |    900 |          900
+ East   | Tidal Notes       |    200 |         1100
+ East   | Quiet Harbors     |     50 |         1150
+ West   | Quiet Harbors     |    400 |          400
+ West   | Tidal Notes       |    400 |          800
+ West   | The Glass Orchard |    150 |          950
+(6 rows)
 ```
 
-column `running` สะสมลงไปในแต่ละภูมิภาคและรีเซ็ตที่ขอบเขตของ partition หากไม่มี `ORDER BY` ภายใน `OVER` คำสั่ง `SUM(copies) OVER (PARTITION BY region)` จะกลับไปแสดงยอดรวมทั้งหมดของภูมิภาคซ้ำในทุก row แทน — เทคนิคที่มีประโยชน์สำหรับการแสดงยอดขายแต่ละรายการเคียงข้างยอดรวมของภูมิภาค
+`ROWS`, `RANGE` และ `GROUPS` วัด frame ต่างกัน บนหกยอดขายที่เรียงตาม `copies` frame ย้อนหลังหนึ่งขั้นให้สามผลรวมที่ต่างกันสำหรับ row เดียวกัน: `ROWS` นับ row จริง, `RANGE` นับตามระยะของค่า (ที่นี่: row ที่ `copies` ต่ำกว่า row ปัจจุบันไม่เกิน 100), `GROUPS` นับเป็นกลุ่มของ peer ([docs](https://www.postgresql.org/docs/18/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS)):
 
-## window เก็บ row ไว้ ส่วน GROUP BY ยุบทิ้ง
+```sql
+-- sql/frames.sql
+-- the same 6 rows, ordered by copies, under the three frame modes
+SELECT copies,
+       sum(copies) OVER (ORDER BY copies ROWS   BETWEEN 1 PRECEDING AND CURRENT ROW) AS rows_frame,
+       sum(copies) OVER (ORDER BY copies RANGE  BETWEEN 100 PRECEDING AND CURRENT ROW) AS range_frame,
+       sum(copies) OVER (ORDER BY copies GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) AS groups_frame
+FROM sales
+ORDER BY copies, id;
+```
 
-ภาพด้านล่างเปรียบเทียบทั้งสองอย่าง `GROUP BY region` จะคืนสอง row หนึ่ง row ต่อหนึ่งภูมิภาค ส่วน window function แบ่ง partition จาก row ชุดเดียวกันแต่คืนกลับมาครบทุก row โดยแต่ละ row พกค่าประจำ partition ติดมาด้วย
+```text
+ copies | rows_frame | range_frame | groups_frame 
+--------+------------+-------------+--------------
+     50 |         50 |          50 |           50
+    150 |        200 |         200 |          200
+    200 |        350 |         350 |          350
+    400 |        600 |         800 |         1000
+    400 |        800 |         800 |         1000
+    900 |       1300 |         900 |         1700
+(6 rows)
+```
 
-export const windowDiagram = `flowchart TD
-  R[All sales rows] --> P1[Partition East]
-  R --> P2[Partition West]
-  P1 --> E1[East row keeps itself plus its window value]
-  P1 --> E2[East row keeps itself plus its window value]
-  P2 --> W1[West row keeps itself plus its window value]
-  P2 --> W2[West row keeps itself plus its window value]`;
+### first_value และ last_value
 
-<Mermaid code={windowDiagram} title="window แบ่ง partition row แต่เก็บไว้ทุก row" />
+default frame เดียวกันจับ `last_value` ด้วย เมื่อมี `ORDER BY` และไม่มี frame frame หยุดที่ row ปัจจุบัน (และ peer ของมัน) "ค่าสุดท้าย" จึงเป็นค่าปัจจุบัน:
+
+```sql
+-- sql/last-value-trap.sql
+SELECT region, copies,
+       last_value(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS last_default,
+       last_value(copies) OVER (
+         PARTITION BY region ORDER BY copies DESC
+         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+       ) AS last_real,
+       first_value(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS first_val
+FROM sales
+ORDER BY region, copies DESC, id;
+```
+
+```text
+ region | copies | last_default | last_real | first_val 
+--------+--------+--------------+-----------+-----------
+ East   |    900 |          900 |        50 |       900
+ East   |    200 |          200 |        50 |       900
+ East   |     50 |           50 |        50 |       900
+ West   |    400 |          400 |       150 |       400
+ West   |    400 |          400 |       150 |       400
+ West   |    150 |          150 |       150 |       400
+(6 rows)
+```
+
+`last_default` เท่ากับ `copies` ทุก row ส่วน `last_real` ที่ใช้ `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` คือยอดขายน้อยที่สุดของ region จริง ๆ (50 และ 150)
+
+## LAG, LEAD, NTILE และพวกเดียวกัน
+
+`lag` และ `lead` อ่าน column จาก row ก่อนหน้าและถัดไปของ window: ไม่ต้อง self-join row แรกและสุดท้ายไม่มีอะไรให้อ่าน จึงได้ `NULL`:
+
+```sql
+-- sql/lag-lead.sql
+SELECT title, published,
+       lag(title)  OVER (ORDER BY published) AS previous_title,
+       lead(title) OVER (ORDER BY published) AS next_title,
+       published - lag(published) OVER (ORDER BY published) AS years_since_previous
+FROM books
+ORDER BY published;
+```
+
+```text
+       title       | published |  previous_title   |    next_title     | years_since_previous 
+-------------------+-----------+-------------------+-------------------+----------------------
+ Quiet Harbors     |      2003 |                   | Tidal Notes       |                     
+ Tidal Notes       |      2011 | Quiet Harbors     | The Glass Orchard |                    8
+ The Glass Orchard |      2018 | Tidal Notes       | Unlinked Draft    |                    7
+ Unlinked Draft    |      2020 | The Glass Orchard |                   |                    2
+(4 rows)
+```
+
+`ntile(n)` ตัด row ที่เรียงแล้วเป็น `n` ถัง และ `percent_rank()` ให้ตำแหน่งสัมพัทธ์ของ row (0 สำหรับตัวแรก 1 สำหรับตัวสุดท้าย):
+
+```sql
+-- sql/ntile-percent.sql
+SELECT title, copies_sold,
+       ntile(2)       OVER (ORDER BY copies_sold DESC) AS half,
+       percent_rank() OVER (ORDER BY copies_sold)      AS pct_rank
+FROM books
+ORDER BY copies_sold DESC;
+```
+
+```text
+       title       | copies_sold | half |      pct_rank      
+-------------------+-------------+------+--------------------
+ The Glass Orchard |        1250 |    1 |                  1
+ Tidal Notes       |         600 |    1 | 0.6666666666666666
+ Quiet Harbors     |         450 |    2 | 0.3333333333333333
+ Unlinked Draft    |           0 |    2 |                  0
+(4 rows)
+```
+
+## Window เก็บ row; GROUP BY ยุบ row
+
+window function ถูกประเมินหลัง `WHERE`, `GROUP BY` และ `HAVING` ก่อน `ORDER BY` และ `LIMIT` เล็กน้อย ผลที่ตามมาคือกรองด้วย window function ใน `WHERE` ไม่ได้ เพราะ ณ จุดนั้นมันยังไม่มีอยู่:
+
+```sql
+-- @expect-error 42P20
+SELECT region, copies FROM sales
+WHERE rank() OVER (PARTITION BY region ORDER BY copies DESC) = 1;
+```
+
+```text
+ERROR:  window functions are not allowed in WHERE
+LINE 2: WHERE rank() OVER (PARTITION BY region ORDER BY copies DESC)...
+              ^
+```
+
+เพื่อกรองด้วย rank ("อันดับหนึ่งต่อกลุ่ม" แบบคลาสสิก) ให้คำนวณใน subquery หรือ CTE แล้วกรองข้างนอก:
+
+```sql
+-- sql/top-n-per-group.sql
+SELECT region, title, copies
+FROM (
+  SELECT s.region, b.title, s.copies,
+         row_number() OVER (PARTITION BY s.region ORDER BY s.copies DESC, b.title) AS rn
+  FROM sales s JOIN books b ON b.id = s.book_id
+) AS ranked
+WHERE rn = 1
+ORDER BY region;
+```
+
+```text
+ region |       title       | copies 
+--------+-------------------+--------
+ East   | The Glass Orchard |    900
+ West   | Quiet Harbors     |    400
+(2 rows)
+```
+
+## plan หน้าตาเป็นอย่างไร
+
+plan จริงต้องใช้ row จริง หัวข้อนี้สร้าง `big_sales` ที่มี 500 000 row ใน 5 region:
+
+```sql
+-- sql/window-plans-setup.sql
+CREATE TABLE big_sales (
+  id     int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  region text NOT NULL,
+  copies int NOT NULL
+);
+INSERT INTO big_sales (region, copies)
+SELECT (ARRAY['East', 'West', 'North', 'South', 'Central'])[1 + g % 5], (g::bigint * 7919 % 100003)::int
+FROM generate_series(1, 500000) AS g;
+ANALYZE big_sales;
+```
+
+```text
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+```
+
+```sql
+-- sql/window-plan.sql
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, region, copies,
+       row_number() OVER (PARTITION BY region ORDER BY copies DESC) AS rn
+FROM big_sales;
+```
+
+```text
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ WindowAgg (actual time=376.569..545.433 rows=500000.00 loops=1)
+   Window: w1 AS (PARTITION BY region ORDER BY copies ROWS UNBOUNDED PRECEDING)
+   Storage: Memory  Maximum Storage: 17kB
+   Buffers: shared hit=2709, temp read=1591 written=1597
+   ->  Sort (actual time=376.558..463.592 rows=500000.00 loops=1)
+         Sort Key: region, copies DESC
+         Sort Method: external merge  Disk: 12728kB
+         Buffers: shared hit=2709, temp read=1591 written=1597
+         ->  Seq Scan on big_sales (actual time=0.010..32.729 rows=500000.00 loops=1)
+               Buffers: shared hit=2703
+ Planning:
+   Buffers: shared hit=85
+ Planning Time: 0.272 ms
+ Execution Time: 561.400 ms
+(14 rows)
+```
+
+window function คือ node `WindowAgg` ที่รับจาก `Sort` บน `(region, copies DESC)`: การ sort คือราคาของ `PARTITION BY ... ORDER BY` และที่นี่มันครอบงำ (node `Sort` กินราว 460 ms จาก 560 ms; `Sort Method: external merge  Disk: 12728kB` เพราะการ sort 12 MB ไม่พอดีกับ `work_mem` ค่าเริ่มต้น 4 MB และ buffer `temp read/written` ยืนยัน) เพิ่ม `work_mem` สำหรับ transaction เดียวช่วยกำจัดการ spill:
+
+```sql
+-- sql/window-plan-work-mem.sql
+BEGIN;
+SET LOCAL work_mem = '64MB';
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, region, copies,
+       row_number() OVER (PARTITION BY region ORDER BY copies DESC) AS rn
+FROM big_sales;
+ROLLBACK;
+```
+
+```text
+BEGIN
+SET
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ WindowAgg (actual time=453.913..560.648 rows=500000.00 loops=1)
+   Window: w1 AS (PARTITION BY region ORDER BY copies ROWS UNBOUNDED PRECEDING)
+   Storage: Memory  Maximum Storage: 17kB
+   Buffers: shared hit=2709
+   ->  Sort (actual time=453.899..478.110 rows=500000.00 loops=1)
+         Sort Key: region, copies DESC
+         Sort Method: quicksort  Memory: 27914kB
+         Buffers: shared hit=2709
+         ->  Seq Scan on big_sales (actual time=0.009..31.541 rows=500000.00 loops=1)
+               Buffers: shared hit=2703
+ Planning:
+   Buffers: shared hit=85
+ Planning Time: 0.232 ms
+ Execution Time: 576.866 ms
+(14 rows)
+
+ROLLBACK
+```
+
+มันกลายเป็น `quicksort  Memory: 27914kB` และไม่มี temp buffer และ **ไม่ได้เร็วขึ้น** บน Mac เครื่องนี้ (579 ms เทียบกับ 560 ms รันครั้งเดียว อยู่ในระดับสัญญาณรบกวน): การ sort ครึ่งล้าน row ครอบงำทั้งสองแบบ index บน `(region, copies DESC)` ให้ลำดับได้และตัด sort ออก ซึ่ง module เรื่อง indexes ครอบคลุม
+
+เมื่อต้องการแค่ row บนสุดของแต่ละ partition PostgreSQL 15+ หยุดก่อนได้ `WHERE rn <= 3` ด้านนอกปรากฏเป็น `Run Condition` บน `WindowAgg` และ node ปล่อย 15 row (3 ต่อ region) แทน 500 000:
+
+```sql
+-- sql/window-plan-top3.sql
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT * FROM (
+  SELECT id, region, copies,
+         row_number() OVER (PARTITION BY region ORDER BY copies DESC) AS rn
+  FROM big_sales
+) AS ranked
+WHERE rn <= 3;
+```
+
+```text
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ WindowAgg (actual time=376.753..488.553 rows=15.00 loops=1)
+   Window: w1 AS (PARTITION BY big_sales.region ORDER BY big_sales.copies ROWS UNBOUNDED PRECEDING)
+   Run Condition: (row_number() OVER w1 <= 3)
+   Storage: Memory  Maximum Storage: 17kB
+   Buffers: shared hit=2709, temp read=1591 written=1597
+   ->  Sort (actual time=376.737..463.120 rows=500000.00 loops=1)
+         Sort Key: big_sales.region, big_sales.copies DESC
+         Sort Method: external merge  Disk: 12728kB
+         Buffers: shared hit=2709, temp read=1591 written=1597
+         ->  Seq Scan on big_sales (actual time=0.008..31.975 rows=500000.00 loops=1)
+               Buffers: shared hit=2703
+ Planning:
+   Buffers: shared hit=89
+ Planning Time: 0.244 ms
+ Execution Time: 489.599 ms
+(15 rows)
+```
+
+การ sort ยังต้องอ่านทุกอย่าง แต่ไม่มีอะไรด้านล่างที่เห็นอีก 499 985 row ที่เหลือ
+
+## Reading AI-generated code
+
+ผู้ช่วย AI ถูกขอยอดสะสมของ copies ต่อ region โดยเริ่มจากยอดขายสูงสุด และเขียนเวอร์ชันที่ทุก tutorial เขียน:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "running total of copies per region, biggest sale first"
+SELECT region, copies,
+       SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running_total
+FROM sales
+ORDER BY region, copies DESC;`}>
+
+ดูถูก และ East ถูก แต่ West ผิด: ด้วย frame `RANGE` เริ่มต้น สอง row ที่ 400 เป็น peer ทั้งคู่จึงแสดง **800** และยอดสะสมไม่เคยผ่าน 400 ไม่มี error:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT region, copies,
+       SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running_total
+FROM sales
+ORDER BY region, copies DESC;
+```
+
+```text
+ region | copies | running_total 
+--------+--------+---------------
+ East   |    900 |           900
+ East   |    200 |          1100
+ East   |     50 |          1150
+ West   |    400 |           800
+ West   |    400 |           800
+ West   |    150 |           950
+(6 rows)
+```
+
+สองการเปลี่ยนแก้ได้: ตัวตัดสินเสมอใน `ORDER BY` เพื่อให้ลำดับสมบูรณ์ และ frame `ROWS` ที่ชัดเจนเพื่อให้แต่ละ row เห็นเฉพาะตัวเองกับ row ก่อนหน้า
+
+```sql
+-- sql/stb-fixed.sql
+SELECT region, copies,
+       SUM(copies) OVER (
+         PARTITION BY region
+         ORDER BY copies DESC, id
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS running_total
+FROM sales
+ORDER BY region, copies DESC, id;
+```
+
+```text
+ region | copies | running_total 
+--------+--------+---------------
+ East   |    900 |           900
+ East   |    200 |          1100
+ East   |     50 |          1150
+ West   |    400 |           400
+ West   |    400 |           800
+ West   |    150 |           950
+(6 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+window function คำนวณค่าให้แต่ละ row โดยมองที่ *frame* ของ row รอบ ๆ แล้ววางค่ากลับข้าง row นั้น สามการตั้งค่ากำหนดสิ่งที่มันเห็น: `PARTITION BY` (row ไหนเกี่ยวข้องกัน), `ORDER BY` (ลำดับใด) และ frame (มองไกลแค่ไหนในลำดับนั้น) frame มีค่าเริ่มต้นโดยนัย และค่านั้นคือ `RANGE ... CURRENT ROW` ที่รวม peer เมื่อไรที่ได้ตัวเลขผิดจาก window function ผู้ต้องสงสัยอันดับแรกคือ frame
 
 ## เคล็ดลับและข้อควรระวัง
 
-- window function ไม่เคยลดจำนวน row ถ้าคุณต้องการหนึ่ง row ต่อหนึ่งกลุ่ม ให้ใช้ `GROUP BY` ถ้าคุณต้องการทุก row พร้อมตัวเลขต่อกลุ่ม ให้ใช้ window
-- `PARTITION BY` ใส่หรือไม่ก็ได้ ถ้าไม่ใส่ ผลลัพธ์ทั้งหมดจะนับเป็น partition เดียว การจัดอันดับจึงรันข้ามทุก row
-- `ORDER BY` ภายใน `OVER` ควบคุม window frame และเป็นอิสระจาก `ORDER BY` สุดท้ายของ query เพิ่มตัวด้านนอกเข้าไปด้วยถ้าคุณสนใจลำดับที่ row ถูกคืนกลับมา
-- คุณใช้ window function ใน `WHERE` clause ไม่ได้ เพราะ window ถูกคำนวณหลัง `WHERE` ให้ห่อ query ไว้ใน CTE หรือ subquery แล้วกรองบน column ที่คำนวณแล้วจากข้างนอก
-- เลือก `ROW_NUMBER` สำหรับลำดับที่เข้มงวด, `RANK` เมื่อค่าเสมอกันควรใช้อันดับร่วมกันและทิ้งช่องว่างไว้, และ `DENSE_RANK` เมื่อค่าเสมอกันใช้อันดับร่วมกันโดยไม่มีช่องว่าง
+- `OVER` ของ window function คือสิ่งที่ทำให้มันเป็น window function: `sum(x)` เดี่ยว ๆ คือ aggregate, `sum(x) OVER (...)` คือ window
+- ใช้ window function ใน `WHERE` (`42P20`), `GROUP BY` หรือ `HAVING` ไม่ได้ ห่อ query ใน subquery หรือ CTE แล้วกรองข้างนอก
+- เมื่อมี `ORDER BY` และไม่มี frame ชัดเจน frame คือ `RANGE ... CURRENT ROW` (รวม peer) เขียน `ROWS BETWEEN ...` สำหรับยอดสะสมและ `last_value`
+- `row_number()` บน row ที่เสมอกันเป็นแบบสุ่ม เพิ่มตัวตัดสินใน `ORDER BY` ของ window ถ้าต้องการเลขที่เสถียร
+- `PARTITION BY ... ORDER BY` มีต้นทุนเป็น sort ตรวจ `EXPLAIN` บน table ใหญ่ ระวัง `external merge` และดูว่า index ให้ลำดับได้ไหม
 
-<Callout title="สวิตช์ทางความคิด">
-เมื่อคำขอบอกว่า "สำหรับแต่ละ row ให้แสดงอันดับ / ยอดสะสม / สัดส่วนของกลุ่มตัวเองด้วย" วลี "สำหรับแต่ละ row" นั้นคือสัญญาณของคุณ: คุณต้องใช้ window function ไม่ใช่ `GROUP BY` เก็บ row ไว้ เพิ่ม column เข้าไป
+<Callout title="Window หรือ GROUP BY?">
+ต้องการหนึ่ง row ต่อกลุ่ม? `GROUP BY` ต้องการทุก row พร้อมสิ่งที่คำนวณทั้งกลุ่ม (rank, ยอดสะสม, สัดส่วนของกลุ่ม, row ก่อนหน้า)? window function ต้องการทั้งสอง? aggregate ก่อนใน subquery แล้ว window ทับผลลัพธ์
 </Callout>
 
 ## ข้อแลกเปลี่ยน
 
 | ตัวเลือก | Benefit | Cost |
 |---------|---------|------|
-| Window function (`ROW_NUMBER`, `RANK`, running total) | คำนวณในหนึ่ง query ไม่ต้อง self-join ให้ยุ่งยาก | ต้องเข้าใจ `PARTITION BY`/`ORDER BY` ให้ถูก ไม่งั้นผลลัพธ์ผิดแบบเงียบ ๆ |
-| Self-join หรือ subquery แทน window function | ทำได้ในฐานข้อมูลที่ไม่รองรับ window function | เขียนยาวกว่า มักช้ากว่า และอ่านยากกว่า |
-| คำนวณอันดับ/ยอดสะสมในโค้ด application | ปรับ logic เองได้อิสระ | ต้องดึงทุก row มาที่ backend ก่อน ไม่ scale กับผลลัพธ์ก้อนใหญ่ |
+| Window function | เก็บทุก row; ไม่ต้อง self-join สำหรับ rank, ยอดสะสม, lag | ต้อง sort ต่อ `PARTITION BY`/`ORDER BY` ที่ต่างกัน (sort ราว 460 ms จาก 560 ms ข้างบน); default frame ทำให้ประหลาดใจ |
+| `GROUP BY` + join กลับ | ใช้ได้ทุกที่ ชัดเจน | สองรอบและ join เพื่อแปะยอดรวมกลับ |
+| correlated subquery ต่อ row | อ่านง่ายสำหรับตัวเลขเดียว | รันซ้ำต่อ row (ดูบท subquery) |
+| จัดอันดับฝั่งแอป | ยืดหยุ่น | ดึงทุก row ผ่านเครือข่าย |
 
-## ข้อผิดพลาดที่พบบ่อย
+## Common Misconceptions
 
-- **ลืมใส่ `PARTITION BY`** — ถ้าละไว้ ผลลัพธ์ทั้งหมดจะกลายเป็น partition เดียว อันดับหรือยอดสะสมจะรันข้ามทั้งผลลัพธ์แทนที่จะรันแยกต่อกลุ่มตามที่ตั้งใจ
-- **สับสนระหว่าง `RANK()` กับ `DENSE_RANK()` และ `ROW_NUMBER()`** — `RANK()` ทิ้งช่องว่างของอันดับไว้หลังค่าที่เสมอกัน `DENSE_RANK()` ไม่ทิ้งช่องว่าง ส่วน `ROW_NUMBER()` ให้เลขไม่ซ้ำกันเสมอแม้ค่าจะเท่ากัน เลือกให้ตรงกับพฤติกรรมที่ต้องการ
-- **ไม่เข้าใจลำดับการประมวลผลของ query** — window function ทำงาน *หลัง* `GROUP BY`/aggregate ในลำดับตรรกะของ query ดังนั้นจึงใช้ window function ใน `WHERE` โดยตรงไม่ได้ ต้องห่อด้วย subquery หรือ CTE ก่อนแล้วค่อยกรองชั้นนอก
+- **"SUM() OVER (ORDER BY x) คือยอดสะสมทีละ row"** เมื่อ `x` ซ้ำ มันคือยอดสะสมบน peer: 800, 800, 950 ข้างบน
+- **"last_value ให้ row สุดท้ายของ partition"** เฉพาะเมื่อ frame ไปถึงจุดสิ้นสุด โดยค่าเริ่มต้นมันคืน row ปัจจุบัน
+- **"row_number() ตัดสินเสมอได้อย่างเสถียร"** ลำดับของ row ที่เสมอกันไม่ถูกกำหนด นอกจากเพิ่มตัวตัดสิน
+- **"Window function ฟรี"** แต่ละ window ที่ต่างกันต้อง sort ตัวอย่าง 500 000 row spill ลงดิสก์ที่ `work_mem` ค่าเริ่มต้น
+- **"กรองด้วย rank ใน WHERE ได้"** มันถูกประเมินหลัง `WHERE` ใช้ subquery หรือ CTE
 
-> 💡 ตัวอย่างจากของจริง
->
-> **Activity feed และ leaderboard รายช่อง** — การจัดอันดับผู้ใช้ที่ active ที่สุดในแต่ละกลุ่มใช้ `ROW_NUMBER()`/`RANK()` แบบ `PARTITION BY` โดยตรงใน SQL แทนที่จะดึงทุกข้อความมาจัดอันดับในโค้ด
->
-> **Leaderboard สรุป contribution** — รายงานสรุป contribution ต่อผู้ใช้ในแต่ละ project คำนวณอันดับด้วย window function ในฐานข้อมูล ทำให้ query เดียวได้ทั้งรายละเอียดและอันดับโดยไม่ต้อง self-join
-
-export const quizWindows = [
+export const quizWindow = [
   {
-    q: 'window function ต่างจาก GROUP BY อย่างไร?',
+    q: 'window function ต่างจาก GROUP BY ที่ประเด็นหลักอะไร?',
     options: [
-      'ยุบ row ทั้งหมดให้เหลือ row สรุปเพียง row เดียว',
-      'คำนวณค่าให้ทีละ row โดยยังเก็บทุก row ไว้ในผลลัพธ์',
-      'นับ row ได้อย่างเดียว',
-      'ต้องมี foreign key ก่อน',
+      'window function เร็วกว่า',
+      'window function เก็บทุก row ของ input; GROUP BY ยุบมัน',
+      'GROUP BY เก็บทุก row',
+      'ไม่ต่างกัน',
     ],
     answer: 1,
+    explain: 'window function เพิ่มค่าให้แต่ละ row (ยอดรวมของ region ข้างทุกยอดขาย) ส่วน GROUP BY คืนหนึ่ง row ต่อกลุ่มและรายละเอียดหายไป',
   },
   {
-    q: 'สำหรับค่าที่เสมอกันสองค่า ฟังก์ชันใดให้หมายเลขเดียวกันโดยไม่ทิ้งช่องว่างไว้หลังจากนั้น?',
-    options: ['ROW_NUMBER', 'RANK', 'DENSE_RANK', 'COUNT'],
-    answer: 2,
+    q: 'West มีสองยอดขาย 400 และหนึ่ง 150 ฟังก์ชันไหนให้ค่า 1, 1, 3?',
+    options: ['row_number()', 'rank()', 'dense_rank()', 'ntile(3)'],
+    answer: 1,
+    explain: 'rank() ให้ row ที่เสมอกันได้ rank เท่ากันแล้วข้าม (1, 1, 3) ส่วน dense_rank() ให้ 1, 1, 2 และ row_number() ให้ 1, 2, 3',
   },
   {
-    q: 'PARTITION BY region ภายใน OVER clause ทำอะไร?',
+    q: '`SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC)` คืน 800, 800, 950 สำหรับ West (400, 400, 150) ทำไมไม่ใช่ 400, 800, 950?',
     options: [
-      'กรอง row จากภูมิภาคอื่นออกไป',
-      'เริ่มการคำนวณ window ใหม่แยกต่างหากสำหรับแต่ละภูมิภาค',
-      'เรียงผลลัพธ์สุดท้ายตามภูมิภาค',
-      'ลบภูมิภาคที่ซ้ำกัน',
+      'PostgreSQL มี bug',
+      'default frame คือ RANGE ... CURRENT ROW จึงรวม peer ที่เสมอกันไว้ด้วยกัน',
+      'PARTITION BY รวมทั้ง partition',
+      'DESC เปลี่ยน frame',
     ],
     answer: 1,
+    explain: 'สอง row ที่ 400 เป็น peer กัน frame ของแต่ละตัวจึงรวมทั้งคู่ ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW (พร้อมตัวตัดสิน) ให้ 400, 800, 950',
+  },
+  {
+    q: 'ทำไม `WHERE rank() OVER (...) = 1` ล้มด้วย SQLSTATE 42P20?',
+    options: [
+      'rank() ไม่มีอยู่',
+      'window function ถูกประเมินหลัง WHERE จึงไม่อนุญาตตรงนั้น',
+      'ต้องมี semicolon',
+      'ใช้ได้เฉพาะกับ HAVING',
+    ],
+    answer: 1,
+    explain: 'error คือ "window functions are not allowed in WHERE" ให้คำนวณ rank ใน subquery หรือ CTE แล้วกรองใน query ด้านนอก',
+  },
+  {
+    q: 'ใน plan 500 000 row `Sort Method: external merge  Disk: 12728kB` บอกอะไร?',
+    options: [
+      'table เสียหาย',
+      'การ sort ไม่พอดี work_mem (ค่าเริ่มต้น 4 MB) และ spill ลง temp file',
+      'มีการใช้ index',
+      'query รันแบบขนาน',
+    ],
+    answer: 1,
+    explain: 'เมื่อ work_mem เพิ่มเป็น 64MB การ sort เดียวกันเป็น `quicksort Memory: 27914kB` ไม่มี temp buffer แต่ไม่ได้เร็วขึ้นบน Mac เครื่องนี้',
   },
 ];
 
-<Quiz client:visible id="joins-and-relationships/window-functions" questions={quizWindows} />
+<Quiz client:visible id="joins-and-relationships/window-functions" questions={quizWindow} />
 
 <ProgressTracker client:visible id="joins-and-relationships/window-functions" />

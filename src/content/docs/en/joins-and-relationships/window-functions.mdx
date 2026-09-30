@@ -1,50 +1,85 @@
 ---
-title: Window functions
-description: Rank rows and compute running totals with OVER, PARTITION BY, and ORDER BY using ROW_NUMBER, RANK, DENSE_RANK, and SUM() OVER — and see why windows keep rows where GROUP BY collapses them.
+title: Window Functions
+description: Add ranks, running totals, previous-row values and per-group figures as extra columns without collapsing rows — OVER, PARTITION BY, frames, and the default-frame traps that give wrong totals.
 sidebar:
   order: 5
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
-import Mermaid from '../../../../components/Mermaid.astro';
 import Callout from '../../../../components/Callout.astro';
 import Quiz from '../../../../components/Quiz.tsx';
 import ProgressTracker from '../../../../components/ProgressTracker.tsx';
+import SpotTheBug from '../../../../components/SpotTheBug.astro';
 
-A `GROUP BY` collapses many rows into one summary row, and that is sometimes exactly wrong: you want the summary *and* the original detail side by side. Window functions do that. A window function looks at a set of rows related to the current row — its *window* — and computes a value, but it leaves every row in the output. That is how you add a rank, a running total, or a per-group average as an extra column without losing any detail.
+A `GROUP BY` collapses many rows into one summary row, and that is sometimes exactly wrong: you want the summary *and* the original detail side by side. Window functions do that. A window function looks at a set of rows related to the current row, its *window*, and computes a value, but it leaves every row in the output. That is how you add a rank, a running total, or a per-group average as an extra column without losing any detail.
 
-We continue with the `authors`, `books`, and `sales` tables.
+Everything below was run on **PostgreSQL 18.6** (`postgres:18.6`, aarch64, Docker Desktop on a Mac, September 2026), copied from `psql`. The `sql` fences run top to bottom in one empty database; timings are from this Mac.
+
+## The dataset
+
+The canonical dataset of this module. The West region has a **tie**: two sales of 400 copies. That tie is not decoration, several results below only make sense because of it.
+
+```sql
+-- sql/setup.sql
+CREATE TABLE authors (
+  id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  born int
+);
+CREATE TABLE books (
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title       text NOT NULL,
+  author_id   bigint REFERENCES authors (id),
+  published   int,
+  copies_sold int NOT NULL DEFAULT 0
+);
+CREATE TABLE sales (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  book_id bigint REFERENCES books (id),
+  region  text NOT NULL,
+  copies  int NOT NULL
+);
+INSERT INTO authors (name, born) VALUES ('Mara Linde', 1968), ('Owen Pryce', 1975), ('Sela Vance', 1990);
+INSERT INTO books (title, author_id, published, copies_sold) VALUES
+  ('Quiet Harbors', 1, 2003, 450), ('The Glass Orchard', 1, 2018, 1250), ('Tidal Notes', 2, 2011, 600), ('Unlinked Draft', NULL, 2020, 0);
+INSERT INTO sales (book_id, region, copies) VALUES
+  (2, 'East', 900), (3, 'West', 400), (1, 'West', 400), (3, 'East', 200), (2, 'West', 150), (1, 'East', 50);
+```
 
 ## The OVER clause
 
-You turn an ordinary function into a window function by adding an `OVER` clause. Inside it, `PARTITION BY` divides the rows into groups (like `GROUP BY`, but without collapsing them), and `ORDER BY` sets the order within each partition. Here we number the sales within each region, biggest first.
+You turn an ordinary function into a window function by adding an `OVER` clause. Inside it, `PARTITION BY` divides the rows into groups (like `GROUP BY`, but without collapsing them), and `ORDER BY` sets the order within each partition. First, a plain aggregate over a window: each sale next to the total of its region.
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT region, copies,
-           ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-    FROM sales
-    ORDER BY region, seq;
+    -- sql/over-partition.sql
+    SELECT s.region, b.title, s.copies,
+           sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+    FROM sales AS s
+    JOIN books AS b ON b.id = s.book_id
+    ORDER BY s.region, s.copies DESC, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(`
-      SELECT region, copies,
-             ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-      FROM sales
-      ORDER BY region, seq
+      SELECT s.region, b.title, s.copies,
+             sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      ORDER BY s.region, s.copies DESC, b.title
     `);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute("""
-        SELECT region, copies,
-               ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-        FROM sales
-        ORDER BY region, seq
+        SELECT s.region, b.title, s.copies,
+               sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+        FROM sales AS s
+        JOIN books AS b ON b.id = s.book_id
+        ORDER BY s.region, s.copies DESC, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -52,19 +87,22 @@ You turn an ordinary function into a window function by adding an `OVER` clause.
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx, `
-      SELECT region, copies,
-             ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-      FROM sales
-      ORDER BY region, seq`)
+      SELECT s.region, b.title, s.copies,
+             sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      ORDER BY s.region, s.copies DESC, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT region, copies,
-                ROW_NUMBER() OVER (PARTITION BY region ORDER BY copies DESC) AS seq
-         FROM sales
-         ORDER BY region, seq",
+        "SELECT s.region, b.title, s.copies,
+                sum(s.copies) OVER (PARTITION BY s.region) AS region_total
+         FROM sales AS s
+         JOIN books AS b ON b.id = s.book_id
+         ORDER BY s.region, s.copies DESC, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -73,52 +111,99 @@ You turn an ordinary function into a window function by adding an `OVER` clause.
 </Tabs>
 
 ```text
- region | copies | seq
---------+--------+-----
- East   |    900 |   1
- East   |    200 |   2
- West   |    400 |   1
- West   |    350 |   2
+ region |       title       | copies | region_total 
+--------+-------------------+--------+--------------
+ East   | The Glass Orchard |    900 |         1150
+ East   | Tidal Notes       |    200 |         1150
+ East   | Quiet Harbors     |     50 |         1150
+ West   | Quiet Harbors     |    400 |          950
+ West   | Tidal Notes       |    400 |          950
+ West   | The Glass Orchard |    150 |          950
+(6 rows)
 ```
 
-The numbering restarts at 1 inside each region because of `PARTITION BY region`. Every sales row is still present — nothing was collapsed, in contrast to a `GROUP BY` that would leave just one row per region.
+Compare with `GROUP BY`, which gives one row per region and loses the detail:
+
+```sql
+-- sql/group-by-vs-window.sql
+-- GROUP BY: one row per region, the detail is gone
+SELECT region, sum(copies) AS region_total FROM sales GROUP BY region ORDER BY region;
+```
+
+```text
+ region | region_total 
+--------+--------------
+ East   |         1150
+ West   |          950
+(2 rows)
+```
+
+Because the window keeps every row, you can compute a share of the group in the same query:
+
+```sql
+-- sql/share-of-region.sql
+SELECT s.region, b.title, s.copies,
+       round(100.0 * s.copies / sum(s.copies) OVER (PARTITION BY s.region), 1) AS pct_of_region
+FROM sales AS s
+JOIN books AS b ON b.id = s.book_id
+ORDER BY s.region, s.copies DESC, b.title;
+```
+
+```text
+ region |       title       | copies | pct_of_region 
+--------+-------------------+--------+---------------
+ East   | The Glass Orchard |    900 |          78.3
+ East   | Tidal Notes       |    200 |          17.4
+ East   | Quiet Harbors     |     50 |           4.3
+ West   | Quiet Harbors     |    400 |          42.1
+ West   | Tidal Notes       |    400 |          42.1
+ West   | The Glass Orchard |    150 |          15.8
+(6 rows)
+```
 
 ## ROW_NUMBER, RANK, and DENSE_RANK
 
-These three ranking functions all order rows within a partition but differ in how they handle ties. `ROW_NUMBER` always gives a unique number. `RANK` gives tied rows the same number and then skips ahead. `DENSE_RANK` gives tied rows the same number but does not skip.
+The three numbering functions differ in how they treat ties. Here they are side by side over the same window; a `WINDOW w AS (...)` clause names it once so you do not repeat it:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT copies,
-           ROW_NUMBER()  OVER (ORDER BY copies DESC) AS row_num,
-           RANK()        OVER (ORDER BY copies DESC) AS rnk,
-           DENSE_RANK()  OVER (ORDER BY copies DESC) AS dense
-    FROM sales
-    ORDER BY copies DESC;
+    -- sql/rank-functions.sql
+    SELECT s.region, b.title, s.copies,
+           row_number() OVER w AS row_number,
+           rank()       OVER w AS rank,
+           dense_rank() OVER w AS dense_rank
+    FROM sales AS s
+    JOIN books AS b ON b.id = s.book_id
+    WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+    ORDER BY s.region, s.copies DESC, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(`
-      SELECT copies,
-             ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
-             RANK()       OVER (ORDER BY copies DESC) AS rnk,
-             DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
-      FROM sales
-      ORDER BY copies DESC
+      SELECT s.region, b.title, s.copies,
+             row_number() OVER w AS row_number,
+             rank()       OVER w AS rank,
+             dense_rank() OVER w AS dense_rank
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+      ORDER BY s.region, s.copies DESC, b.title
     `);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute("""
-        SELECT copies,
-               ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
-               RANK()       OVER (ORDER BY copies DESC) AS rnk,
-               DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
-        FROM sales
-        ORDER BY copies DESC
+        SELECT s.region, b.title, s.copies,
+               row_number() OVER w AS row_number,
+               rank()       OVER w AS rank,
+               dense_rank() OVER w AS dense_rank
+        FROM sales AS s
+        JOIN books AS b ON b.id = s.book_id
+        WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+        ORDER BY s.region, s.copies DESC, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -126,23 +211,28 @@ These three ranking functions all order rows within a partition but differ in ho
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx, `
-      SELECT copies,
-             ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
-             RANK()       OVER (ORDER BY copies DESC) AS rnk,
-             DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
-      FROM sales
-      ORDER BY copies DESC`)
+      SELECT s.region, b.title, s.copies,
+             row_number() OVER w AS row_number,
+             rank()       OVER w AS rank,
+             dense_rank() OVER w AS dense_rank
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+      ORDER BY s.region, s.copies DESC, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT copies,
-                ROW_NUMBER() OVER (ORDER BY copies DESC) AS row_num,
-                RANK()       OVER (ORDER BY copies DESC) AS rnk,
-                DENSE_RANK() OVER (ORDER BY copies DESC) AS dense
-         FROM sales
-         ORDER BY copies DESC",
+        "SELECT s.region, b.title, s.copies,
+                row_number() OVER w AS row_number,
+                rank()       OVER w AS rank,
+                dense_rank() OVER w AS dense_rank
+         FROM sales AS s
+         JOIN books AS b ON b.id = s.book_id
+         WINDOW w AS (PARTITION BY s.region ORDER BY s.copies DESC)
+         ORDER BY s.region, s.copies DESC, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -151,48 +241,104 @@ These three ranking functions all order rows within a partition but differ in ho
 </Tabs>
 
 ```text
- copies | row_num | rnk | dense
---------+---------+-----+-------
-    900 |       1 |   1 |     1
-    400 |       2 |   2 |     2
-    400 |       3 |   2 |     2
-    200 |       4 |   4 |     3
-    150 |       5 |   5 |     4
-    50  |       6 |   6 |     5
+ region |       title       | copies | row_number | rank | dense_rank 
+--------+-------------------+--------+------------+------+------------
+ East   | The Glass Orchard |    900 |          1 |    1 |          1
+ East   | Tidal Notes       |    200 |          2 |    2 |          2
+ East   | Quiet Harbors     |     50 |          3 |    3 |          3
+ West   | Quiet Harbors     |    400 |          2 |    1 |          1
+ West   | Tidal Notes       |    400 |          1 |    1 |          1
+ West   | The Glass Orchard |    150 |          3 |    3 |          2
+(6 rows)
 ```
 
-Look at the two rows of 400. `ROW_NUMBER` calls them 2 and 3, `RANK` calls both 2 and then jumps to 4, while `DENSE_RANK` calls both 2 and continues at 3. Pick the one whose tie behavior matches what you need.
+Look at the West tie (400 and 400):
 
-## Running totals with SUM() OVER
+- `row_number()` never repeats: 1 and 2. **Which** of the two tied rows gets 1 is not defined by the query. Here Tidal Notes got 1 and Quiet Harbors 2; a different plan could swap them. Add a tiebreaker to the window `ORDER BY` whenever the number must be reproducible.
+- `rank()` gives both the same rank (1) and then skips: the next is 3.
+- `dense_rank()` gives both 1 and does not skip: the next is 2.
 
-Add `ORDER BY` inside `OVER` to an aggregate and it becomes a running calculation: each row sees itself plus everything before it in the order. This is the standard way to produce a running total.
+Driver output for the queries in this lesson, each run once (`pg` returns `bigint` results such as `row_number()` and `sum(int)` as strings):
+
+```text
+$ (each snippet run once against the dataset above)
+[rank]     Python (psycopg 3.3.6): [('East', 'The Glass Orchard', 900, 1, 1, 1), ('East', 'Tidal Notes', 200, 2, 2, 2), ('East', 'Quiet Harbors', 50, 3, 3, 3), ('West', 'Quiet Harbors', 400, 2, 1, 1), ('West', 'Tidal Notes', 400, 1, 1, 1), ('West', 'The Glass Orchard', 150, 3, 3, 2)]
+[rank]     Node.js (pg 8.23.0), first West row: { region: 'West', title: 'Quiet Harbors', copies: 400, row_number: '2', rank: '1', dense_rank: '1' }
+[running]  Python:                 [('East', 'The Glass Orchard', 900, 900), ('East', 'Tidal Notes', 200, 1100), ('East', 'Quiet Harbors', 50, 1150), ('West', 'Quiet Harbors', 400, 400), ('West', 'Tidal Notes', 400, 800), ('West', 'The Glass Orchard', 150, 950)]
+[running]  Node.js, first West row: { region: 'West', title: 'Quiet Harbors', copies: 400, running_rows: '400' }
+[all]      Go (pgx v5.11.0) and Rust (sqlx 0.9.0) returned the same rows as Python for all three queries
+```
+
+## Running totals and the default frame
+
+A window with an `ORDER BY` has a **frame**: the subset of the partition the function sees. If you do not write one, the default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which includes every *peer* of the current row, meaning all rows that sort equal to it. With unique sort values that behaves like "everything up to this row". With a tie it does not:
+
+```sql
+-- sql/running-total-default.sql
+-- default frame: RANGE ... CURRENT ROW, which includes all peers (rows with an equal ORDER BY value)
+SELECT s.region, b.title, s.copies,
+       sum(s.copies) OVER (PARTITION BY s.region ORDER BY s.copies DESC) AS running_default
+FROM sales AS s
+JOIN books AS b ON b.id = s.book_id
+ORDER BY s.region, s.copies DESC, b.title;
+```
+
+```text
+ region |       title       | copies | running_default 
+--------+-------------------+--------+-----------------
+ East   | The Glass Orchard |    900 |             900
+ East   | Tidal Notes       |    200 |            1100
+ East   | Quiet Harbors     |     50 |            1150
+ West   | Quiet Harbors     |    400 |             800
+ West   | Tidal Notes       |    400 |             800
+ West   | The Glass Orchard |    150 |             950
+(6 rows)
+```
+
+West shows **800, 800, 950**, not 400, 800, 950: both 400 rows are peers, so each already "sees" the other. That is a wrong running total, silently. Spell the frame out with `ROWS`, and add a tiebreaker so the order is defined:
 
 <Tabs syncKey="lang">
   <TabItem label="psql">
     ```sql
-    SELECT region, copies,
-           SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-    FROM sales
-    ORDER BY region, copies DESC;
+    -- sql/running-total-rows.sql
+    SELECT s.region, b.title, s.copies,
+           sum(s.copies) OVER (
+             PARTITION BY s.region
+             ORDER BY s.copies DESC, b.title
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+           ) AS running_rows
+    FROM sales AS s
+    JOIN books AS b ON b.id = s.book_id
+    ORDER BY s.region, s.copies DESC, b.title;
     ```
   </TabItem>
   <TabItem label="Node.js">
     ```js
     const res = await pool.query(`
-      SELECT region, copies,
-             SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-      FROM sales
-      ORDER BY region, copies DESC
+      SELECT s.region, b.title, s.copies,
+             sum(s.copies) OVER (
+               PARTITION BY s.region
+               ORDER BY s.copies DESC, b.title
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS running_rows
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      ORDER BY s.region, s.copies DESC, b.title
     `);
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
     cur.execute("""
-        SELECT region, copies,
-               SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-        FROM sales
-        ORDER BY region, copies DESC
+        SELECT s.region, b.title, s.copies,
+               sum(s.copies) OVER (
+                 PARTITION BY s.region
+                 ORDER BY s.copies DESC, b.title
+                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+               ) AS running_rows
+        FROM sales AS s
+        JOIN books AS b ON b.id = s.book_id
+        ORDER BY s.region, s.copies DESC, b.title
     """)
     rows = cur.fetchall()
     ```
@@ -200,19 +346,30 @@ Add `ORDER BY` inside `OVER` to an aggregate and it becomes a running calculatio
   <TabItem label="Go">
     ```go
     rows, err := conn.Query(ctx, `
-      SELECT region, copies,
-             SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-      FROM sales
-      ORDER BY region, copies DESC`)
+      SELECT s.region, b.title, s.copies,
+             sum(s.copies) OVER (
+               PARTITION BY s.region
+               ORDER BY s.copies DESC, b.title
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS running_rows
+      FROM sales AS s
+      JOIN books AS b ON b.id = s.book_id
+      ORDER BY s.region, s.copies DESC, b.title`)
+    defer rows.Close()
     ```
   </TabItem>
   <TabItem label="Rust">
     ```rust
     let rows = sqlx::query(
-        "SELECT region, copies,
-                SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running
-         FROM sales
-         ORDER BY region, copies DESC",
+        "SELECT s.region, b.title, s.copies,
+                sum(s.copies) OVER (
+                  PARTITION BY s.region
+                  ORDER BY s.copies DESC, b.title
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS running_rows
+         FROM sales AS s
+         JOIN books AS b ON b.id = s.book_id
+         ORDER BY s.region, s.copies DESC, b.title",
     )
     .fetch_all(&pool)
     .await?;
@@ -221,90 +378,428 @@ Add `ORDER BY` inside `OVER` to an aggregate and it becomes a running calculatio
 </Tabs>
 
 ```text
- region | copies | running
---------+--------+---------
- East   |    900 |     900
- East   |    200 |    1100
- West   |    400 |     400
- West   |    350 |     750
+ region |       title       | copies | running_rows 
+--------+-------------------+--------+--------------
+ East   | The Glass Orchard |    900 |          900
+ East   | Tidal Notes       |    200 |         1100
+ East   | Quiet Harbors     |     50 |         1150
+ West   | Quiet Harbors     |    400 |          400
+ West   | Tidal Notes       |    400 |          800
+ West   | The Glass Orchard |    150 |          950
+(6 rows)
 ```
 
-The `running` column accumulates down each region and resets at the partition boundary. Without the `ORDER BY` inside `OVER`, `SUM(copies) OVER (PARTITION BY region)` would instead repeat the region's grand total on every row — a useful trick for showing each sale next to its region total.
+`ROWS`, `RANGE` and `GROUPS` measure the frame differently. On the six sales sorted by `copies`, a one-step-back frame gives three different sums for the same rows: `ROWS` counts physical rows, `RANGE` counts by value distance (here: rows whose `copies` is within 100 below the current one), `GROUPS` counts groups of peers ([docs](https://www.postgresql.org/docs/18/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS)):
+
+```sql
+-- sql/frames.sql
+-- the same 6 rows, ordered by copies, under the three frame modes
+SELECT copies,
+       sum(copies) OVER (ORDER BY copies ROWS   BETWEEN 1 PRECEDING AND CURRENT ROW) AS rows_frame,
+       sum(copies) OVER (ORDER BY copies RANGE  BETWEEN 100 PRECEDING AND CURRENT ROW) AS range_frame,
+       sum(copies) OVER (ORDER BY copies GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) AS groups_frame
+FROM sales
+ORDER BY copies, id;
+```
+
+```text
+ copies | rows_frame | range_frame | groups_frame 
+--------+------------+-------------+--------------
+     50 |         50 |          50 |           50
+    150 |        200 |         200 |          200
+    200 |        350 |         350 |          350
+    400 |        600 |         800 |         1000
+    400 |        800 |         800 |         1000
+    900 |       1300 |         900 |         1700
+(6 rows)
+```
+
+### first_value and last_value
+
+The same default frame catches `last_value`. With `ORDER BY` and no frame, the frame stops at the current row (and its peers), so "the last value" is just the current one:
+
+```sql
+-- sql/last-value-trap.sql
+SELECT region, copies,
+       last_value(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS last_default,
+       last_value(copies) OVER (
+         PARTITION BY region ORDER BY copies DESC
+         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+       ) AS last_real,
+       first_value(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS first_val
+FROM sales
+ORDER BY region, copies DESC, id;
+```
+
+```text
+ region | copies | last_default | last_real | first_val 
+--------+--------+--------------+-----------+-----------
+ East   |    900 |          900 |        50 |       900
+ East   |    200 |          200 |        50 |       900
+ East   |     50 |           50 |        50 |       900
+ West   |    400 |          400 |       150 |       400
+ West   |    400 |          400 |       150 |       400
+ West   |    150 |          150 |       150 |       400
+(6 rows)
+```
+
+`last_default` equals `copies` on every row. `last_real`, with `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`, is really the smallest sale of the region (50 and 150).
+
+## LAG, LEAD, NTILE and friends
+
+`lag` and `lead` read a column from the previous and next row of the window: no self-join needed. The first and last rows have nothing to read, so they get `NULL`:
+
+```sql
+-- sql/lag-lead.sql
+SELECT title, published,
+       lag(title)  OVER (ORDER BY published) AS previous_title,
+       lead(title) OVER (ORDER BY published) AS next_title,
+       published - lag(published) OVER (ORDER BY published) AS years_since_previous
+FROM books
+ORDER BY published;
+```
+
+```text
+       title       | published |  previous_title   |    next_title     | years_since_previous 
+-------------------+-----------+-------------------+-------------------+----------------------
+ Quiet Harbors     |      2003 |                   | Tidal Notes       |                     
+ Tidal Notes       |      2011 | Quiet Harbors     | The Glass Orchard |                    8
+ The Glass Orchard |      2018 | Tidal Notes       | Unlinked Draft    |                    7
+ Unlinked Draft    |      2020 | The Glass Orchard |                   |                    2
+(4 rows)
+```
+
+`ntile(n)` cuts the ordered rows into `n` buckets, and `percent_rank()` gives a row's relative position (0 for the first, 1 for the last):
+
+```sql
+-- sql/ntile-percent.sql
+SELECT title, copies_sold,
+       ntile(2)       OVER (ORDER BY copies_sold DESC) AS half,
+       percent_rank() OVER (ORDER BY copies_sold)      AS pct_rank
+FROM books
+ORDER BY copies_sold DESC;
+```
+
+```text
+       title       | copies_sold | half |      pct_rank      
+-------------------+-------------+------+--------------------
+ The Glass Orchard |        1250 |    1 |                  1
+ Tidal Notes       |         600 |    1 | 0.6666666666666666
+ Quiet Harbors     |         450 |    2 | 0.3333333333333333
+ Unlinked Draft    |           0 |    2 |                  0
+(4 rows)
+```
 
 ## Windows keep rows; GROUP BY collapses them
 
-The picture below contrasts the two. A `GROUP BY region` would return two rows, one per region. A window function partitions the same rows but returns all of them, each carrying its per-partition value.
+A window function is evaluated after `WHERE`, `GROUP BY` and `HAVING`, just before `ORDER BY` and `LIMIT`. That has a consequence: you cannot filter on a window function in `WHERE`, because at that point it does not exist yet:
 
-export const windowDiagram = `flowchart TD
-  R[All sales rows] --> P1[Partition East]
-  R --> P2[Partition West]
-  P1 --> E1[East row keeps itself plus its window value]
-  P1 --> E2[East row keeps itself plus its window value]
-  P2 --> W1[West row keeps itself plus its window value]
-  P2 --> W2[West row keeps itself plus its window value]`;
+```sql
+-- @expect-error 42P20
+SELECT region, copies FROM sales
+WHERE rank() OVER (PARTITION BY region ORDER BY copies DESC) = 1;
+```
 
-<Mermaid code={windowDiagram} title="A window partitions rows but keeps every one" />
+```text
+ERROR:  window functions are not allowed in WHERE
+LINE 2: WHERE rank() OVER (PARTITION BY region ORDER BY copies DESC)...
+              ^
+```
+
+To filter on a rank (the classic "top one per group"), compute it in a subquery or CTE, then filter outside:
+
+```sql
+-- sql/top-n-per-group.sql
+SELECT region, title, copies
+FROM (
+  SELECT s.region, b.title, s.copies,
+         row_number() OVER (PARTITION BY s.region ORDER BY s.copies DESC, b.title) AS rn
+  FROM sales s JOIN books b ON b.id = s.book_id
+) AS ranked
+WHERE rn = 1
+ORDER BY region;
+```
+
+```text
+ region |       title       | copies 
+--------+-------------------+--------
+ East   | The Glass Orchard |    900
+ West   | Quiet Harbors     |    400
+(2 rows)
+```
+
+## What the plan looks like
+
+Real plans need real rows. This section builds `big_sales` with 500 000 rows in 5 regions:
+
+```sql
+-- sql/window-plans-setup.sql
+CREATE TABLE big_sales (
+  id     int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  region text NOT NULL,
+  copies int NOT NULL
+);
+INSERT INTO big_sales (region, copies)
+SELECT (ARRAY['East', 'West', 'North', 'South', 'Central'])[1 + g % 5], (g::bigint * 7919 % 100003)::int
+FROM generate_series(1, 500000) AS g;
+ANALYZE big_sales;
+```
+
+```text
+CREATE TABLE
+INSERT 0 500000
+ANALYZE
+```
+
+```sql
+-- sql/window-plan.sql
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, region, copies,
+       row_number() OVER (PARTITION BY region ORDER BY copies DESC) AS rn
+FROM big_sales;
+```
+
+```text
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ WindowAgg (actual time=376.569..545.433 rows=500000.00 loops=1)
+   Window: w1 AS (PARTITION BY region ORDER BY copies ROWS UNBOUNDED PRECEDING)
+   Storage: Memory  Maximum Storage: 17kB
+   Buffers: shared hit=2709, temp read=1591 written=1597
+   ->  Sort (actual time=376.558..463.592 rows=500000.00 loops=1)
+         Sort Key: region, copies DESC
+         Sort Method: external merge  Disk: 12728kB
+         Buffers: shared hit=2709, temp read=1591 written=1597
+         ->  Seq Scan on big_sales (actual time=0.010..32.729 rows=500000.00 loops=1)
+               Buffers: shared hit=2703
+ Planning:
+   Buffers: shared hit=85
+ Planning Time: 0.272 ms
+ Execution Time: 561.400 ms
+(14 rows)
+```
+
+A window function is a `WindowAgg` node fed by a `Sort` on `(region, copies DESC)`: the sort is the price of `PARTITION BY ... ORDER BY`, and here it dominates (the `Sort` node accounts for about 460 ms of the 560 ms; `Sort Method: external merge  Disk: 12728kB` because the 12 MB sort does not fit in the default `work_mem` of 4 MB, and the `temp read/written` buffers confirm it). Raising `work_mem` for one transaction removes the spill:
+
+```sql
+-- sql/window-plan-work-mem.sql
+BEGIN;
+SET LOCAL work_mem = '64MB';
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, region, copies,
+       row_number() OVER (PARTITION BY region ORDER BY copies DESC) AS rn
+FROM big_sales;
+ROLLBACK;
+```
+
+```text
+BEGIN
+SET
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ WindowAgg (actual time=453.913..560.648 rows=500000.00 loops=1)
+   Window: w1 AS (PARTITION BY region ORDER BY copies ROWS UNBOUNDED PRECEDING)
+   Storage: Memory  Maximum Storage: 17kB
+   Buffers: shared hit=2709
+   ->  Sort (actual time=453.899..478.110 rows=500000.00 loops=1)
+         Sort Key: region, copies DESC
+         Sort Method: quicksort  Memory: 27914kB
+         Buffers: shared hit=2709
+         ->  Seq Scan on big_sales (actual time=0.009..31.541 rows=500000.00 loops=1)
+               Buffers: shared hit=2703
+ Planning:
+   Buffers: shared hit=85
+ Planning Time: 0.232 ms
+ Execution Time: 576.866 ms
+(14 rows)
+
+ROLLBACK
+```
+
+It became `quicksort  Memory: 27914kB` and no temp buffers, and it was **not faster** on this Mac (579 ms against 560 ms, single runs, within noise): sorting half a million rows dominates either way. An index on `(region, copies DESC)` could supply the order and remove the sort; the indexes module covers that.
+
+When you only want the top rows of each partition, PostgreSQL 15+ can stop early. The `WHERE rn <= 3` on the outside appears as a `Run Condition` on the `WindowAgg`, and the node emits 15 rows (3 per region) instead of 500 000:
+
+```sql
+-- sql/window-plan-top3.sql
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT * FROM (
+  SELECT id, region, copies,
+         row_number() OVER (PARTITION BY region ORDER BY copies DESC) AS rn
+  FROM big_sales
+) AS ranked
+WHERE rn <= 3;
+```
+
+```text
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ WindowAgg (actual time=376.753..488.553 rows=15.00 loops=1)
+   Window: w1 AS (PARTITION BY big_sales.region ORDER BY big_sales.copies ROWS UNBOUNDED PRECEDING)
+   Run Condition: (row_number() OVER w1 <= 3)
+   Storage: Memory  Maximum Storage: 17kB
+   Buffers: shared hit=2709, temp read=1591 written=1597
+   ->  Sort (actual time=376.737..463.120 rows=500000.00 loops=1)
+         Sort Key: big_sales.region, big_sales.copies DESC
+         Sort Method: external merge  Disk: 12728kB
+         Buffers: shared hit=2709, temp read=1591 written=1597
+         ->  Seq Scan on big_sales (actual time=0.008..31.975 rows=500000.00 loops=1)
+               Buffers: shared hit=2703
+ Planning:
+   Buffers: shared hit=89
+ Planning Time: 0.244 ms
+ Execution Time: 489.599 ms
+(15 rows)
+```
+
+The sort still has to read everything, but nothing downstream sees the other 499 985 rows.
+
+## Reading AI-generated code
+
+An assistant is asked for a running total of copies per region, biggest sale first, and writes the version every tutorial writes:
+
+<SpotTheBug lang="sql" code={`-- AI comment: "running total of copies per region, biggest sale first"
+SELECT region, copies,
+       SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running_total
+FROM sales
+ORDER BY region, copies DESC;`}>
+
+It looks right, and East is right. West is wrong: with the default `RANGE` frame the two 400 rows are peers, so both show **800** and the running total never passes through 400. Nothing errors:
+
+```sql
+-- sql/stb-wrong.sql
+SELECT region, copies,
+       SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC) AS running_total
+FROM sales
+ORDER BY region, copies DESC;
+```
+
+```text
+ region | copies | running_total 
+--------+--------+---------------
+ East   |    900 |           900
+ East   |    200 |          1100
+ East   |     50 |          1150
+ West   |    400 |           800
+ West   |    400 |           800
+ West   |    150 |           950
+(6 rows)
+```
+
+Two changes fix it: a tiebreaker in `ORDER BY` so the order is total, and an explicit `ROWS` frame so each row sees only itself and the rows before it.
+
+```sql
+-- sql/stb-fixed.sql
+SELECT region, copies,
+       SUM(copies) OVER (
+         PARTITION BY region
+         ORDER BY copies DESC, id
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS running_total
+FROM sales
+ORDER BY region, copies DESC, id;
+```
+
+```text
+ region | copies | running_total 
+--------+--------+---------------
+ East   |    900 |           900
+ East   |    200 |          1100
+ East   |     50 |          1150
+ West   |    400 |           400
+ West   |    400 |           800
+ West   |    150 |           950
+(6 rows)
+```
+
+</SpotTheBug>
+
+## Mental Model
+
+A window function computes a value for each row by looking at a *frame* of rows around it, then puts the value back next to that row. Three settings define what it sees: `PARTITION BY` (which rows are even related), `ORDER BY` (in what order), and the frame (how far to look inside that order). The frame has an implicit default, and that default is `RANGE ... CURRENT ROW`, which includes peers. Whenever a wrong number comes out of a window function, the first suspect is the frame.
 
 ## Tips / gotchas
 
-- A window function never reduces the number of rows. If you want one row per group, use `GROUP BY`; if you want every row plus a per-group figure, use a window.
-- `PARTITION BY` is optional. Leave it out and the whole result is one partition, so a ranking runs across all rows.
-- The `ORDER BY` inside `OVER` controls the window frame and is independent of the query's final `ORDER BY`. Add the outer one too if you care about the order rows are returned in.
-- You cannot use a window function in a `WHERE` clause, because windows are computed after `WHERE`. Wrap the query in a CTE or subquery and filter on the computed column outside.
-- Choose `ROW_NUMBER` for a strict sequence, `RANK` when ties should share a rank and leave gaps, and `DENSE_RANK` when ties share a rank without gaps.
+- The window function's `OVER` is what makes it a window function: `sum(x)` alone is an aggregate, `sum(x) OVER (...)` is a window.
+- You cannot use a window function in `WHERE` (`42P20`), `GROUP BY` or `HAVING`. Wrap the query in a subquery or CTE and filter outside.
+- With `ORDER BY` and no explicit frame, the frame is `RANGE ... CURRENT ROW` (peers included). Write `ROWS BETWEEN ...` for running totals and `last_value`.
+- `row_number()` on ties is arbitrary; add a tiebreaker to the window `ORDER BY` if you need stable numbering.
+- `PARTITION BY ... ORDER BY` costs a sort. Check `EXPLAIN` on big tables, watch for `external merge` spills, and see whether an index can provide the order.
 
-<Callout title="The mental switch">
-When a request says "for each row, also show its rank / running total / share of the group", that phrase "for each row" is your cue: you need a window function, not a `GROUP BY`. Keep the rows, add a column.
+<Callout title="Window or GROUP BY?">
+Need one row per group? `GROUP BY`. Need every row plus something computed across a group (rank, running total, share of the group, previous row)? A window function. Need both? Aggregate first in a subquery and window over the result.
 </Callout>
 
 ## Trade-offs
 
 | Option | Benefit | Cost |
 |---------|---------|------|
-| Window function (`ROW_NUMBER`, `RANK`, running total) | Computed in one query, no messy self-join needed | Must get `PARTITION BY`/`ORDER BY` right, or the result is silently wrong |
-| Self-join or subquery instead of a window function | Works on a database that lacks window functions | Longer to write, usually slower, and harder to read |
-| Compute rank/running totals in application code | Free to change the logic yourself | Requires pulling every row to the backend first; does not scale for large results |
+| Window function | Keeps every row; no self-join for rank, running total, lag | Needs a sort per distinct `PARTITION BY`/`ORDER BY` (the sort is about 460 ms of 560 ms above); default frame surprises |
+| `GROUP BY` + join back | Works everywhere, explicit | Two passes and a join to reattach the totals |
+| Correlated subquery per row | Simple to read for one number | Re-runs per row (see the subqueries lesson) |
+| Application-side ranking | Flexible | Pulls all rows over the network |
 
-## Common mistakes
+## Common Misconceptions
 
-- **Forgetting `PARTITION BY`** — if omitted, the entire result becomes one partition, so the rank or running total runs across everything instead of restarting per group as intended.
-- **Confusing `RANK()`, `DENSE_RANK()`, and `ROW_NUMBER()`** — `RANK()` leaves gaps after ties, `DENSE_RANK()` does not leave gaps, and `ROW_NUMBER()` always gives unique numbers even for tied values. Pick the one that matches the behavior you actually want.
-- **Not understanding query processing order** — window functions run *after* `GROUP BY`/aggregation in the logical query order, so you cannot use a window function directly in `WHERE`. Wrap it in a subquery or CTE and filter in the outer layer instead.
+- **"SUM() OVER (ORDER BY x) is a row-by-row running total."** With duplicates in `x` it is a running total over peers: 800, 800, 950 above.
+- **"last_value gives the last row of the partition."** Only with a frame that reaches the end. By default it returns the current row.
+- **"row_number() breaks ties in a stable way."** The tie order is undefined unless you add a tiebreaker.
+- **"Window functions are free."** Each distinct window needs a sort; the 500 000-row example spilled to disk at the default `work_mem`.
+- **"I can filter on a rank in WHERE."** It is evaluated after `WHERE`; use a subquery or CTE.
 
-> 💡 Real-world example
->
-> **Activity feeds and per-channel leaderboards** — ranking the most active users within each group uses `ROW_NUMBER()`/`RANK()` with `PARTITION BY` directly in SQL, instead of pulling every row to rank it in code.
->
-> **Contribution leaderboards** — a per-project leaderboard or summary report computes rank with a window function in the database, so one query returns both the detail rows and their rank without a self-join.
-
-export const quizWindows = [
+export const quizWindow = [
   {
-    q: 'How does a window function differ from GROUP BY?',
+    q: 'What is the main difference between a window function and GROUP BY?',
     options: [
-      'It collapses rows into one summary row',
-      'It computes a value per row while keeping every row in the output',
-      'It can only count rows',
-      'It requires a foreign key',
+      'Window functions are faster',
+      'Window functions keep every input row; GROUP BY collapses them',
+      'GROUP BY keeps every row',
+      'There is no difference',
     ],
     answer: 1,
+    explain: 'A window function adds a value to each row (a region total next to every sale). GROUP BY returns one row per group and the detail is gone.',
   },
   {
-    q: 'For two tied values, which function gives them the same number WITHOUT leaving a gap afterward?',
-    options: ['ROW_NUMBER', 'RANK', 'DENSE_RANK', 'COUNT'],
-    answer: 2,
+    q: 'West has two sales of 400 and one of 150. Which function gives the values 1, 1, 3 for them?',
+    options: ['row_number()', 'rank()', 'dense_rank()', 'ntile(3)'],
+    answer: 1,
+    explain: 'rank() gives ties the same rank and then skips (1, 1, 3). dense_rank() gives 1, 1, 2 and row_number() 1, 2, 3.',
   },
   {
-    q: 'What does PARTITION BY region inside an OVER clause do?',
+    q: '`SUM(copies) OVER (PARTITION BY region ORDER BY copies DESC)` returns 800, 800, 950 for West (400, 400, 150). Why not 400, 800, 950?',
     options: [
-      'Filters out rows from other regions',
-      'Restarts the window calculation separately for each region',
-      'Sorts the final result by region',
-      'Deletes duplicate regions',
+      'A bug in PostgreSQL',
+      'The default frame is RANGE ... CURRENT ROW, so tied peers are included together',
+      'PARTITION BY sums the whole partition',
+      'DESC changes the frame',
     ],
     answer: 1,
+    explain: 'The two 400 rows are peers, so each frame includes both. ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW (plus a tiebreaker) gives 400, 800, 950.',
+  },
+  {
+    q: 'Why does `WHERE rank() OVER (...) = 1` fail with SQLSTATE 42P20?',
+    options: [
+      'rank() does not exist',
+      'Window functions are evaluated after WHERE, so they are not allowed there',
+      'It needs a semicolon',
+      'It works only with HAVING',
+    ],
+    answer: 1,
+    explain: 'The error is "window functions are not allowed in WHERE". Compute the rank in a subquery or CTE and filter in the outer query.',
+  },
+  {
+    q: 'In the 500 000-row plan, what does `Sort Method: external merge  Disk: 12728kB` tell you?',
+    options: [
+      'The table is corrupted',
+      'The sort did not fit in work_mem (default 4 MB) and spilled to temp files',
+      'An index was used',
+      'The query ran in parallel',
+    ],
+    answer: 1,
+    explain: 'With work_mem raised to 64MB the same sort was `quicksort Memory: 27914kB`, with no temp buffers, but it was not faster on this Mac.',
   },
 ];
 
-<Quiz client:visible id="joins-and-relationships/window-functions" questions={quizWindows} />
+<Quiz client:visible id="joins-and-relationships/window-functions" questions={quizWindow} />
 
 <ProgressTracker client:visible id="joins-and-relationships/window-functions" />
